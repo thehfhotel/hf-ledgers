@@ -1,0 +1,42 @@
+services:
+  app:
+    image: ghcr.io/thehfhotel/income-ledger:${IMAGE_TAG:-latest}
+    container_name: income-ledger
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-4040}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - TZ=${TZ:-Asia/Bangkok}
+      - ACCESS_TEAM_DOMAIN=${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}
+      - ACCESS_AUD=${ACCESS_AUD:-}
+      - MANAGER_EMAILS=${MANAGER_EMAILS:-}
+      - DB_PATH=/app/data/ledger.db
+    volumes:
+      - ledger_data:/app/data
+    networks:
+      - default
+      - shared-nginx
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1.0'
+        reservations:
+          memory: 64M
+
+volumes:
+  ledger_data:
+    name: ledger_data
+
+networks:
+  shared-nginx:
+    external: true
+    name: shared-nginx

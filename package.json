@@ -1,0 +1,27 @@
+{
+  "name": "income-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server/server.ts",
+    "build": "bun scripts/build.ts",
+    "start": "NODE_ENV=production bun src/server/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "elysia": "^1.4.13",
+    "html2canvas-pro": "^2.0.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.16",
+    "@types/bun": "latest",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "bun-plugin-tailwind": "^0.1.2",
+    "tailwindcss": "^4.1.16",
+    "typescript": "^5.9.3"
+  }
+}

@@ -34,7 +34,7 @@ type Route =
   | { kind: "day"; property: Property; date: string }
   | { kind: "history"; property: Property }
   | { kind: "categories"; property: Property }
-  | { kind: "report"; property: Property; date: string };
+  | { kind: "report"; property: Property | "demo"; date: string };
 
 function homeRoute(): Extract<Route, { kind: "day" }> {
   return { kind: "day", property: savedProperty(), date: todayBangkok() };
@@ -42,6 +42,16 @@ function homeRoute(): Extract<Route, { kind: "day" }> {
 
 function parseRoute(pathname: string): Route {
   const parts = pathname.replace(/\/$/, "").split("/").filter(Boolean);
+
+  // Special case: /demo/report/:date renders ReportPage's fixtures.ts demo
+  // data with zero server dependency (see ReportPage.tsx's "demo" property
+  // handling) — headless visual-verification only, never a real navigable
+  // property, and never persisted as one (see the localStorage effect
+  // below).
+  if (parts[0] === "demo" && parts[1] === "report" && parts[2]) {
+    return { kind: "report", property: "demo", date: parts[2] };
+  }
+
   const property = isProperty(parts[0]) ? parts[0] : undefined;
   if (!property) return homeRoute();
 
@@ -87,7 +97,13 @@ export function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  // Header chrome (chips, nav links) always needs a real Property, even on
+  // the demo report route — "demo" itself is never a navigable property and
+  // never gets persisted as the saved one.
+  const displayProperty: Property = route.property === "demo" ? "hf" : route.property;
+
   useEffect(() => {
+    if (route.property === "demo") return;
     try {
       localStorage.setItem(PROPERTY_STORAGE_KEY, route.property);
     } catch {
@@ -97,10 +113,13 @@ export function App() {
 
   // "/" (and any unrecognized path) redirects to {savedProperty|hf}/day/
   // {todayBangkok()} as a real navigation, so the URL bar reflects reality
-  // and back/forward behaves correctly.
+  // and back/forward behaves correctly. /demo/report/:date is recognized
+  // (not "unrecognized") — it's parseRoute's headless-verification special
+  // case — so it must NOT be swept into this redirect.
   useEffect(() => {
     const parts = location.pathname.replace(/\/$/, "").split("/").filter(Boolean);
-    if (!isProperty(parts[0])) {
+    const isDemoReport = parts[0] === "demo" && parts[1] === "report" && Boolean(parts[2]);
+    if (!isProperty(parts[0]) && !isDemoReport) {
       const home = homeRoute();
       navigate(`/${home.property}/day/${home.date}`);
     }
@@ -113,19 +132,19 @@ export function App() {
       key: "day",
       label: "สรุปวัน",
       active: route.kind === "day" || route.kind === "report",
-      path: `/${route.property}/day/${route.kind === "day" || route.kind === "report" ? route.date : todayBangkok()}`,
+      path: `/${displayProperty}/day/${route.kind === "day" || route.kind === "report" ? route.date : todayBangkok()}`,
     },
     {
       key: "history",
       label: "ประวัติ",
       active: route.kind === "history",
-      path: `/${route.property}/history`,
+      path: `/${displayProperty}/history`,
     },
     {
       key: "categories",
       label: "หมวดหมู่",
       active: route.kind === "categories",
-      path: `/${route.property}/categories`,
+      path: `/${displayProperty}/categories`,
     },
   ];
 
@@ -144,7 +163,7 @@ export function App() {
                 onClick={() => navigate(routeForProperty(route, chip.id))}
                 className={
                   "shrink-0 rounded-full border px-3 py-1 text-xs font-medium transition " +
-                  (route.property === chip.id
+                  (displayProperty === chip.id
                     ? "border-gold-500 bg-gold-500 text-brand-900"
                     : "border-brand-600 text-brand-100 hover:bg-brand-700")
                 }

@@ -97,7 +97,6 @@ jobs:
           IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
           ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
-          MANAGER_EMAILS: ${{ secrets.MANAGER_EMAILS }}
           PORTAL_DIRECTORY_TOKEN: ${{ secrets.PORTAL_DIRECTORY_TOKEN }}
           ANALYTICS_TOKEN: ${{ secrets.ANALYTICS_TOKEN }}
         run: |
@@ -111,7 +110,6 @@ jobs:
             printf 'HOST_PORT=%s\n' "4040"
             printf 'ACCESS_TEAM_DOMAIN=%s\n' "${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}"
             printf 'ACCESS_AUD=%s\n' "${ACCESS_AUD:-}"
-            printf 'MANAGER_EMAILS=%s\n' "${MANAGER_EMAILS:-}"
             # Manager list derived live from the HF Managers tier via the portal
             # directory (directory-client.ts). URL is server-to-server over the
             # shared-nginx docker network - not a secret; the token is.

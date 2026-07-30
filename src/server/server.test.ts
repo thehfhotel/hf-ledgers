@@ -9,11 +9,15 @@ process.env.NODE_ENV = "development";
 process.env.DEV_USER = "tester@thehfhotel.org";
 process.env.PORT = "0"; // let the OS pick a free port — avoids clashing with `bun run dev`
 
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
 import type { Category, CategoryKey, Property, Tender } from "../shared/types.ts";
+import type { PrefillCandidate } from "./pms-prefill.ts";
 
 const { api } = await import("./server.ts");
+// server.ts already imported pms-prefill.ts above, so this re-import just
+// reads the cached module — same _internal pattern as analytics-push.test.ts.
+const { _internal: pmsPrefillInternal } = await import("./pms-prefill.ts");
 
 const BASE = "http://localhost";
 
@@ -691,5 +695,226 @@ describe("move a booking day to the other property", () => {
       const sourceBookings = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
       expect(sourceBookings.body.lines).toHaveLength(0);
     });
+  });
+});
+
+describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
+  // "hf" is PROPERTY's env URL per the locked env-var mapping
+  // (PMS_DB_URL_HF / PMS_DB_URL_HFVILLE) — see pms-prefill.ts / api.md.
+  function pmsCandidate(overrides: Partial<PrefillCandidate> = {}): PrefillCandidate {
+    return {
+      pmsRef: "R2608-0000",
+      bookingNo: "CH26-000000",
+      guestName: "ทดสอบ พีเอ็มเอส",
+      roomNo: "101",
+      roomCount: 1,
+      nights: 1,
+      grossRoomSatang: 100_000,
+      grossOtherSatang: 0,
+      depositSatang: 0,
+      cashSatang: 0,
+      webSatang: 0,
+      unplacedCreditSatang: 0,
+      unplacedTranSatang: 0,
+      isRefund: false,
+      isDeposit: false,
+      ...overrides,
+    };
+  }
+
+  // Every test starts from env unset; tests that need it configured set it
+  // themselves. Restoring to unset (rather than to whatever it was before
+  // the file ran, which is always undefined in this suite) keeps the 328
+  // pre-existing tests, which never touch this env var, unaffected either way.
+  afterEach(() => {
+    pmsPrefillInternal.setFetchDayPaymentsForTests(null);
+    delete process.env.PMS_DB_URL_HF;
+  });
+
+  test("503 when the property's PMS env URL is unset", async () => {
+    delete process.env.PMS_DB_URL_HF;
+    const res = await call("POST", `/${PROPERTY}/day/2026-08-01/pull-from-pms`);
+    expect(res.status).toBe(503);
+    expect((res.body as { error: string }).error).toBe("pms prefill not configured");
+  });
+
+  test("inserts two candidates: visible via GET bookings with correct seq continuation, tenders mapped, credit/transfer columns zero", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-08-02";
+
+    await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, { guestName: "จองด้วยมือก่อน", tenders: zeroTenders() });
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
+      pmsCandidate({
+        pmsRef: "R2608-0101",
+        bookingNo: "CH26-000101",
+        roomNo: "101",
+        cashSatang: 100_000,
+        depositSatang: 20_000,
+      }),
+      pmsCandidate({ pmsRef: "R2608-0102", bookingNo: "CH26-000102", roomNo: "102", webSatang: 75_000 }),
+    ]);
+
+    const pulled = await call<{ inserted: number; skipped: number; skippedRefunds: number; unplaced: unknown[] }>(
+      "POST",
+      `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+    );
+    expect(pulled.status).toBe(200);
+    expect(pulled.body.inserted).toBe(2);
+    expect(pulled.body.skipped).toBe(0);
+    expect(pulled.body.skippedRefunds).toBe(0);
+    expect(pulled.body.unplaced).toEqual([]);
+
+    const bookings = await call<{
+      lines: Array<{
+        seq: number;
+        bookingNo: string | null;
+        source: string;
+        draft: boolean;
+        tenders: Record<Tender, number>;
+      }>;
+    }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    expect(bookings.body.lines.map((l) => l.seq)).toEqual([1, 2, 3]);
+
+    const first = bookings.body.lines.find((l) => l.bookingNo === "CH26-000101")!;
+    expect(first.source).toBe("pms");
+    expect(first.draft).toBe(false);
+    expect(first.tenders.cash).toBe(100_000);
+    expect(first.tenders.deposit).toBe(20_000);
+    expect(first.tenders.credit_kbank).toBe(0);
+    expect(first.tenders.credit_icbc).toBe(0);
+    expect(first.tenders.transfer_kbank).toBe(0);
+    expect(first.tenders.transfer_icbc).toBe(0);
+    expect(first.tenders.other).toBe(0);
+
+    const second = bookings.body.lines.find((l) => l.bookingNo === "CH26-000102")!;
+    expect(second.tenders.web).toBe(75_000);
+    expect(second.tenders.credit_kbank).toBe(0);
+    expect(second.tenders.transfer_kbank).toBe(0);
+  });
+
+  test("pressing pull-from-pms twice is idempotent: the second press skips every candidate, no duplicate rows", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-08-03";
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
+      pmsCandidate({ pmsRef: "R2608-0201", bookingNo: "CH26-000201", cashSatang: 50_000 }),
+      pmsCandidate({ pmsRef: "R2608-0202", bookingNo: "CH26-000202", webSatang: 25_000 }),
+    ]);
+
+    const first = await call<{ inserted: number; skipped: number }>(
+      "POST",
+      `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+    );
+    expect(first.body.inserted).toBe(2);
+    expect(first.body.skipped).toBe(0);
+
+    const second = await call<{ inserted: number; skipped: number }>(
+      "POST",
+      `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+    );
+    expect(second.body.inserted).toBe(0);
+    expect(second.body.skipped).toBe(2);
+
+    const bookings = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    expect(bookings.body.lines).toHaveLength(2);
+  });
+
+  test("a refund candidate is skipped and counted, never inserted", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-08-04";
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
+      pmsCandidate({ pmsRef: "R2608-0301", bookingNo: "CH26-000301", cashSatang: 40_000 }),
+      pmsCandidate({ pmsRef: "R2608-0302", bookingNo: "CH26-000302", cashSatang: -10_000, isRefund: true }),
+    ]);
+
+    const pulled = await call<{ inserted: number; skipped: number; skippedRefunds: number }>(
+      "POST",
+      `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+    );
+    expect(pulled.body.inserted).toBe(1);
+    expect(pulled.body.skipped).toBe(0);
+    expect(pulled.body.skippedRefunds).toBe(1);
+
+    const bookings = await call<{ lines: Array<{ bookingNo: string | null }> }>(
+      "GET",
+      `/${PROPERTY}/day/${DATE}/bookings`,
+    );
+    expect(bookings.body.lines).toHaveLength(1);
+    expect(bookings.body.lines[0]?.bookingNo).toBe("CH26-000301");
+  });
+
+  test("unplaced lists every candidate with a nonzero unplaced credit/transfer amount", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-08-05";
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
+      pmsCandidate({
+        pmsRef: "R2608-0401",
+        bookingNo: "CH26-000401",
+        cashSatang: 10_000,
+        unplacedCreditSatang: 15_000,
+      }),
+      pmsCandidate({
+        pmsRef: "R2608-0402",
+        bookingNo: "CH26-000402",
+        webSatang: 5_000,
+        unplacedTranSatang: 8_000,
+      }),
+      pmsCandidate({ pmsRef: "R2608-0403", bookingNo: "CH26-000403", cashSatang: 1_000 }), // fully placed
+    ]);
+
+    const pulled = await call<{
+      unplaced: Array<{ pmsRef: string; bookingNo: string | null; creditSatang: number; tranSatang: number }>;
+    }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    expect(pulled.body.unplaced).toHaveLength(2);
+    expect(pulled.body.unplaced).toEqual(
+      expect.arrayContaining([
+        { pmsRef: "R2608-0401", bookingNo: "CH26-000401", creditSatang: 15_000, tranSatang: 0 },
+        { pmsRef: "R2608-0402", bookingNo: "CH26-000402", creditSatang: 0, tranSatang: 8_000 },
+      ]),
+    );
+  });
+
+  test("409 when the month is closed", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const MONTH = "2026-09";
+    const DATE = "2026-09-15";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [pmsCandidate({ pmsRef: "R2609-0001" })]);
+
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+    const res = await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    expect(res.status).toBe(409);
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+
+    const bookings = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    expect(bookings.body.lines).toHaveLength(0);
+  });
+
+  test("502 when the PMS fetch throws, and nothing is inserted", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-08-06";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => {
+      throw new Error("connection refused");
+    });
+
+    const res = await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    expect(res.status).toBe(502);
+    expect((res.body as { error: string }).error).toBe("connection refused");
+
+    const bookings = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    expect(bookings.body.lines).toHaveLength(0);
+  });
+
+  test("GET bookings exposes pmsPull as this property's capability flag", async () => {
+    const DATE = "2026-08-07";
+    delete process.env.PMS_DB_URL_HF;
+    const unconfigured = await call<{ pmsPull: boolean }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    expect(unconfigured.body.pmsPull).toBe(false);
+
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const configured = await call<{ pmsPull: boolean }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    expect(configured.body.pmsPull).toBe(true);
   });
 });

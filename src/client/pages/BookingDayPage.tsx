@@ -26,10 +26,12 @@ import {
   getDay,
   listBookingLines,
   moveBookingDay,
+  pullFromPms,
   putCashBlock,
   updateBookingLine,
   updateOtherIncomeItem,
   type BookingLineInput,
+  type PmsUnplacedTender,
 } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { AmountInput } from "../components/AmountInput.tsx";
@@ -68,6 +70,36 @@ function AmountInTextHint({ text, className = "" }: { text: string; className?: 
 }
 
 /**
+ * The ดึงข้อมูล button's result alert (docs/pms-prefill-plan.md's "UI"
+ * section): inserted/skipped counts, the skipped-refund count when it's
+ * non-zero, and — when the PMS reported credit/transfer amounts it could
+ * not place on a bank column (it never records the acquiring bank) — one
+ * line per payment for the operator to key in by hand.
+ */
+function formatPmsPullResult(result: {
+  inserted: number;
+  skipped: number;
+  skippedRefunds: number;
+  unplaced: PmsUnplacedTender[];
+}): string {
+  const lines = [`เพิ่มรายการจาก PMS แล้ว ${result.inserted} รายการ ข้ามไป ${result.skipped} รายการ (มีอยู่แล้ว)`];
+  if (result.skippedRefunds > 0) {
+    lines.push(`ข้ามรายการคืนเงิน ${result.skippedRefunds} รายการ (ไม่นำเข้ารายการติดลบ)`);
+  }
+  if (result.unplaced.length > 0) {
+    lines.push("", "รายการที่ยังไม่ได้ระบุธนาคาร:");
+    for (const row of result.unplaced) {
+      const parts: string[] = [];
+      if (row.creditSatang > 0) parts.push(`บัตรเครดิต ${formatSatang(row.creditSatang)} บาท`);
+      if (row.tranSatang > 0) parts.push(`เงินโอน ${formatSatang(row.tranSatang)} บาท`);
+      const label = row.bookingNo ?? row.pmsRef;
+      lines.push(`เลขที่ ${label}: ${parts.join(" / ")} — ยังไม่ได้ระบุธนาคาร กรอกในช่องธนาคารเอง`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
  * รายงานรายรับโรงแรมรายวัน — the per-booking half of the paper, rebuilt as
  * the office's spreadsheet (see components/BookingGrid.tsx for the grid
  * itself). Route /:property/bookings/:date. Mutations are optimistic with
@@ -87,6 +119,9 @@ export function BookingDayPage({ property, date }: Props) {
   const [lines, setLines] = useState<BookingLine[] | null>(null);
   const [daySheet, setDaySheet] = useState<DaySheet | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Capability flag from GET .../bookings (pmsConfigured for this property)
+  // — gates the ดึงข้อมูล button below. Demo mode never has it.
+  const [pmsPull, setPmsPull] = useState(false);
   // Rows created optimistically: temp id -> the in-flight POST, so an edit
   // landing before the server answers can wait for the real row (see
   // addBookingLine / commitLinePatch). Counter keeps same-millisecond temp
@@ -110,6 +145,7 @@ export function BookingDayPage({ property, date }: Props) {
         if (cancelled) return;
         setLines(bookingsRes.lines);
         setDaySheet(sheet);
+        setPmsPull(bookingsRes.pmsPull);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -132,18 +168,28 @@ export function BookingDayPage({ property, date }: Props) {
   const [moving, setMoving] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
 
+  // Re-fetch both the booking lines and the day sheet from the server and
+  // replace local state 1:1 — the same GET pair the initial load uses.
+  // Reused by the move-failure resync below and by the PMS pull's
+  // post-success refetch: new rows always come back through this path,
+  // never hand-built from a mutation's response.
+  async function refetchLinesAndSheet() {
+    const [bookingsRes, sheet] = await Promise.all([
+      listBookingLines(effectiveProperty, effectiveDate),
+      getDay(effectiveProperty, effectiveDate),
+    ]);
+    setLines(bookingsRes.lines);
+    setDaySheet(sheet);
+    setPmsPull(bookingsRes.pmsPull);
+  }
+
   async function reloadAfterMoveFailure() {
     // Best-effort resync only: a failed move should never leave this page
     // showing stale rows if the server actually committed before the error
     // reached the client (timeout, 502, ...). The failure message itself is
     // already shown separately, so a second failure here just leaves it be.
     try {
-      const [bookingsRes, sheet] = await Promise.all([
-        listBookingLines(effectiveProperty, effectiveDate),
-        getDay(effectiveProperty, effectiveDate),
-      ]);
-      setLines(bookingsRes.lines);
-      setDaySheet(sheet);
+      await refetchLinesAndSheet();
     } catch {
       /* keep whatever is on screen — the move error is already shown */
     }
@@ -167,6 +213,31 @@ export function BookingDayPage({ property, date }: Props) {
       setMoveError(err instanceof Error ? err.message : "ย้ายวันไม่สำเร็จ ลองใหม่อีกครั้ง");
       setMoving(false);
       await reloadAfterMoveFailure();
+    }
+  }
+
+  // ── ดึงข้อมูล — prefill booking rows from the PMS payment ledger ────────
+  // Button-triggered only, never automatic (no fetch on load, no polling —
+  // docs/pms-prefill-plan.md). Insert-only and idempotent server-side, so
+  // there is nothing to confirm before the call; the result alert after is
+  // the only user-facing feedback. Hidden unless `pmsPull` (capability flag
+  // from GET .../bookings) and never in demo mode; disabled while the month
+  // is closed or a pull is already in flight.
+  const [pmsPulling, setPmsPulling] = useState(false);
+
+  async function handlePullFromPms() {
+    if (isDemo || !pmsPull || monthClosed || pmsPulling) return;
+    setPmsPulling(true);
+    try {
+      const result = await pullFromPms(effectiveProperty, effectiveDate);
+      // New rows land through the same GET pair the page already loads
+      // with — never hand-built from inserted/skipped counts.
+      if (result.inserted > 0) await refetchLinesAndSheet();
+      window.alert(formatPmsPullResult(result));
+    } catch (err) {
+      window.alert(`ดึงข้อมูลไม่สำเร็จ: ${err instanceof Error ? err.message : "ลองใหม่อีกครั้ง"}`);
+    } finally {
+      setPmsPulling(false);
     }
   }
 
@@ -547,6 +618,16 @@ export function BookingDayPage({ property, date }: Props) {
           >
             {printExport.busy === "pdf" ? "กำลังสร้าง PDF..." : "PDF"}
           </button>
+          {!isDemo && pmsPull && (
+            <button
+              type="button"
+              onClick={handlePullFromPms}
+              disabled={monthClosed || pmsPulling}
+              className="shrink-0 rounded-md border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-tint disabled:opacity-50"
+            >
+              {pmsPulling ? "กำลังดึงข้อมูล..." : "ดึงข้อมูล"}
+            </button>
+          )}
           {!isDemo && (
             <button
               type="button"

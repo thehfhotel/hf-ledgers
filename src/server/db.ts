@@ -16,6 +16,7 @@ import type {
   Property,
   Tender,
 } from "../shared/types.ts";
+import type { PrefillCandidate } from "./pms-prefill.ts";
 
 const DB_PATH = process.env.DB_PATH ?? "./data/ledger.db";
 
@@ -1192,6 +1193,73 @@ export function updateBookingLine(
 export function deleteBookingLine(property: Property, id: number): boolean {
   const info = db.prepare("DELETE FROM booking_lines WHERE id = ? AND property = ?").run(id, property);
   return info.changes > 0;
+}
+
+/**
+ * Inserts one `booking_lines` row per `PrefillCandidate` for `POST
+ * .../pull-from-pms` (see src/server/pms-prefill.ts and src/shared/api.md).
+ * ONE transaction. Per candidate: a row already on `(property, date,
+ * pms_ref)` is skipped (counted, never updated — hand edits are sacred);
+ * otherwise inserted via `createBookingLine()` with `source: 'pms'`,
+ * `draft: false` (this is a confirmed received payment, not a draft
+ * awaiting front-desk confirmation), `seq` allocated the same
+ * `nextBookingLineSeq()` way every other insert path uses. Tenders: only
+ * `deposit`/`cash`/`web` are populated from the candidate — credit/transfer
+ * are deliberately left at 0 (the PMS never records the acquiring bank; see
+ * `unplacedCreditSatang`/`unplacedTranSatang`, surfaced by the caller, never
+ * written here). Refund filtering happens in the caller (server.ts) before
+ * this is invoked — every candidate reaching here is assumed insertable.
+ */
+export function insertPmsBookingLines(
+  property: Property,
+  date: string,
+  candidates: PrefillCandidate[],
+  actor: string,
+): { inserted: number; skipped: number } {
+  let inserted = 0;
+  let skipped = 0;
+
+  const tx = db.transaction(() => {
+    for (const candidate of candidates) {
+      const existing = db
+        .query<{ n: number }, [string, string, string]>(
+          "SELECT 1 AS n FROM booking_lines WHERE property = ? AND date = ? AND pms_ref = ?",
+        )
+        .get(property, date, candidate.pmsRef);
+      if (existing) {
+        skipped += 1;
+        continue;
+      }
+
+      createBookingLine(
+        property,
+        date,
+        {
+          bookingNo: candidate.bookingNo,
+          guestName: candidate.guestName,
+          roomNo: candidate.roomNo,
+          roomCount: candidate.roomCount,
+          nights: candidate.nights,
+          grossRoomSatang: candidate.grossRoomSatang,
+          grossOtherSatang: candidate.grossOtherSatang,
+          tenders: {
+            ...zeroTenders(),
+            deposit: candidate.depositSatang,
+            cash: candidate.cashSatang,
+            web: candidate.webSatang,
+          },
+          source: "pms",
+          draft: false,
+          pmsRef: candidate.pmsRef,
+        },
+        actor,
+      );
+      inserted += 1;
+    }
+  });
+  tx();
+
+  return { inserted, skipped };
 }
 
 // ── other_income_items ──────────────────────────────────────────────────

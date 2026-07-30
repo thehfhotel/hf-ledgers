@@ -107,6 +107,8 @@ jobs:
           ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
           ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
           ANALYTICS_TOKEN: ${{ secrets.ANALYTICS_TOKEN }}
+          PMS_DB_URL_HF: ${{ secrets.PMS_DB_URL_HF }}
+          PMS_DB_URL_HFVILLE: ${{ secrets.PMS_DB_URL_HFVILLE }}
         run: |
           set -euo pipefail
           # Runtime env shipped alongside compose; docker compose reads
@@ -122,6 +124,12 @@ jobs:
             # when either is empty.
             printf 'ANALYTICS_URL=%s\n' "http://hf-analytics:3000"
             printf 'ANALYTICS_TOKEN=%s\n' "${ANALYTICS_TOKEN:-}"
+            # PMS payment-ledger read-only Postgres role, one URL per
+            # property (pms-prefill.ts / the ดึงข้อมูล prefill button).
+            # Read-only role on the PMS side; feature stays dark for a
+            # property whose URL is empty. Never commit values — public repo.
+            printf 'PMS_DB_URL_HF=%s\n' "${PMS_DB_URL_HF:-}"
+            printf 'PMS_DB_URL_HFVILLE=%s\n' "${PMS_DB_URL_HFVILLE:-}"
           } > .env
           tar -czf /tmp/deploy.tar.gz docker-compose.yml .env
           rm -f .env

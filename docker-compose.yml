@@ -13,6 +13,12 @@ services:
       - ACCESS_AUD=${ACCESS_AUD:-}
       - ANALYTICS_URL=${ANALYTICS_URL:-}
       - ANALYTICS_TOKEN=${ANALYTICS_TOKEN:-}
+      # PMS payment-ledger read-only Postgres role, one URL per property
+      # (src/server/pms-prefill.ts) — read-only role, values are GH secrets,
+      # never committed (public repo). Feature (the ดึงข้อมูล button) stays
+      # dark for a property whose URL is empty.
+      - PMS_DB_URL_HF=${PMS_DB_URL_HF:-}
+      - PMS_DB_URL_HFVILLE=${PMS_DB_URL_HFVILLE:-}
       - DB_PATH=/app/data/ledger.db
     volumes:
       - ledger_data:/app/data

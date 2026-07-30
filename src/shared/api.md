@@ -332,7 +332,11 @@ thing still worth recording after a close.
     `{ lines: BookingLine[], totals: BookingTotals }`. `lines` ordered by
     `seq` ascending. `totals` is always `computeBookingTotals(lines)`
     (`src/shared/bookings.ts`) — the client imports the SAME function,
-    never recomputes independently.
+    never recomputes independently. **Wave 3 addition:** the response also
+    carries `pmsPull: boolean` — `pmsConfigured(property)`
+    (`src/server/pms-prefill.ts`), true iff this property's PMS env URL is
+    set. This is the client's capability flag for the ดึงข้อมูล button
+    (endpoint 26) — everything else about this endpoint is unchanged.
 
 14. **`POST /api/:property/day/:date/bookings`** — body: the editable
     `BookingLine` fields (everything except `id`/`property`/`date`/audit
@@ -455,6 +459,78 @@ thing still worth recording after a close.
     Client wrapper (`src/client/api.ts`):
     `moveBookingDay(property: Property, date: string, to: Property):
     Promise<{ movedBookingLines: number; movedOtherIncome: number }>`.
+
+## Wave 3: PMS prefill (`src/server/pms-prefill.ts`, `docs/pms-prefill-plan.md`)
+
+26. **`POST /api/:property/day/:date/pull-from-pms`** — no body. Inserts
+    booking lines from the PMS payment ledger (`ht_payment_ledger`) for
+    `:property`'s day `:date`, button-triggered only (never automatic — no
+    fetch on load, no polling). → 200
+    `{ inserted: number, skipped: number, skippedRefunds: number,
+    unplaced: Array<{ pmsRef: string, bookingNo: string | null,
+    creditSatang: number, tranSatang: number }> }`.
+
+    **Dark by default.** 503 (`{ error: "pms prefill not configured" }`)
+    when this property's PMS env URL (`PMS_DB_URL_HF` / `PMS_DB_URL_HFVILLE`
+    — one per property, independently dark/live) is unset — the button
+    itself is hidden client-side via the `pmsPull` capability flag on
+    endpoint 13, this is the server-side enforcement of the same gate.
+
+    **Insert-only and idempotent — the core guarantee.** A payment whose
+    `pms_ref` (the PMS's own receipt/payment number, or `lid:<legacy id>`
+    when blank) already exists on that `(property, date)` is skipped, never
+    updated: hand edits on an existing row are sacred. Pressing the button
+    twice is harmless (second press: `inserted: 0`, everything in
+    `skipped`); a payment taken after the last press appears as a new row
+    on the next press. Rows are keyed per PMS **payment**, not per folio, so
+    a late second payment on the same booking arrives as a new row rather
+    than requiring an update to an already-inserted one.
+
+    **The tender-dedup rule.** iHOTEL replicates the whole tender split
+    (cash/credit/transfer/web/free) onto every LINE of a multi-line
+    receipt — summing raw rows would multiply the money (a verified
+    real-world case differed by 57%). `pms-prefill.ts` deduplicates to one
+    tender value per payment before this endpoint ever sees a candidate;
+    `ledger_amount` (genuinely itemized per line) is summed raw into
+    `grossRoomSatang`/`grossOtherSatang`. This endpoint trusts that
+    dedup — it never re-sums tenders itself.
+
+    **What is never filled.** The five tender columns map only
+    `cash → t_cash`, `web → t_web`, `deposit → t_deposit`
+    (`insertPmsBookingLines()` in `db.ts`) — credit and transfer amounts are
+    NEVER written to a bank-specific column (`t_credit_kbank` /
+    `t_credit_icbc` / `t_transfer_kbank` / `t_transfer_icbc` all stay 0 on
+    a PMS-inserted row), because the PMS records no acquiring bank. Those
+    amounts are reported in `unplaced` instead (one entry per
+    inserted-or-skipped non-refund candidate with a nonzero
+    `unplacedCreditSatang`/`unplacedTranSatang`) for the operator to type
+    into the right bank column by hand. `discountSatang` is never filled
+    either — no discount column exists anywhere in the PMS folio/payment
+    data; it stays `0`, editable by hand as always.
+
+    **Refunds are reported, never inserted.** A candidate whose net tender
+    total is negative (`isRefund: true`) is filtered out before insertion
+    and counted in `skippedRefunds` — it never becomes a booking-line row,
+    positive or negative.
+
+    **Calendar-day window, not a cashier round.** The pulled window is
+    `:date`'s Bangkok calendar day (`bangkokDayWindow()` in
+    `pms-prefill.ts`) — a payment recorded just after local midnight lands
+    on the next day's sheet, not the round it was taken in. See
+    `docs/pms-prefill-plan.md` "Day boundary" for the rationale and the
+    known v2 escape hatch if this ever bites in practice.
+
+    **Failure is plain and inserts nothing.** A PMS query failure (network,
+    auth, bad SQL) is caught and returned as 502 `{ error: string }` before
+    any row is written — never a partial insert. 409
+    (`{ error: "month is closed" }`) applies exactly like every other
+    write path (`closedMonthResponse`). Enqueues the analytics outbox for
+    `(property, date)` only when `inserted > 0`.
+
+    Client wrapper (`src/client/api.ts`):
+    `pullFromPms(property: Property, date: string):
+    Promise<{ inserted: number; skipped: number; skippedRefunds: number;
+    unplaced: PmsUnplacedTender[] }>`.
 
 ## Shared types (`src/shared/types.ts`, verbatim, READ-ONLY)
 

@@ -22,6 +22,7 @@ import {
   getOtherIncomeForDay,
   getOtherIncomeItemById,
   getSheetDay,
+  insertPmsBookingLines,
   isComputedOtherIncomeCategory,
   isMonthClosed,
   listCategories,
@@ -43,6 +44,8 @@ import {
 } from "./db.ts";
 import type { BookingLineInput } from "./db.ts";
 import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
+import { fetchDayPayments, pmsConfigured } from "./pms-prefill.ts";
+import type { PrefillCandidate } from "./pms-prefill.ts";
 import { computeDayTotals } from "../shared/totals.ts";
 import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings } from "../shared/bookings.ts";
 import { isValidIso, isValidMonth } from "../shared/date.ts";
@@ -531,13 +534,16 @@ export const api = new Elysia({ prefix: "/api" })
   })
 
   // 13. GET /api/:property/day/:date/bookings
+  // `pmsPull` is additive (Wave 3 / pms-prefill) — the client's capability
+  // flag for the ดึงข้อมูล button, true iff this property's PMS env URL is
+  // set (pmsConfigured() in pms-prefill.ts). Everything else unchanged.
   .get("/:property/day/:date/bookings", ({ params, status }) => {
     const { property, date } = params;
     if (!isProperty(property)) return status(400, { error: "invalid property" });
     if (!isValidIso(date)) return status(400, { error: "invalid date" });
 
     const lines = getBookingLinesForDay(property, date);
-    return { lines, totals: computeBookingTotals(lines) };
+    return { lines, totals: computeBookingTotals(lines), pmsPull: pmsConfigured(property) };
   })
 
   // 14. POST /api/:property/day/:date/bookings
@@ -885,7 +891,55 @@ export const api = new Elysia({ prefix: "/api" })
       };
     },
     { body: t.Object({ to: t.Optional(t.String()) }) },
-  );
+  )
+
+  // 26. POST /api/:property/day/:date/pull-from-pms — inserts booking lines
+  // from the PMS payment ledger for :date (src/server/pms-prefill.ts,
+  // src/shared/api.md). Button-triggered only, insert-only and idempotent
+  // (never updates an existing row — hand edits are sacred). 503 when this
+  // property's PMS env URL is unset; 409 when the month is closed; a PMS
+  // query failure 502s with nothing inserted (fetchDayPayments throws
+  // BEFORE anything is written). Refunds are split out and counted in
+  // `skippedRefunds`, never inserted. `unplaced` reports every
+  // inserted-or-skipped non-refund candidate that carries a nonzero
+  // credit/transfer amount the PMS gives no acquiring bank for.
+  .post("/:property/day/:date/pull-from-pms", async ({ params, identity, status }) => {
+    const { property, date } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (!isValidIso(date)) return status(400, { error: "invalid date" });
+    if (!pmsConfigured(property)) return status(503, { error: "pms prefill not configured" });
+    const blocked = closedMonthResponse(property, date, status);
+    if (blocked) return blocked;
+
+    let candidates: PrefillCandidate[];
+    try {
+      candidates = await fetchDayPayments(property, date);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return status(502, { error: message });
+    }
+
+    const refunds = candidates.filter((c) => c.isRefund);
+    const nonRefunds = candidates.filter((c) => !c.isRefund);
+
+    const by = identity!.email;
+    const { inserted, skipped } = insertPmsBookingLines(property, date, nonRefunds, by);
+    if (inserted > 0) {
+      touchSheetDay(property, date, by);
+      enqueueAnalyticsPush(property, date);
+    }
+
+    const unplaced = nonRefunds
+      .filter((c) => c.unplacedCreditSatang > 0 || c.unplacedTranSatang > 0)
+      .map((c) => ({
+        pmsRef: c.pmsRef,
+        bookingNo: c.bookingNo,
+        creditSatang: c.unplacedCreditSatang,
+        tranSatang: c.unplacedTranSatang,
+      }));
+
+    return { inserted, skipped, skippedRefunds: refunds.length, unplaced };
+  });
 
 const apiFetch = (req: Request) => api.handle(req);
 

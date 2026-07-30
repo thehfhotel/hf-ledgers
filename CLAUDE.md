@@ -11,6 +11,17 @@ bookings and other-income to the other property (merge into the
 destination; the day sheet itself is not moved) via `POST
 /:property/day/:date/move`. Front desk enters the data.
 
+**The ดึงข้อมูล button (`POST /:property/day/:date/pull-from-pms`,
+`src/server/pms-prefill.ts`) prefills the bookings page from the PMS
+payment ledger.** Insert-only and idempotent: a payment already on that
+`(property, date)` by `pms_ref` is skipped, an existing row is never
+updated — hand edits stay sacred, pressing it twice is harmless. Dark
+unless both `PMS_DB_URL_HF` and `PMS_DB_URL_HFVILLE` are set (each
+property is independently dark/live on its own env var). The PMS never
+records the acquiring bank, so credit/transfer amounts are reported back
+as "unplaced" for the operator to file into the right bank column by
+hand — never guessed, never written to a bank-specific tender column.
+
 **No in-app roles.** Cloudflare Access is the only gate on who reaches
 income.thehfhotel.org — everyone it admits, including the office-1 and
 reception kiosk identities, can use every feature, category list included.

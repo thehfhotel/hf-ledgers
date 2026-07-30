@@ -161,10 +161,12 @@ export type BookingLineInput = Partial<
 >;
 
 // 13. GET /api/:property/day/:date/bookings
+// `pmsPull` is additive (src/server/pms-prefill.ts's pmsConfigured for this
+// property) — the client's capability flag for the ดึงข้อมูล button.
 export function listBookingLines(
   property: Property,
   date: string,
-): Promise<{ lines: BookingLine[]; totals: BookingTotals }> {
+): Promise<{ lines: BookingLine[]; totals: BookingTotals; pmsPull: boolean }> {
   return request(`/${property}/day/${date}/bookings`);
 }
 
@@ -295,4 +297,28 @@ export function moveBookingDay(
     method: "POST",
     body: JSON.stringify({ to }),
   });
+}
+
+/** One payment the pull could not fully place — the amount is known but the
+ * PMS records no acquiring bank, so credit/transfer land here instead of a
+ * bank-specific tender column. `bookingNo` falls back to `pmsRef` when the
+ * folio/booking id is unknown (see BookingDayPage.tsx's result alert). */
+export interface PmsUnplacedTender {
+  pmsRef: string;
+  bookingNo: string | null;
+  creditSatang: number;
+  tranSatang: number;
+}
+
+// POST /api/:property/day/:date/pull-from-pms
+// Inserts booking lines from the PMS payment ledger for that property+date —
+// button-triggered only (BookingDayPage.tsx), never automatic. Insert-only
+// and idempotent: a payment whose pms_ref already exists that day is
+// skipped server-side, and an existing row is never updated. Refunds are
+// filtered out server-side and counted in `skippedRefunds`, never inserted.
+export function pullFromPms(
+  property: Property,
+  date: string,
+): Promise<{ inserted: number; skipped: number; skippedRefunds: number; unplaced: PmsUnplacedTender[] }> {
+  return request(`/${property}/day/${date}/pull-from-pms`, { method: "POST" });
 }

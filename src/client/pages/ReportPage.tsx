@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { navigate } from "../App.tsx";
-import { getDay } from "../api.ts";
+import { getDay, listBookingLines } from "../api.ts";
 import { downloadReportJpeg, shareReportJpeg } from "../components/exportJpeg.ts";
 import { ReportSheet, REPORT_SHEET_WIDTH } from "../components/ReportSheet.tsx";
-import { FIXTURE_DATE, fixtureDaySheet } from "../fixtures.ts";
-import type { DaySheet, Property } from "../../shared/types.ts";
+import { FIXTURE_DATE, fixtureBookingLines, fixtureDaySheet } from "../fixtures.ts";
+import type { BookingLine, DaySheet, Property } from "../../shared/types.ts";
 
 // /:property/report/:date — the report preview + JPEG export screen.
 //
@@ -29,7 +29,7 @@ interface ReportPageProps {
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; sheet: DaySheet };
+  | { status: "ready"; sheet: DaySheet; lines: BookingLine[] };
 
 export function ReportPage({ property, date }: ReportPageProps) {
   const isDemo = property === "demo";
@@ -37,7 +37,7 @@ export function ReportPage({ property, date }: ReportPageProps) {
   const effectiveDate = isDemo ? FIXTURE_DATE : date;
 
   const [state, setState] = useState<LoadState>(
-    isDemo ? { status: "ready", sheet: fixtureDaySheet } : { status: "loading" },
+    isDemo ? { status: "ready", sheet: fixtureDaySheet, lines: fixtureBookingLines } : { status: "loading" },
   );
   const [busy, setBusy] = useState<"" | "share" | "download">("");
   const [actionError, setActionError] = useState<string | null>(null);
@@ -46,9 +46,11 @@ export function ReportPage({ property, date }: ReportPageProps) {
     if (isDemo) return;
     let cancelled = false;
     setState({ status: "loading" });
-    getDay(effectiveProperty, effectiveDate)
-      .then((sheet) => {
-        if (!cancelled) setState({ status: "ready", sheet });
+    // The sheet now prints the per-booking grid, so the report needs both
+    // halves of the paper: the day summary AND its booking rows.
+    Promise.all([getDay(effectiveProperty, effectiveDate), listBookingLines(effectiveProperty, effectiveDate)])
+      .then(([sheet, bookings]) => {
+        if (!cancelled) setState({ status: "ready", sheet, lines: bookings.lines });
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -61,16 +63,17 @@ export function ReportPage({ property, date }: ReportPageProps) {
   }, [isDemo, effectiveProperty, effectiveDate]);
 
   // Responsive preview: the report sheet is a fixed REPORT_SHEET_WIDTH
-  // (720px) document. On narrower viewports it's scaled down purely
-  // visually (CSS transform on a wrapper) so it's visible without
-  // horizontal scrolling; the sheet's own DOM node never changes size.
+  // (~1180px, A4-landscape-ish) document, wider than the shell it previews
+  // in. It is scaled down purely visually (CSS transform on a wrapper) so
+  // it's visible without the PAGE scrolling horizontally; the sheet's own
+  // DOM node never changes size.
   const containerRef = useRef<HTMLDivElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
   const [previewScale, setPreviewScale] = useState(1);
   const [sheetHeight, setSheetHeight] = useState<number | null>(null);
   // While true, the preview transform is forced to 1 regardless of
   // previewScale so html2canvas-pro always captures the sheet at its true,
-  // unscaled 720px layout — never the shrunk-for-mobile preview.
+  // unscaled print layout — never the shrunk-to-fit preview.
   const [capturing, setCapturing] = useState(false);
 
   useEffect(() => {
@@ -166,6 +169,7 @@ export function ReportPage({ property, date }: ReportPageProps) {
                 property={effectiveProperty}
                 date={effectiveDate}
                 sheet={state.sheet}
+                lines={state.lines}
               />
             </div>
           </div>

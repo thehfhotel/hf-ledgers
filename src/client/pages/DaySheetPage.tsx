@@ -7,10 +7,10 @@ import {
   type Category,
   type CategoryKey,
   type DaySheet,
-  type DayProvenance,
   type ExpenseItem,
   type Property,
 } from "../../shared/types.ts";
+import { PROVENANCE_LABELS_TH } from "../labels.ts";
 import {
   createExpense,
   deleteExpense,
@@ -36,13 +36,6 @@ interface Props {
 // once any exist (see api.md's RESOLVED รายการอื่นๆ note) — identified by
 // categoryKey, never nameTh, because managers can rename categories freely.
 const OTHER_INCOME_CATEGORY_KEYS = new Set(["other_cash", "other_transfer"]);
-
-const PROVENANCE_LABELS_TH: Record<DayProvenance, string> = {
-  app: "บันทึกในระบบนี้",
-  transcribed: "คัดลอกจากเอกสารเดิม",
-  reconstructed: "สร้างขึ้นใหม่จากข้อมูลเดิม (มีการปรับกระทบยอด)",
-  summary_only: "มีเฉพาะข้อมูลสรุป (ยังไม่มีรายการจองรายตัว)",
-};
 
 // Fallback labels for the fill-from-bookings diff, verbatim from api.md's
 // seed list — needed because a diff row's categoryId is null when the
@@ -516,9 +509,13 @@ export function DaySheetPage({ property, date }: Props) {
         />
       )}
 
+      {/* Three panels side by side, the way the summary, its **หมายเหตุ
+          block and the expense list sit together on the paper: รายรับ |
+          เงินสด + ยอดรวม | รายจ่าย. One column on a narrow screen. */}
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
       {/* Panel รายรับ */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
-        <h2 className="border-b border-line px-4 py-3 text-sm font-semibold text-ink">รายรับ</h2>
+        <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">รายรับ</h2>
         {incomeCategories.length === 0 ? (
           <p className="px-4 py-3 text-sm text-ink-muted">ยังไม่มีหมวดหมู่รายรับ</p>
         ) : (
@@ -532,7 +529,7 @@ export function DaySheetPage({ property, date }: Props) {
               const isComputedFromOtherIncome =
                 category.categoryKey != null && OTHER_INCOME_CATEGORY_KEYS.has(category.categoryKey) && hasOtherIncomeItems;
               return (
-                <div key={category.id} className="flex flex-col gap-2 px-4 py-2.5">
+                <div key={category.id} className="flex flex-col gap-2 px-4 py-1.5">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm text-ink">
                       {category.nameTh}
@@ -564,9 +561,67 @@ export function DaySheetPage({ property, date }: Props) {
         </div>
       </section>
 
+      {/* Middle column: the paper's **หมายเหตุ cash block, then the day's
+          totals. */}
+      <div className="flex flex-col gap-4">
+        {/* Panel สรุปเงินสดฝากเข้าบัญชี (tint background) — three distinct,
+            separately labeled lines per api.md "Report labeling": the
+            paper's own line is the GROSS cash income actually banked; it must
+            never collapse into the netted figure beneath it. */}
+        <section className="rounded-lg border border-line bg-tint p-4">
+          <h2 className="mb-2 text-sm font-semibold text-ink">สรุปเงินสดฝากเข้าบัญชี</h2>
+          {cashIncomeRows.length === 0 && day.totals.cashExpenseSatang === 0 ? (
+            <p className="text-sm text-ink-muted">ยังไม่มีรายการเงินสดวันนี้</p>
+          ) : (
+            <div className="flex flex-col gap-1 text-sm">
+              {cashIncomeRows.map(({ category, cell }) => (
+                <div key={category.id} className="flex items-center justify-between gap-3">
+                  <span className="text-ink-muted">{category.nameTh}</span>
+                  <span className="tabular-nums text-ink">{formatSatang(cell.amountSatang)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-2 flex items-center justify-between gap-3 border-t border-line-strong pt-2 text-base font-bold text-brand-500">
+            <span>สรุปเงินสดฝากเข้าบัญชี (ยอดฝากจริง)</span>
+            <span className="tabular-nums">{formatSatang(day.totals.cashIncomeSatang)}</span>
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-3 border-t border-dotted border-line-strong pt-2 text-xs text-ink-muted">
+            <span>หัก รายจ่ายเงินสดวันนี้ (ไม่ได้หักออกจากยอดฝากข้างต้น)</span>
+            <span className="tabular-nums">-{formatSatang(day.totals.cashExpenseSatang)}</span>
+          </div>
+          <div className="mt-0.5 flex items-center justify-between gap-3 text-xs font-medium text-ink-muted">
+            <span>คงเหลือสุทธิหลังหักรายจ่ายเงินสด (ข้อมูลอ้างอิง)</span>
+            <span className="tabular-nums">{formatSatang(day.totals.cashToDepositSatang)}</span>
+          </div>
+        </section>
+
+        {/* Panel ยอดรวมประจำวัน */}
+        <section className="rounded-lg border border-line bg-panel p-4">
+          <h2 className="mb-2 text-sm font-semibold text-ink">ยอดรวมประจำวัน</h2>
+          <div className="flex flex-col gap-1 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-ink-muted">รวมรายรับ</span>
+              <span className="tabular-nums text-ink">{formatSatang(day.totals.incomeSatang)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-ink-muted">รวมรายจ่าย</span>
+              <span className="tabular-nums text-ink">
+                {day.totals.expenseSatang === 0 ? "" : "-"}
+                {formatSatang(day.totals.expenseSatang)}
+              </span>
+            </div>
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-3 border-t border-line-strong pt-2 text-sm font-bold text-ink">
+            <span>คงเหลือ</span>
+            <span className="tabular-nums">{formatSatang(day.totals.netSatang)}</span>
+          </div>
+        </section>
+      </div>
+
       {/* Panel รายจ่าย */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
-        <h2 className="border-b border-line px-4 py-3 text-sm font-semibold text-ink">รายจ่าย</h2>
+        <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">รายจ่าย</h2>
         {day.expenses.length === 0 ? (
           <p className="px-4 py-3 text-sm text-ink-muted">ยังไม่มีรายจ่ายวันนี้</p>
         ) : (
@@ -673,41 +728,13 @@ export function DaySheetPage({ property, date }: Props) {
           <span className="tabular-nums">{formatSatang(day.totals.expenseSatang)}</span>
         </div>
       </section>
+      </div>
+      {/* end of the รายรับ | เงินสด+ยอดรวม | รายจ่าย row */}
 
-      {/* Panel สรุปเงินสดฝากเข้าบัญชี (tint background) — three distinct,
-          separately labeled lines per api.md "Report labeling": the
-          paper's own line is the GROSS cash income actually banked; it must
-          never collapse into the netted figure beneath it. */}
-      <section className="rounded-lg border border-line bg-tint p-4">
-        <h2 className="mb-2 text-sm font-semibold text-ink">สรุปเงินสดฝากเข้าบัญชี</h2>
-        {cashIncomeRows.length === 0 && day.totals.cashExpenseSatang === 0 ? (
-          <p className="text-sm text-ink-muted">ยังไม่มีรายการเงินสดวันนี้</p>
-        ) : (
-          <div className="flex flex-col gap-1 text-sm">
-            {cashIncomeRows.map(({ category, cell }) => (
-              <div key={category.id} className="flex items-center justify-between">
-                <span className="text-ink-muted">{category.nameTh}</span>
-                <span className="tabular-nums text-ink">{formatSatang(cell.amountSatang)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="mt-2 flex items-center justify-between border-t border-line-strong pt-2 text-base font-bold text-brand-500">
-          <span>สรุปเงินสดฝากเข้าบัญชี (ยอดฝากจริง)</span>
-          <span className="tabular-nums">{formatSatang(day.totals.cashIncomeSatang)}</span>
-        </div>
-        <div className="mt-2 flex items-center justify-between border-t border-dotted border-line-strong pt-2 text-xs text-ink-muted">
-          <span>หัก รายจ่ายเงินสดวันนี้ (ไม่ได้หักออกจากยอดฝากข้างต้น)</span>
-          <span className="tabular-nums">-{formatSatang(day.totals.cashExpenseSatang)}</span>
-        </div>
-        <div className="mt-0.5 flex items-center justify-between text-xs font-medium text-ink-muted">
-          <span>คงเหลือสุทธิหลังหักรายจ่ายเงินสด (ข้อมูลอ้างอิง)</span>
-          <span className="tabular-nums">{formatSatang(day.totals.cashToDepositSatang)}</span>
-        </div>
-      </section>
-
-      {/* Day note */}
-      <section className="rounded-lg border border-line bg-panel p-4">
+      {/* Day note beside the audit footer + export, so nothing but these two
+          ever sits below the three panels. */}
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
+      <section className="rounded-lg border border-line bg-panel p-4 lg:col-span-2">
         <label className="mb-1.5 block text-sm font-semibold text-ink" htmlFor="day-note">
           หมายเหตุ
         </label>
@@ -727,7 +754,7 @@ export function DaySheetPage({ property, date }: Props) {
       </section>
 
       {/* Footer */}
-      <div className="flex flex-col gap-3 rounded-lg border border-line bg-panel p-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 rounded-lg border border-line bg-panel p-4">
         <p className="text-xs text-ink-muted">
           บันทึกล่าสุด: {day.updatedBy} {formatUpdatedAt(day.updatedAt)}
         </p>
@@ -739,6 +766,8 @@ export function DaySheetPage({ property, date }: Props) {
           ส่งออกรูปภาพ
         </button>
       </div>
+      </div>
+      {/* end of the หมายเหตุ | footer row */}
     </div>
   );
 }

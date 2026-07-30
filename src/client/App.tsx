@@ -31,9 +31,15 @@ function savedProperty(): Property {
   return "hf";
 }
 
+// The office does this work on a desktop PC: one wide layout, no second
+// thumb-optimised one. Narrow screens stay readable because the wide
+// booking grid scrolls inside its own container — the PAGE never scrolls
+// horizontally.
+const SHELL_WIDTH = "mx-auto w-full max-w-[1400px]";
+
 type Route =
   | { kind: "day"; property: Property; date: string }
-  | { kind: "bookings"; property: Property; date: string }
+  | { kind: "bookings"; property: Property | "demo"; date: string }
   | { kind: "history"; property: Property }
   | { kind: "categories"; property: Property }
   | { kind: "report"; property: Property | "demo"; date: string };
@@ -45,13 +51,16 @@ function homeRoute(): Extract<Route, { kind: "day" }> {
 function parseRoute(pathname: string): Route {
   const parts = pathname.replace(/\/$/, "").split("/").filter(Boolean);
 
-  // Special case: /demo/report/:date renders ReportPage's fixtures.ts demo
-  // data with zero server dependency (see ReportPage.tsx's "demo" property
-  // handling) — headless visual-verification only, never a real navigable
-  // property, and never persisted as one (see the localStorage effect
-  // below).
+  // Special case: /demo/report/:date and /demo/bookings/:date render
+  // fixtures.ts demo data with zero server dependency (see the "demo"
+  // property handling in ReportPage.tsx / BookingDayPage.tsx) — headless
+  // visual-verification only, never a real navigable property, and never
+  // persisted as one (see the localStorage effect below).
   if (parts[0] === "demo" && parts[1] === "report" && parts[2]) {
     return { kind: "report", property: "demo", date: parts[2] };
+  }
+  if (parts[0] === "demo" && parts[1] === "bookings" && parts[2]) {
+    return { kind: "bookings", property: "demo", date: parts[2] };
   }
 
   const property = isProperty(parts[0]) ? parts[0] : undefined;
@@ -123,8 +132,9 @@ export function App() {
   // case — so it must NOT be swept into this redirect.
   useEffect(() => {
     const parts = location.pathname.replace(/\/$/, "").split("/").filter(Boolean);
-    const isDemoReport = parts[0] === "demo" && parts[1] === "report" && Boolean(parts[2]);
-    if (!isProperty(parts[0]) && !isDemoReport) {
+    const isDemoRoute =
+      parts[0] === "demo" && (parts[1] === "report" || parts[1] === "bookings") && Boolean(parts[2]);
+    if (!isProperty(parts[0]) && !isDemoRoute) {
       const home = homeRoute();
       navigate(`/${home.property}/day/${home.date}`);
     }
@@ -167,8 +177,8 @@ export function App() {
 
   return (
     <div className="min-h-full">
-      <header className="sticky top-0 z-10 border-b border-brand-900 bg-brand-800">
-        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-4 py-3">
+      <header className="sticky top-0 z-20 border-b border-brand-900 bg-brand-800">
+        <div className={SHELL_WIDTH + " flex items-center justify-between gap-3 px-4 py-3"}>
           <span className="text-sm font-semibold tracking-wide text-white">
             สรุปรายรับ-รายจ่าย
           </span>
@@ -190,7 +200,7 @@ export function App() {
             ))}
           </div>
         </div>
-        <nav className="rail mx-auto flex max-w-3xl gap-1 overflow-x-auto px-4 pb-2">
+        <nav className={"rail " + SHELL_WIDTH + " flex gap-1 overflow-x-auto px-4 pb-2"}>
           {navItems.map((item) => (
             <button
               key={item.key}
@@ -207,7 +217,7 @@ export function App() {
         </nav>
       </header>
 
-      <main className="mx-auto max-w-3xl px-4 py-4">
+      <main className={SHELL_WIDTH + " min-w-0 px-4 py-4"}>
         {route.kind === "day" && <DaySheetPage property={route.property} date={route.date} />}
         {route.kind === "bookings" && <BookingDayPage property={route.property} date={route.date} />}
         {route.kind === "history" && <HistoryPage property={route.property} />}

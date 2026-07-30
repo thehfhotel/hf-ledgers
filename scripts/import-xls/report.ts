@@ -5,6 +5,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PropertyCode } from "./types.ts";
+import type { AppliedResolutionRow } from "./resolutions.ts";
+import type { HumanCellSkipRow, HumanDaySkipRow } from "./human-edits.ts";
 import { groupConsecutiveDates } from "./plan.ts";
 import type {
   CategoryVarianceStat,
@@ -20,8 +22,11 @@ import type {
 } from "./plan.ts";
 
 export type {
+  AppliedResolutionRow,
   DayRow,
   GrandTotalCheckResult,
+  HumanCellSkipRow,
+  HumanDaySkipRow,
   MonthlyTotal,
   QuarantineKind,
   QuarantineRow,
@@ -46,6 +51,12 @@ export interface ImportRunSummary {
   tenderCounts: TenderRowCounts[];
   monthlyTotals: MonthlyTotal[];
   warnings: string[];
+  /** Owner-approved sheet resolutions this run leaned on — see resolutions.ts. */
+  resolutions: AppliedResolutionRow[];
+  /** Income cells the human-edit guard refused to overwrite — see human-edits.ts. */
+  humanCellSkips: HumanCellSkipRow[];
+  /** Day-level (sheet_days) writes the human-edit guard refused. */
+  humanDaySkips: HumanDaySkipRow[];
   /** How re-running this importer avoids double-importing — see import.ts. */
   idempotencyNote: string;
 }
@@ -79,6 +90,7 @@ export function renderDaysCsv(summary: ImportRunSummary): string {
     "property",
     "date",
     "provenance",
+    "storedProvenance",
     "sourceSummarySheet",
     "sourceBookingWorkbook",
     "sourceBookingSheet",
@@ -93,6 +105,7 @@ export function renderDaysCsv(summary: ImportRunSummary): string {
       d.property,
       d.date,
       d.provenance,
+      d.storedProvenance,
       d.sourceSummarySheet,
       d.sourceBookingWorkbook,
       d.sourceBookingSheet,
@@ -277,6 +290,93 @@ function renderCopyAssumptionSection(summary: ImportRunSummary): string[] {
   return lines;
 }
 
+/**
+ * The owner-approved resolutions this run applied (resolutions.ts). Printed
+ * in full, with what each sheet's own signals had claimed, so the report
+ * shows every place a human decision overrode the importer's own reading.
+ */
+function renderResolutionsSection(summary: ImportRunSummary): string[] {
+  const lines: string[] = ["## Owner-approved sheet resolutions applied", ""];
+  if (summary.resolutions.length === 0) {
+    lines.push("None — no listed sheet was present in this run.", "");
+    return lines;
+  }
+  const accepted = summary.resolutions.filter((r) => r.action === "accept");
+  const ignored = summary.resolutions.filter((r) => r.action === "ignore");
+  lines.push(
+    `${summary.resolutions.length} sheet(s) carried an explicit human ruling: ${accepted.length} accepted under a ` +
+      `given (property, date), ${ignored.length} ignored. Every other sheet went through the unchanged date vote ` +
+      "and property classifier.",
+    "",
+  );
+
+  if (accepted.length > 0) {
+    lines.push("### Accepted", "");
+    for (const r of accepted) {
+      lines.push(`- **${r.property} ${r.date}** — ${r.workbook} \`${r.sheetName}\``);
+      lines.push(`  - sheet itself said: ${r.originalDetail}`);
+      lines.push(`  - why: ${r.rationale}`);
+    }
+    lines.push("");
+  }
+  if (ignored.length > 0) {
+    lines.push("### Ignored", "");
+    for (const r of ignored) {
+      lines.push(`- ${r.workbook} \`${r.sheetName}\``);
+      lines.push(`  - sheet itself said: ${r.originalDetail}`);
+      lines.push(`  - why: ${r.rationale}`);
+    }
+    lines.push("");
+  }
+  return lines;
+}
+
+/**
+ * What the human-edit guard refused to overwrite (human-edits.ts). An empty
+ * section is the normal case on a fresh database; a non-empty one is the
+ * audit trail proving hand-entered figures survived the run.
+ */
+function renderHumanEditGuardSection(summary: ImportRunSummary): string[] {
+  const lines: string[] = ["## Human-edit guard (what the importer refused to overwrite)", ""];
+  lines.push(
+    "The rule: this importer only ever overwrites what this importer itself wrote. An income cell counts as " +
+      "importer-owned only when `source = 'import'` AND `updated_by = 'import:excel'`; a day's `sheet_days` row " +
+      "(note, the four cash-block override fields, verification stamp, provenance) only when its `updated_by` is " +
+      "`import:excel`. Anything else belongs to a person and wins over the workbook, on this and every future run.",
+    "",
+    `Income cells skipped: **${summary.humanCellSkips.length}**. Day-level writes skipped: **${summary.humanDaySkips.length}**.`,
+    "",
+  );
+
+  if (summary.humanCellSkips.length > 0) {
+    lines.push("**Cells left as the human set them (workbook value NOT written):**", "");
+    for (const s of summary.humanCellSkips) {
+      lines.push(
+        `- ${s.property} ${s.date} category ${s.categoryKey ?? s.categoryId}: kept ${formatBaht(s.existingSatang)} ` +
+          `(source=${s.existingSource}, by ${s.existingUpdatedBy}); workbook wanted ${formatBaht(s.workbookSatang)}`,
+      );
+    }
+    lines.push("");
+  }
+  if (summary.humanDaySkips.length > 0) {
+    lines.push(
+      "**Days whose day-level fields were left alone** (the day's own row below still states the provenance " +
+        "actually stored, `storedProvenance` — never the planned one this run couldn't apply):",
+      "",
+    );
+    for (const s of summary.humanDaySkips) {
+      const dayRow = summary.days.find((d) => d.property === s.property && d.date === s.date);
+      const storedProvenanceNote = dayRow ? ` (provenance actually stored: \`${dayRow.storedProvenance}\`)` : "";
+      lines.push(
+        `- ${s.property} ${s.date}: sheet_days last written by ${s.existingUpdatedBy}${storedProvenanceNote} — not applied: ` +
+          `${s.skippedFields.length > 0 ? s.skippedFields.join(", ") : "(nothing this run wanted to write)"}`,
+      );
+    }
+    lines.push("");
+  }
+  return lines;
+}
+
 function renderQuarantineSection(summary: ImportRunSummary): string[] {
   const lines: string[] = ["## Quarantined and unresolved", ""];
   if (summary.quarantine.length === 0) {
@@ -409,6 +509,8 @@ export function renderMarkdownReport(summary: ImportRunSummary): string {
   lines.push(...renderGrandTotalCheckSection(summary));
   lines.push(...renderSourceMapContradictionsSection(summary));
   lines.push(...renderCopyAssumptionSection(summary));
+  lines.push(...renderResolutionsSection(summary));
+  lines.push(...renderHumanEditGuardSection(summary));
   lines.push(...renderQuarantineSection(summary));
   lines.push(...renderVarianceSection(summary));
   lines.push(...renderUnknownLabelsSection(summary));
@@ -426,12 +528,53 @@ export function renderMarkdownReport(summary: ImportRunSummary): string {
   return lines.join("\n");
 }
 
+export function renderResolutionsCsv(summary: ImportRunSummary): string {
+  const header = csvRow(["workbook", "sheetName", "action", "property", "date", "originalDetail", "rationale"]);
+  const rows = summary.resolutions.map((r) =>
+    csvRow([r.workbook, r.sheetName, r.action, r.property, r.date, r.originalDetail, r.rationale]),
+  );
+  return [header, ...rows].join("\n") + "\n";
+}
+
+export function renderHumanEditSkipsCsv(summary: ImportRunSummary): string {
+  const header = csvRow([
+    "kind",
+    "property",
+    "date",
+    "categoryKey",
+    "keptBaht",
+    "keptSource",
+    "keptUpdatedBy",
+    "workbookBaht",
+    "skippedFields",
+  ]);
+  const cellRows = summary.humanCellSkips.map((s) =>
+    csvRow([
+      "income-cell",
+      s.property,
+      s.date,
+      s.categoryKey ?? String(s.categoryId),
+      formatBaht(s.existingSatang),
+      s.existingSource,
+      s.existingUpdatedBy,
+      formatBaht(s.workbookSatang),
+      "",
+    ]),
+  );
+  const dayRows = summary.humanDaySkips.map((s) =>
+    csvRow(["day-level", s.property, s.date, "", "", "", s.existingUpdatedBy, "", s.skippedFields.join("; ")]),
+  );
+  return [header, ...cellRows, ...dayRows].join("\n") + "\n";
+}
+
 export interface WrittenReportFiles {
   markdownPath: string;
   daysCsvPath: string;
   quarantineCsvPath: string;
   varianceCsvPath: string;
   grandTotalCheckCsvPath: string;
+  resolutionsCsvPath: string;
+  humanEditSkipsCsvPath: string;
 }
 
 export function writeReportFiles(outDir: string, summary: ImportRunSummary): WrittenReportFiles {
@@ -441,12 +584,24 @@ export function writeReportFiles(outDir: string, summary: ImportRunSummary): Wri
   const quarantineCsvPath = join(outDir, "quarantine.csv");
   const varianceCsvPath = join(outDir, "variance.csv");
   const grandTotalCheckCsvPath = join(outDir, "grand-total-check.csv");
+  const resolutionsCsvPath = join(outDir, "resolutions.csv");
+  const humanEditSkipsCsvPath = join(outDir, "human-edit-skips.csv");
 
   writeFileSync(markdownPath, renderMarkdownReport(summary));
   writeFileSync(daysCsvPath, renderDaysCsv(summary));
   writeFileSync(quarantineCsvPath, renderQuarantineCsv(summary));
   writeFileSync(varianceCsvPath, renderVarianceCsv(summary));
   writeFileSync(grandTotalCheckCsvPath, renderGrandTotalCheckCsv(summary));
+  writeFileSync(resolutionsCsvPath, renderResolutionsCsv(summary));
+  writeFileSync(humanEditSkipsCsvPath, renderHumanEditSkipsCsv(summary));
 
-  return { markdownPath, daysCsvPath, quarantineCsvPath, varianceCsvPath, grandTotalCheckCsvPath };
+  return {
+    markdownPath,
+    daysCsvPath,
+    quarantineCsvPath,
+    varianceCsvPath,
+    grandTotalCheckCsvPath,
+    resolutionsCsvPath,
+    humanEditSkipsCsvPath,
+  };
 }

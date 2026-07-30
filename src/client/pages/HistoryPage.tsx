@@ -10,6 +10,7 @@ import { formatSatang } from "../../shared/money.ts";
 import type { DaySummary, Property } from "../../shared/types.ts";
 import { listDays } from "../api.ts";
 import { navigate } from "../App.tsx";
+import { PROVENANCE_LABELS_TH, PROVENANCE_SHORT_TH } from "../labels.ts";
 
 interface Props {
   property: Property;
@@ -40,7 +41,7 @@ export function HistoryPage({ property }: Props) {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-panel px-3 py-2">
+      <div className="flex w-full max-w-sm items-center justify-between gap-2 rounded-lg border border-line bg-panel px-3 py-2">
         <button
           type="button"
           onClick={() => setMonth((m) => shiftMonths(m, -1))}
@@ -91,12 +92,15 @@ export function HistoryPage({ property }: Props) {
       )}
 
       {!error && days !== null && days.length > 0 && (
-        <div className="overflow-hidden rounded-lg border border-line bg-panel">
-          <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-2 border-b border-line bg-tint px-3 py-2 text-xs font-semibold text-ink-muted">
+        // Five short columns: held to a readable measure rather than
+        // stretched across the full 1400px shell.
+        <div className="w-full max-w-4xl overflow-hidden rounded-lg border border-line bg-panel">
+          <div className="grid grid-cols-[10rem_1fr_1fr_1fr_9rem] gap-3 border-b border-line bg-tint px-4 py-2 text-xs font-semibold text-ink-muted">
             <span>วันที่</span>
             <span className="text-right">รายรับ</span>
             <span className="text-right">รายจ่าย</span>
             <span className="text-right">เงินฝาก</span>
+            <span>ที่มา</span>
           </div>
           <div className="divide-y divide-line">
             {days.map((d) => (
@@ -104,7 +108,7 @@ export function HistoryPage({ property }: Props) {
                 key={d.date}
                 type="button"
                 onClick={() => navigate(`/${property}/day/${d.date}`)}
-                className="grid w-full grid-cols-[auto_1fr_1fr_1fr] gap-2 px-3 py-2.5 text-left text-sm hover:bg-tint focus:outline-none focus:ring-2 focus:ring-inset focus:ring-brand-500/40"
+                className="grid w-full grid-cols-[10rem_1fr_1fr_1fr_9rem] gap-3 px-4 py-2.5 text-left text-sm hover:bg-tint focus:outline-none focus:ring-2 focus:ring-inset focus:ring-brand-500/40"
               >
                 <span className="flex items-center gap-1 text-ink">
                   {isoToBuddhist(d.date)} <span className="text-ink-muted">{weekdayTh(d.date)}</span>
@@ -131,6 +135,15 @@ export function HistoryPage({ property }: Props) {
                 <span className="text-right tabular-nums text-ink">{formatSatang(d.expenseSatang)}</span>
                 <span className="text-right tabular-nums font-medium text-brand-500">
                   {formatSatang(d.cashToDepositSatang)}
+                </span>
+                {/* 759 backfilled days sit in here, so how a day came to
+                    exist is what the month list most wants to show at a
+                    glance. Short label in the cell, full sentence on hover. */}
+                <span
+                  title={PROVENANCE_LABELS_TH[d.provenance]}
+                  className="min-w-0 truncate text-xs text-ink-muted"
+                >
+                  {PROVENANCE_SHORT_TH[d.provenance]}
                 </span>
               </button>
             ))}

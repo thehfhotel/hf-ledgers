@@ -14,7 +14,8 @@
 import type { Property } from "../../shared/types.ts";
 
 export interface ExportTarget {
-  /** The ReportSheet's own root element, at its true 720px width. */
+  /** The ReportSheet's own root element, at its true (unscaled) print
+   * width — REPORT_SHEET_WIDTH, ~1180px. */
   node: HTMLElement;
   property: Property;
   date: string;
@@ -40,12 +41,28 @@ async function ensureFontsReady(): Promise<void> {
   }
 }
 
+/** 2x device scale. The sheet is a wide (~1180px) landscape document, so the
+ * 11px grid type is small on the page; rasterising at 2x is what keeps it
+ * legible when someone pinch-zooms the JPEG in LINE. Not devicePixelRatio:
+ * the export must be identical whether it was made on the office PC or a
+ * HiDPI laptop. */
+const CAPTURE_SCALE = 2;
+
 async function captureCanvas(node: HTMLElement): Promise<HTMLCanvasElement> {
   const html2canvas = (await import("html2canvas-pro")).default;
+  // width/windowWidth are passed explicitly because the sheet is wider than
+  // the browser window it is previewed in (the preview shrinks it with a CSS
+  // transform, which is neutralised for the capture). Left to default, the
+  // clone document would lay out at window width and the right-hand columns
+  // of the booking grid could fall off the JPEG.
   return html2canvas(node, {
-    scale: 2,
+    scale: CAPTURE_SCALE,
     backgroundColor: "#ffffff",
     logging: false,
+    width: node.offsetWidth,
+    height: node.offsetHeight,
+    windowWidth: node.offsetWidth,
+    windowHeight: node.offsetHeight,
   });
 }
 

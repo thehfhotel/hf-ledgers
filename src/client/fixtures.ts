@@ -1,14 +1,29 @@
 import { deriveCashBlock } from "../shared/bookings.ts";
 import { computeDayTotals } from "../shared/totals.ts";
-import type { Category, DaySheet, ExpenseItem, IncomeCell } from "../shared/types.ts";
+import { TENDERS } from "../shared/types.ts";
+import type {
+  BookingLine,
+  Category,
+  DaySheet,
+  ExpenseItem,
+  IncomeCell,
+  OtherIncomeItem,
+  Tender,
+} from "../shared/types.ts";
 
-// Realistic demo DaySheet for WP-C's standalone report rendering
-// (src/client/pages/ReportPage.tsx and components/ReportSheet.tsx can
-// render this with no live server). Income figures are lifted from an
-// actual paper sheet (สรุปยอดรายรับโรงแรม): ค่าห้องเงินสด 490.00,
-// โอน/กสิกร 8,290.00, เว็ปไซด์ 2,983.80, บาร์น้ำ เงินสด 20.00 — these four
-// sum to exactly the paper's printed total, 11,783.80 baht. `totals` is
-// computed via the SAME computeDayTotals() the server uses, not hardcoded.
+// Realistic demo data, rendered with no live server by
+// /demo/report/:date (ReportPage + components/ReportSheet.tsx) and
+// /demo/bookings/:date (BookingDayPage + components/BookingGrid.tsx).
+//
+// Income figures are lifted from an actual paper sheet
+// (สรุปยอดรายรับโรงแรม): ค่าห้องเงินสด 490.00, โอน/กสิกร 8,290.00,
+// เว็ปไซด์ 2,983.80, บาร์น้ำ เงินสด 20.00 — those four sum to exactly the
+// paper's printed total, 11,783.80 baht. The demo day additionally carries
+// one itemized รายการอื่นๆ entry (150.00 cash, breakfast), so its
+// รายการอื่นๆ เงินสด cell is 150.00 and the day's รวม is 11,933.80 —
+// server-side that cell is computed from the items, and it is written the
+// same way here rather than left inconsistent. `totals` is computed via the
+// SAME computeDayTotals() the server uses, never hardcoded.
 
 export const FIXTURE_DATE = "2026-07-28";
 export const FIXTURE_UPDATED_BY = "reception@thehfhotel.org";
@@ -59,6 +74,7 @@ const income: Record<number, IncomeCell> = {
   2: cell(2, 49_000), // ค่าห้องเงินสด 490.00
   5: cell(5, 829_000), // โอน/กสิกร 8,290.00
   7: cell(7, 298_380), // เว็ปไซด์ 2,983.80
+  8: { ...cell(8, 15_000), source: "manual", manual: false }, // รายการอื่นๆ เงินสด 150.00 — computed from otherIncome below
   9: cell(9, 2_000), // บาร์น้ำ เงินสด 20.00
 };
 
@@ -101,18 +117,125 @@ const expenses: ExpenseItem[] = [
   },
 ];
 
-// No booking lines or itemized other-income in this demo day, so the
-// booking-detail-page fields are all empty/zero; the cash block still runs
-// through the real deriveCashBlock() rather than being hand-computed.
+// ── Booking rows (the grid) ──────────────────────────────────────────────
+// Five rows chosen to exercise every state the grid has to render: a plain
+// cash room, a two-night transfer, an OTA row whose tenders legitimately do
+// NOT reconcile against gross - discount (lineArithmeticMismatch true, the
+// quiet marker), an รายการอื่นๆ row that fills the eighth tender column,
+// and a PMS draft (excluded from computeBookingTotals, tinted in the grid).
+// The three confirmed room rows' tenders match the income cells above:
+// cash 490.00, โอน/กสิกร 8,290.00, เว็ปไซด์ 2,983.80.
+
+function tenders(partial: Partial<Record<Tender, number>>): Record<Tender, number> {
+  const base = Object.fromEntries(TENDERS.map((tender) => [tender, 0])) as Record<Tender, number>;
+  return { ...base, ...partial };
+}
+
+function bookingLine(
+  line: Pick<BookingLine, "id" | "seq"> & Partial<Omit<BookingLine, "id" | "seq">>,
+): BookingLine {
+  return {
+    property: "hf",
+    date: FIXTURE_DATE,
+    bookingNo: null,
+    guestName: null,
+    roomNo: null,
+    roomCount: 1,
+    nights: 1,
+    grossRoomSatang: 0,
+    grossOtherSatang: 0,
+    discountSatang: 0,
+    tenders: tenders({}),
+    remark: null,
+    source: "manual",
+    draft: false,
+    sourceSheet: null,
+    createdAt: updatedAt,
+    createdBy: FIXTURE_UPDATED_BY,
+    updatedAt,
+    updatedBy: FIXTURE_UPDATED_BY,
+    ...line,
+  };
+}
+
+export const fixtureBookingLines: BookingLine[] = [
+  bookingLine({
+    id: 1,
+    seq: 1,
+    bookingNo: "6907-018",
+    guestName: "คุณสมชาย ใจดี",
+    roomNo: "203",
+    grossRoomSatang: 49_000,
+    tenders: tenders({ cash: 49_000 }),
+  }),
+  bookingLine({
+    id: 2,
+    seq: 2,
+    bookingNo: "6907-019",
+    guestName: "คุณวราภรณ์ ศรีทอง",
+    roomNo: "305",
+    nights: 2,
+    grossRoomSatang: 829_000,
+    tenders: tenders({ transfer_kbank: 829_000 }),
+  }),
+  bookingLine({
+    id: 3,
+    seq: 3,
+    guestName: "Agoda - J. Tanaka",
+    roomNo: "402",
+    grossRoomSatang: 310_000,
+    tenders: tenders({ web: 298_380 }),
+    remark: "ค่าคอมมิชชั่นหักที่ต้นทาง",
+    source: "import",
+    sourceSheet: "ก.ค.69",
+  }),
+  bookingLine({
+    id: 4,
+    seq: 4,
+    guestName: "อาหารเช้าเพิ่ม ห้อง 203",
+    roomCount: null,
+    nights: null,
+    grossOtherSatang: 15_000,
+    tenders: tenders({ other: 15_000 }),
+  }),
+  bookingLine({
+    id: 5,
+    seq: 5,
+    guestName: "Booking.com - M. Lee",
+    roomNo: "501",
+    grossRoomSatang: 180_000,
+    tenders: tenders({ deposit: 90_000 }),
+    source: "pms",
+    draft: true,
+  }),
+];
+
+const otherIncome: OtherIncomeItem[] = [
+  {
+    id: 1,
+    property: "hf",
+    date: FIXTURE_DATE,
+    description: "อาหารเช้าเพิ่ม ห้อง 203",
+    amountSatang: 15_000,
+    isCash: true,
+    createdAt: updatedAt,
+    createdBy: FIXTURE_UPDATED_BY,
+    updatedAt,
+    updatedBy: FIXTURE_UPDATED_BY,
+  },
+];
+
+// The cash block runs through the real deriveCashBlock() rather than being
+// hand-computed, same as the server does.
 export const fixtureDaySheet: DaySheet = {
   categories,
   income,
   expenses,
   note: "ฝากเงินที่ธนาคารกสิกรไทย สาขาใกล้เคียง",
   totals: computeDayTotals(categories, income, expenses),
-  bookingLineCount: 0,
-  otherIncome: [],
-  cashBlock: { derived: deriveCashBlock(categories, income, []), entered: null },
+  bookingLineCount: fixtureBookingLines.length,
+  otherIncome,
+  cashBlock: { derived: deriveCashBlock(categories, income, otherIncome), entered: null },
   provenance: "app",
   verifiedAt: null,
   verifiedBy: null,

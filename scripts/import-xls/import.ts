@@ -24,6 +24,7 @@ import {
   CASH_BLOCK_KEY_TO_APP_FIELD,
   checkGrandTotals,
   describeDateResolution,
+  deriveNonBookingIncomeFromRecap,
   fieldsExceedingLength,
   groupReportSheetsByPropertyDate,
   groupSummaryDaysByDate,
@@ -44,10 +45,23 @@ import type {
   QuarantineRow,
   VarianceSample,
 } from "./plan.ts";
+import {
+  acceptedSummaryDates,
+  applyResolutionsToReportSheets,
+  applyResolutionsToSummaryDays,
+  assertEveryResolutionMatched,
+} from "./resolutions.ts";
+import type { AppliedResolutionRow, SheetResolution } from "./resolutions.ts";
+import {
+  IMPORT_ACTOR,
+  importerMayWriteDayLevel,
+  importerMayWriteIncomeCell,
+} from "./human-edits.ts";
+import type { HumanCellSkipRow, HumanDaySkipRow } from "./human-edits.ts";
 import { writeReportFiles } from "./report.ts";
 import type { ImportRunSummary, MonthlyTotal, TenderRowCounts, UnknownLabelRow } from "./report.ts";
 import { deriveIncomeFromBookings, RECONCILE_TOLERANCE_SATANG } from "../../src/shared/bookings.ts";
-import type { CashBlockAmounts, CategoryKey } from "../../src/shared/types.ts";
+import type { CashBlockAmounts, CategoryKey, DayProvenance } from "../../src/shared/types.ts";
 import type * as DbModule from "../../src/server/db.ts";
 
 // ── the source map's four fixed workbooks ──────────────────────────────────
@@ -56,8 +70,6 @@ const HF_SUMMARY_PATH = "/Users/nut/Downloads/สรุปยอด(รายว
 const HF_REPORT_PATH = "/Users/nut/Downloads/รายงานรายรับโรงแรม(รายวัน).xlsx";
 const VILLE_SUMMARY_PATH = "/Users/nut/Downloads/สรุปยอดรายวัน - HF-Ville.xls";
 const VILLE_REPORT_PATH = "/Users/nut/Downloads/รายงานรายรับโรงแรมรายวัน HF-VILLE.xls";
-
-const IMPORT_ACTOR = "import:excel";
 
 const BOUND = {
   BOOKING_NO_MAX_LEN: 40,
@@ -239,7 +251,7 @@ function reportQuarantineRows(groups: ReturnType<typeof groupReportSheetsByPrope
 
 // ── per-day write ────────────────────────────────────────────────────────────
 
-interface WriteDayOutcome {
+export interface WriteDayOutcome {
   dayRow: DayRow;
   varianceSamples: VarianceSample[];
   unknownLabelRows: UnknownLabelRow[];
@@ -255,6 +267,11 @@ interface WriteDayOutcome {
   /** The summary sheet's own printed รวม, or null when this day has no typed
    *  summary to compare against (a reconstructed day) — see checkGrandTotals. */
   printedTotalSatang: number | null;
+  /** Income cells left alone because a human owns them — see human-edits.ts. */
+  humanCellSkips: HumanCellSkipRow[];
+  /** At most one row: the day-level write skipped because a human owns the
+   *  day's sheet_days row. */
+  humanDaySkips: HumanDaySkipRow[];
 }
 
 function checkBookingRowBounds(row: BookingRow, sheetName: string, property: PropertyCode, date: string): string[] {
@@ -275,7 +292,7 @@ function checkBookingRowBounds(row: BookingRow, sheetName: string, property: Pro
   return warnings;
 }
 
-function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean): WriteDayOutcome {
+export function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean): WriteDayOutcome {
   const { db } = dbModule;
   const categories = dbModule.listCategories(plan.property, false);
   const categoryIdByKey = new Map<CategoryKey, number>();
@@ -285,21 +302,76 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
   const unknownLabelRows: UnknownLabelRow[] = [];
   const varianceSamples: VarianceSample[] = [];
   const categoryBreakdown: Partial<Record<CategoryKey, number>> = {};
+  const humanCellSkips: HumanCellSkipRow[] = [];
+  const humanDaySkips: HumanDaySkipRow[] = [];
   let incomeCategoriesWritten = 0;
   let otherIncomeItemsWritten = 0;
   let otherIncomeSatang = 0;
   let cashBlockOverrideWritten = false;
   let bookingLineCount = 0;
   let incomeSatangWritten = 0;
+  // Fix: the report must never claim a provenance the database doesn't
+  // hold (see human-edits.ts) — defaults to the planned value and is
+  // corrected to the actually-stored one below when the day-level guard
+  // skips the provenance stamp.
+  let storedProvenance: DayProvenance = plan.provenance;
 
   runDayTransaction(db, apply, () => {
+    // 0. Ownership snapshot, taken before this day is touched: the human-edit
+    // guard (human-edits.ts) may only ever let the importer overwrite what
+    // the importer itself wrote. Read once per day, never re-read mid-write,
+    // so the decision cannot be influenced by this run's own writes.
+    const existingIncome = dbModule.getIncomeForDay(plan.property, plan.date);
+    const existingSheetDay = dbModule.getSheetDay(plan.property, plan.date);
+    const dayLevelWritable = importerMayWriteDayLevel(existingSheetDay);
+    const dayLevelSkippedFields: string[] = [];
+
+    /** Writes one income cell unless a human owns it. A skipped cell still
+     *  counts its stored (human) amount toward the day's total, because that
+     *  IS what the ledger holds for the day — the grand-total reconciliation
+     *  would otherwise compare the paper against a number nothing has. */
+    function writeIncomeCell(key: CategoryKey, categoryId: number, amountSatang: number): void {
+      const existing = existingIncome[categoryId];
+      if (!importerMayWriteIncomeCell(existing)) {
+        const owned = existing!;
+        humanCellSkips.push({
+          property: plan.property,
+          date: plan.date,
+          categoryId,
+          categoryKey: key,
+          workbookSatang: amountSatang,
+          existingSatang: owned.amountSatang,
+          existingSource: owned.source,
+          existingUpdatedBy: owned.updatedBy,
+        });
+        incomeSatangWritten += owned.amountSatang;
+        categoryBreakdown[key] = owned.amountSatang;
+        return;
+      }
+      dbModule.saveIncomeCell(plan.property, plan.date, categoryId, amountSatang, null, IMPORT_ACTOR, "import", true);
+      incomeCategoriesWritten++;
+      incomeSatangWritten += amountSatang;
+      categoryBreakdown[key] = amountSatang;
+    }
+
     // 1. Income vector: typed summary wins; a reconstructed day derives from
-    // its booking rows instead (see plan.ts buildDayPlans).
+    // its booking rows instead (see plan.ts buildDayPlans). A reconstructed
+    // day ALSO reads its per-booking sheet's own recap block for the four
+    // categories no booking row can ever produce — bar_cash, bar_transfer,
+    // other_cash, other_transfer (deriveNonBookingIncomeFromRecap) — that
+    // recap is the only record of this money anywhere on a day with no
+    // typed summary, unlike the seven booking-derivable tenders this
+    // importer otherwise never trusts a recap block for (see plan.ts).
     let incomeByKey: Partial<Record<CategoryKey, number>>;
+    let recapNonBookingIncome: ReturnType<typeof deriveNonBookingIncomeFromRecap> | null = null;
     if (plan.provenance === "reconstructed") {
       const rows = plan.reportSheet?.bookingRows ?? [];
       const lines = rows.map((row, i) => toDerivationBookingLine(row, plan.property, plan.date, i + 1));
-      incomeByKey = deriveIncomeFromBookings(lines);
+      const derivedFromBookings = deriveIncomeFromBookings(lines);
+      recapNonBookingIncome = plan.reportSheet
+        ? deriveNonBookingIncomeFromRecap(plan.reportSheet.ownSummaryBlock.lines)
+        : { categories: {}, otherIncomeItems: [] };
+      incomeByKey = { ...derivedFromBookings, ...recapNonBookingIncome.categories };
     } else if (plan.summary) {
       incomeByKey = {};
       for (const [summaryKey, amount] of Object.entries(plan.summary.categories)) {
@@ -316,10 +388,16 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
         warnings.push(`no active category for key=${key} property=${plan.property} date=${plan.date} — cell skipped`);
         continue;
       }
-      dbModule.saveIncomeCell(plan.property, plan.date, categoryId, amountSatang, null, IMPORT_ACTOR, "import", true);
-      incomeCategoriesWritten++;
-      incomeSatangWritten += amountSatang;
-      categoryBreakdown[key] = amountSatang;
+      writeIncomeCell(key, categoryId, amountSatang);
+      if (recapNonBookingIncome && key in recapNonBookingIncome.categories) {
+        // Auditable-not-silent: this category has no booking row to derive
+        // from, so this figure came only from the sheet's own recap block.
+        warnings.push(
+          `${plan.property} ${plan.date} (reconstructed day, sheet ${plan.reportSheet?.sheetName ?? "?"}): ` +
+            `${key} = ${amountSatang} satang read from the per-booking sheet's own recap block (no booking row can ` +
+            "ever produce this category) — written.",
+        );
+      }
     }
 
     // 2. Variance: only meaningful when both a typed summary AND booking
@@ -337,11 +415,16 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
       }
     }
 
-    // 3. Itemized other-income + unknown-label folding — only from a real
-    // typed summary (a reconstructed day has no itemized source at all).
+    // 3. Itemized other-income + unknown-label folding. Typed-summary days:
+    // unchanged below. Reconstructed days: the recap block's own itemized
+    // รายการอื่นๆ rows (recapNonBookingIncome, computed in step 1 above) are
+    // the day's only other-income source — a per-booking sheet carries no
+    // unknownLabels or cashBlock concept at all, only a typed summary does,
+    // so those two sub-steps and the cash-block override stay summary-only.
+    deletePriorImportRows(db, "other_income_items", plan.property, plan.date);
+
     if (plan.summary) {
       const summary = plan.summary;
-      deletePriorImportRows(db, "other_income_items", plan.property, plan.date);
 
       for (const item of summary.otherIncomeItems) {
         // other_income_items.amount_satang has a CHECK (> 0) — matches the
@@ -396,30 +479,16 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
           const otherTransferCategoryId = categoryIdByKey.get("other_transfer");
 
           if (otherCashCategoryId !== undefined) {
-            dbModule.saveIncomeCell(plan.property, plan.date, otherCashCategoryId, cashPortionSatang, null, IMPORT_ACTOR, "import", true);
-            incomeCategoriesWritten++;
-            categoryBreakdown.other_cash = cashPortionSatang;
+            writeIncomeCell("other_cash", otherCashCategoryId, cashPortionSatang);
           } else {
             warnings.push(`no active other_cash category for property=${plan.property} date=${plan.date} — cell skipped`);
           }
           if (otherTransferCategoryId !== undefined) {
-            dbModule.saveIncomeCell(
-              plan.property,
-              plan.date,
-              otherTransferCategoryId,
-              transferPortionSatang,
-              null,
-              IMPORT_ACTOR,
-              "import",
-              true,
-            );
-            incomeCategoriesWritten++;
-            categoryBreakdown.other_transfer = transferPortionSatang;
+            writeIncomeCell("other_transfer", otherTransferCategoryId, transferPortionSatang);
           } else {
             warnings.push(`no active other_transfer category for property=${plan.property} date=${plan.date} — cell skipped`);
           }
 
-          incomeSatangWritten += totalOtherSatang;
           warnings.push(
             `${plan.property} ${plan.date} (sheet ${summary.sheetName}): un-itemized other-income total ${totalOtherSatang} satang had no itemized rows — split deterministically via the cash-block into ${cashPortionSatang} cash / ${transferPortionSatang} transfer, written directly to other_cash/other_transfer (no items exist for this day, so the cells stay directly editable per the app's own contract).`,
           );
@@ -469,14 +538,46 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
       }
 
       // 4. Cash-block override — the office's own typed control figures.
+      // setCashBlockOverride REPLACES all four fields in one shot, so a
+      // human-owned day must skip it wholesale (human-edits.ts): partially
+      // merging the workbook into a manager's own cash block would invent a
+      // combination neither source ever stated.
       if (Object.keys(summary.cashBlock).length > 0) {
-        const patch: Partial<CashBlockAmounts> = {};
-        for (const [cashKey, amount] of Object.entries(summary.cashBlock)) {
-          if (amount === undefined) continue;
-          patch[CASH_BLOCK_KEY_TO_APP_FIELD[cashKey as CashBlockKey]] = amount;
+        if (dayLevelWritable) {
+          const patch: Partial<CashBlockAmounts> = {};
+          for (const [cashKey, amount] of Object.entries(summary.cashBlock)) {
+            if (amount === undefined) continue;
+            patch[CASH_BLOCK_KEY_TO_APP_FIELD[cashKey as CashBlockKey]] = amount;
+          }
+          dbModule.setCashBlockOverride(plan.property, plan.date, patch, IMPORT_ACTOR);
+          cashBlockOverrideWritten = true;
+        } else {
+          dayLevelSkippedFields.push("cash-block override");
         }
-        dbModule.setCashBlockOverride(plan.property, plan.date, patch, IMPORT_ACTOR);
-        cashBlockOverrideWritten = true;
+      }
+    } else if (recapNonBookingIncome) {
+      // Reconstructed day: itemize the recap block's own รายการอื่นๆ rows —
+      // same shape and the same non-positive-amount skip as a typed
+      // summary's own otherIncomeItems above, just sourced from the
+      // per-booking sheet's recap instead of a day-summary sheet.
+      for (const item of recapNonBookingIncome.otherIncomeItems) {
+        if (item.amountSatang <= 0) {
+          warnings.push(
+            `${plan.property} ${plan.date} (reconstructed day, sheet ${plan.reportSheet?.sheetName ?? "?"}): ` +
+              `other-income item "${item.text}" from the recap block has amount ${item.amountSatang} satang (not > 0) — skipped, not written.`,
+          );
+          continue;
+        }
+        const isCash = item.isCash ?? true;
+        dbModule.createOtherIncomeItem(plan.property, plan.date, item.text || null, item.amountSatang, isCash, IMPORT_ACTOR);
+        otherIncomeItemsWritten++;
+        incomeSatangWritten += item.amountSatang;
+        otherIncomeSatang += item.amountSatang;
+        warnings.push(
+          `${plan.property} ${plan.date} (reconstructed day, sheet ${plan.reportSheet?.sheetName ?? "?"}): ` +
+            `other-income item "${item.text}" = ${item.amountSatang} satang read from the per-booking sheet's own ` +
+            "recap block (never derivable from booking rows) — imported.",
+        );
       }
     }
 
@@ -514,8 +615,31 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
       });
     }
 
-    // 6. Provenance stamp.
-    upsertSheetDayProvenance(db, plan.property, plan.date, plan.provenance, IMPORT_ACTOR);
+    // 6. Provenance stamp — same sheet_days row, same guard. Skipping it on a
+    // human-owned day is what keeps the guard STABLE across runs: stamping
+    // updated_by = import:excel here would erase the evidence that a person
+    // owns this day, and the next run would clobber their cash block and note.
+    if (dayLevelWritable) {
+      upsertSheetDayProvenance(db, plan.property, plan.date, plan.provenance, IMPORT_ACTOR);
+    } else {
+      dayLevelSkippedFields.push(`provenance stamp (${plan.provenance})`);
+      // Fix: the run report must state what the database actually holds, not
+      // what this run wanted to stamp — a human owns this day's sheet_days
+      // row, so its provenance stays whatever was already there (existing
+      // non-null per importerMayWriteDayLevel's own contract).
+      storedProvenance = existingSheetDay!.provenance;
+    }
+
+    if (!dayLevelWritable && existingSheetDay) {
+      // The note and the verification stamp are covered by the same skip: no
+      // write in this function touches them, and none may start to.
+      humanDaySkips.push({
+        property: plan.property,
+        date: plan.date,
+        existingUpdatedBy: existingSheetDay.updatedBy,
+        skippedFields: dayLevelSkippedFields,
+      });
+    }
   });
 
   const dayRow: DayRow = {
@@ -530,6 +654,7 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
     otherIncomeItemsWritten,
     cashBlockOverrideWritten,
     contradictsSourceMap: plan.contradictsSourceMap,
+    storedProvenance,
   };
 
   return {
@@ -541,6 +666,8 @@ function writeDay(dbModule: typeof DbModule, plan: DayImportPlan, apply: boolean
     categoryBreakdown,
     otherIncomeSatang,
     printedTotalSatang: plan.summary?.printedTotalSatang ?? null,
+    humanCellSkips,
+    humanDaySkips,
   };
 }
 
@@ -565,12 +692,49 @@ async function main(): Promise<void> {
   const totalSheetsAcrossWorkbooks =
     hfSummary.sheetsParsed + villeSummary.sheetsParsed + hfReport.sheetsParsed + villeReport.sheetsParsed;
 
-  const hfSummaryGroups = groupSummaryDaysByDate(hfSummary.days);
-  const villeSummaryGroups = groupSummaryDaysByDate(villeSummary.days);
+  // The owner-approved resolutions for the sheets the first run quarantined
+  // (resolutions.ts). Applied here, between parsing and grouping, so a listed
+  // sheet reaches the grouping stage already carrying its approved property
+  // and date — and therefore never hits the collision or the date vote that
+  // quarantined it. An ignored sheet is dropped before grouping, which is
+  // what dissolves a duplicate pair. Anything unlisted is untouched.
+  const hfSummaryResolved = applyResolutionsToSummaryDays("hf-summary", hfSummary.days);
+  const villeSummaryResolved = applyResolutionsToSummaryDays("ville-summary", villeSummary.days);
+  const hfReportResolved = applyResolutionsToReportSheets("hf-booking", hfReport.days);
+  const villeReportResolved = applyResolutionsToReportSheets("ville-booking", villeReport.days);
+
+  const unmatchedResolutions: SheetResolution[] = [
+    ...hfSummaryResolved.unmatched,
+    ...villeSummaryResolved.unmatched,
+    ...hfReportResolved.unmatched,
+    ...villeReportResolved.unmatched,
+  ];
+  assertEveryResolutionMatched(unmatchedResolutions);
+
+  const appliedResolutions: AppliedResolutionRow[] = [
+    ...hfSummaryResolved.applied,
+    ...villeSummaryResolved.applied,
+    ...hfReportResolved.applied,
+    ...villeReportResolved.applied,
+  ];
+  console.log(
+    `[import-xls] resolutions applied: ${appliedResolutions.filter((r) => r.action === "accept").length} accepted, ` +
+      `${appliedResolutions.filter((r) => r.action === "ignore").length} ignored.`,
+  );
+
+  // A resolution may move a summary sheet ACROSS workbooks: the HF summary
+  // book holds the first HF Ville day. Group by each record's own resolved
+  // property, never by which file it came from — the same rule the
+  // per-booking layer has always used. (The workbook labels below stay
+  // property-shaped because only accepted sheets can move, and an accepted
+  // sheet can no longer be quarantined.)
+  const allSummaryDays = [...hfSummaryResolved.records, ...villeSummaryResolved.records];
+  const hfSummaryGroups = groupSummaryDaysByDate(allSummaryDays.filter((d) => d.property === "hf"));
+  const villeSummaryGroups = groupSummaryDaysByDate(allSummaryDays.filter((d) => d.property === "hfville"));
 
   const labeledReportSheets: LabeledReportSheet[] = [
-    ...hfReport.days.map((record) => ({ workbookLabel: "HF per-booking", record })),
-    ...villeReport.days.map((record) => ({ workbookLabel: "Ville per-booking", record })),
+    ...hfReportResolved.records.map((record) => ({ workbookLabel: "HF per-booking", record })),
+    ...villeReportResolved.records.map((record) => ({ workbookLabel: "Ville per-booking", record })),
   ];
   const reportGroups = groupReportSheetsByPropertyDate(labeledReportSheets);
 
@@ -589,6 +753,7 @@ async function main(): Promise<void> {
     hfSummaryByDate: singleSheetByDate(hfSummaryGroups.byDate),
     villeSummaryByDate: singleSheetByDate(villeSummaryGroups.byDate),
     reportByPropertyDate,
+    resolvedVilleSummaryDates: acceptedSummaryDates("hfville"),
   });
 
   const selectedDayPlans = dayPlans.filter(
@@ -610,6 +775,8 @@ async function main(): Promise<void> {
   const warnings: string[] = [];
   const monthlyByKey = new Map<string, MonthlyTotal>();
   const tenderRowsByProperty = new Map<PropertyCode, BookingRow[]>();
+  const humanCellSkips: HumanCellSkipRow[] = [];
+  const humanDaySkips: HumanDaySkipRow[] = [];
 
   for (const plan of selectedDayPlans) {
     const outcome = writeDay(dbModule, plan, opts.apply);
@@ -617,6 +784,8 @@ async function main(): Promise<void> {
     varianceSamples.push(...outcome.varianceSamples);
     unknownLabelRows.push(...outcome.unknownLabelRows);
     warnings.push(...outcome.warnings);
+    humanCellSkips.push(...outcome.humanCellSkips);
+    humanDaySkips.push(...outcome.humanDaySkips);
 
     if (outcome.printedTotalSatang !== null) {
       grandTotalSamples.push({
@@ -691,12 +860,18 @@ async function main(): Promise<void> {
     tenderCounts,
     monthlyTotals: [...monthlyByKey.values()],
     warnings,
+    resolutions: appliedResolutions,
+    humanCellSkips,
+    humanDaySkips,
     idempotencyNote:
       "Replace, keyed on (property, date): booking_lines and other_income_items rows this importer previously created " +
       `(created_by = '${IMPORT_ACTOR}') are deleted before re-inserting for that day, so a second run reflects the ` +
       "source workbooks exactly rather than accumulating duplicates. income_amounts is a natural upsert on " +
       "(property, date, category_id) via saveIncomeCell, so it never duplicates either. A human's manually entered " +
-      "rows (any other created_by) for the same day are never touched. Known side effect, verified empirically by " +
+      "rows (any other created_by) for the same day are never touched, and — since the human-edit guard landed — " +
+      "neither is an income cell, day note, cash-block field or verification stamp a human owns: the importer only " +
+      "overwrites what the importer itself wrote (see human-edits.ts and the Human-edit guard section above). " +
+      "Known side effect, verified empirically by " +
       "running --apply twice against a scratch copy: income_amounts/booking_lines/other_income_items/sheet_days row " +
       "counts were identical after the second run, but income_amount_history grew by one row per re-written cell " +
       "(saveIncomeCell always appends a history row, even when old===new) — this is an accurate audit trail of " +
@@ -709,12 +884,21 @@ async function main(): Promise<void> {
   console.log(
     `[import-xls] days written: ${days.length}, quarantined: ${selectedQuarantine.length}, skipped-as-copy: ${selectedSkippedCopies.length}`,
   );
+  console.log(
+    `[import-xls] human-edit guard: ${humanCellSkips.length} income cell(s) and ${humanDaySkips.length} day-level ` +
+      "write(s) left alone because a human owns them.",
+  );
   if (!opts.apply) {
     console.log("[import-xls] dry-run: every transaction was rolled back — the database is unchanged.");
   }
 }
 
-main().catch((err) => {
-  console.error("[import-xls] failed:", err);
-  process.exitCode = 1;
-});
+// Only when executed as a script: writeDay is exported above so the
+// human-edit guard can be tested against a real database without main()
+// parsing four workbooks on import.
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error("[import-xls] failed:", err);
+    process.exitCode = 1;
+  });
+}

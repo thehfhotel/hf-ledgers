@@ -6,6 +6,7 @@ import {
   classifyDayProvenance,
   compareSummaryDays,
   describeDateResolution,
+  deriveNonBookingIncomeFromRecap,
   fieldsExceedingLength,
   groupConsecutiveDates,
   groupReportSheetsByPropertyDate,
@@ -20,7 +21,7 @@ import {
   toAppTenders,
   toDerivationBookingLine,
 } from "./plan.ts";
-import type { DateResolution, ReportSheetRecord, SummaryDayRecord } from "./types.ts";
+import type { DateResolution, OwnSummaryLine, ReportSheetRecord, SummaryDayRecord } from "./types.ts";
 import type { LabeledReportSheet } from "./plan.ts";
 
 function resolution(overrides: Partial<DateResolution> = {}): DateResolution {
@@ -333,6 +334,109 @@ describe("toDerivationBookingLine", () => {
   });
 });
 
+function recapLine(label: string, amountSatang: number | null, rowIndex = 0): OwnSummaryLine {
+  return { label, amountSatang, rowIndex };
+}
+
+describe("deriveNonBookingIncomeFromRecap", () => {
+  test("reads bar_cash from a single บาร์น้ำ เงินสด line", () => {
+    const result = deriveNonBookingIncomeFromRecap([recapLine("บาร์น้ำ เงินสด", 2_500), recapLine("โอน", 0), recapLine("เครดิต", 0)]);
+    expect(result.categories).toEqual({ bar_cash: 2_500 });
+    expect(result.otherIncomeItems).toEqual([]);
+  });
+
+  test("sums the two bare โอน/เครดิต lines after บาร์น้ำ เงินสด into bar_transfer", () => {
+    // Real layout (verified against both report workbooks): the transfer/
+    // credit split for bar income prints as two BARE lines, never one
+    // combined "บาร์น้ำ โอน/เครดิต" line like the typed summary sheet does.
+    const result = deriveNonBookingIncomeFromRecap([recapLine("บาร์น้ำ เงินสด", 1_000), recapLine("โอน", 2_150), recapLine("เครดิต", 0)]);
+    expect(result.categories).toEqual({ bar_cash: 1_000, bar_transfer: 2_150 });
+  });
+
+  test("zero-valued bar lines are omitted, not written as zero", () => {
+    const result = deriveNonBookingIncomeFromRecap([recapLine("บาร์น้ำ เงินสด", 0), recapLine("โอน", 0), recapLine("เครดิต", 0)]);
+    expect(result.categories).toEqual({});
+  });
+
+  test("no บาร์น้ำ เงินสด line at all yields no bar categories, without throwing", () => {
+    const result = deriveNonBookingIncomeFromRecap([recapLine("ค่าห้องเงินสด", 500)]);
+    expect(result.categories).toEqual({});
+  });
+
+  test("a single itemized อื่นๆ entry embedded on the marker row (real case: hfville 2025-09-27)", () => {
+    const result = deriveNonBookingIncomeFromRecap([
+      recapLine("เว็บไซด์ Agoda", 268_000),
+      recapLine("รายการ อื่นๆ ค่าคีการด์ห้อง  108  ลูกค้าทำหายปรับเป็นเงิน 200 (เงินสด)", 200_00),
+      recapLine("บาร์น้ำ เงินสด", 0),
+      recapLine("โอน", 0),
+      recapLine("เครดิต", 0),
+    ]);
+    expect(result.otherIncomeItems).toEqual([
+      { text: "ค่าคีการด์ห้อง  108  ลูกค้าทำหายปรับเป็นเงิน 200 (เงินสด)", amountSatang: 200_00, isCash: true },
+    ]);
+    expect(result.categories).toEqual({});
+  });
+
+  test("a bare อื่นๆ marker (no embedded description) followed by two itemized continuation rows (real case)", () => {
+    const result = deriveNonBookingIncomeFromRecap([
+      recapLine("เว็บไซด์", 234_842),
+      recapLine("รายการ อื่นๆ", null),
+      recapLine("ค่าคีย์การ์ดหาย(เงินสด)", 100_00),
+      recapLine("ค่าเลทเช็คเอาท์ R.514 3ชม. (เงินโอน)", 300_00),
+      recapLine("บาร์น้ำ เงินสด", 100_00),
+      recapLine("โอน", 215_00),
+      recapLine("เครดิต", 0),
+    ]);
+    expect(result.otherIncomeItems).toEqual([
+      { text: "ค่าคีย์การ์ดหาย(เงินสด)", amountSatang: 100_00, isCash: true },
+      { text: "ค่าเลทเช็คเอาท์ R.514 3ชม. (เงินโอน)", amountSatang: 300_00, isCash: false },
+    ]);
+    expect(result.categories).toEqual({ bar_cash: 100_00, bar_transfer: 215_00 });
+  });
+
+  test("an embedded item on the marker row plus a bare continuation item (real case)", () => {
+    const result = deriveNonBookingIncomeFromRecap([
+      recapLine("รายการ อื่นๆ ค่าอาหารเช้า ห้อง 501 เงินสด", 100_00),
+      recapLine("ค่าอาหารเช้า ห้อง 406 โอน", 100_00),
+      recapLine("บาร์น้ำ เงินสด", 0),
+      recapLine("โอน", 0),
+      recapLine("เครดิต", 0),
+    ]);
+    expect(result.otherIncomeItems).toEqual([
+      { text: "ค่าอาหารเช้า ห้อง 501 เงินสด", amountSatang: 100_00, isCash: true },
+      { text: "ค่าอาหารเช้า ห้อง 406 โอน", amountSatang: 100_00, isCash: false },
+    ]);
+  });
+
+  test("a non-zero amount with no description anywhere keeps an empty (never invented) text", () => {
+    const result = deriveNonBookingIncomeFromRecap([
+      recapLine("รายการ อื่นๆ", 0),
+      recapLine("", 2_280_00),
+      recapLine("บาร์น้ำ เงินสด", 0),
+    ]);
+    expect(result.otherIncomeItems).toEqual([{ text: "", amountSatang: 2_280_00, isCash: undefined }]);
+  });
+
+  test("a stray zero-valued row matching a KNOWN category label stops the continuation scan (real case: bare 'เว็บไซด์' template row)", () => {
+    const result = deriveNonBookingIncomeFromRecap([
+      recapLine("รายการ อื่นๆ", 0),
+      recapLine("R.202 ค่าปรับ", 300_00),
+      recapLine("เว็บไซด์", 0), // known category label — not a continuation item
+      recapLine("บาร์น้ำ เงินสด", 0),
+    ]);
+    expect(result.otherIncomeItems).toEqual([{ text: "R.202 ค่าปรับ", amountSatang: 300_00, isCash: undefined }]);
+  });
+
+  test("no รายการอื่นๆ line at all yields no items, without throwing", () => {
+    const result = deriveNonBookingIncomeFromRecap([recapLine("ค่าห้องเงินสด", 500), recapLine("บาร์น้ำ เงินสด", 0)]);
+    expect(result.otherIncomeItems).toEqual([]);
+  });
+
+  test("an empty recap block (no lines at all) yields nothing, without throwing", () => {
+    expect(deriveNonBookingIncomeFromRecap([])).toEqual({ categories: {}, otherIncomeItems: [] });
+  });
+});
+
 describe("aggregateVariance", () => {
   const TOLERANCE = 100; // 1 THB, matches RECONCILE_TOLERANCE_SATANG
 
@@ -419,6 +523,40 @@ describe("buildDayPlans", () => {
     });
     expect(dayPlans[0]!.provenance).toBe("reconstructed");
     expect(dayPlans[0]!.contradictsSourceMap).toContain("HF day 2026-01-15");
+  });
+
+  test("a human-resolved Ville summary date beats the copy window and is imported as Ville", () => {
+    // The real case: '18-9-2568 FH-Ville   ' lives in the HF summary workbook
+    // and is HF Ville's first day — inside the copy-window range, but not a
+    // stale copy of anything. An owner ruling outranks the range heuristic.
+    const villeSummary = summaryDay({ property: "hfville", sheetName: "18-9-2568 FH-Ville   " });
+    const hfSummary = summaryDay({ sheetName: "18-9-2568          " });
+    const { dayPlans, skippedCopies } = buildDayPlans({
+      hfSummaryByDate: new Map([["2025-09-18", hfSummary]]),
+      villeSummaryByDate: new Map([["2025-09-18", villeSummary]]),
+      reportByPropertyDate: new Map([[reportGroupKey("hfville", "2025-09-18"), labeled("Ville per-booking")]]),
+      resolvedVilleSummaryDates: new Set(["2025-09-18"]),
+    });
+    const ville = dayPlans.filter((p) => p.property === "hfville");
+    expect(ville).toHaveLength(1);
+    expect(ville[0]!.provenance).toBe("transcribed");
+    expect(ville[0]!.summary!.sheetName).toBe("18-9-2568 FH-Ville   ");
+    // Not reported as a skipped copy — it was never treated as one.
+    expect(skippedCopies).toHaveLength(0);
+    // The HF half of the same date is unaffected.
+    expect(dayPlans.filter((p) => p.property === "hf")).toHaveLength(1);
+  });
+
+  test("an unlisted copy-window date keeps the old behaviour exactly", () => {
+    const villeSummary = summaryDay({ property: "hfville", sheetName: "1-6-68" });
+    const { dayPlans, skippedCopies } = buildDayPlans({
+      hfSummaryByDate: new Map(),
+      villeSummaryByDate: new Map([["2025-06-01", villeSummary]]),
+      reportByPropertyDate: new Map(),
+      resolvedVilleSummaryDates: new Set(["2025-09-18"]),
+    });
+    expect(dayPlans.filter((p) => p.property === "hfville")).toHaveLength(0);
+    expect(skippedCopies).toHaveLength(1);
   });
 
   test("Ville day before the copy window with no booking rows is skipped entirely, not imported", () => {

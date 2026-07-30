@@ -207,7 +207,10 @@ Wave 2 additions:
 
 - `bookingNo`: ≤ 40 chars (`BOOKING_NO_MAX_LEN`)
 - `guestName`: ≤ 120 chars (`GUEST_NAME_MAX_LEN`)
-- `roomNo`: ≤ 40 chars (`ROOM_NO_MAX_LEN`)
+- `roomNo`: ≤ 200 chars (`ROOM_NO_MAX_LEN`) — group bookings carry long room
+  lists; the imported 38-room HF booking on 2025-10-10 is 125 chars. The
+  client slices to this bound on commit and the server validates against it,
+  so lowering it silently destroys data on blur.
 - `roomCount`, `nights`: `0 ..= 999` (`COUNT_MAX`)
 - `description` (OtherIncomeItem): ≤ 200 chars (`DESCRIPTION_MAX_LEN`)
 

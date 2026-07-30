@@ -336,6 +336,11 @@ export const NAME_TH_MIN_LEN = 1;
 export const NAME_TH_MAX_LEN = 80;
 export const BOOKING_NO_MAX_LEN = 40;
 export const GUEST_NAME_MAX_LEN = 120;
-export const ROOM_NO_MAX_LEN = 40;
+/** Room lists for large group bookings are genuinely long: the imported
+ * 2025-10-10 HF sheet carries a 38-room booking whose list runs 125 chars
+ * (it spanned several spreadsheet rows on the paper). 40 was too tight and
+ * silently truncated 12 real rows on blur, since the client slices to this
+ * bound and the server validates against it. Raised with headroom. */
+export const ROOM_NO_MAX_LEN = 200;
 export const COUNT_MAX = 999;
 export const DESCRIPTION_MAX_LEN = 200;

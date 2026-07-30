@@ -33,6 +33,9 @@ function baseSummary(overrides: Partial<ImportRunSummary> = {}): ImportRunSummar
     tenderCounts: [],
     monthlyTotals: [],
     warnings: [],
+    resolutions: [],
+    humanCellSkips: [],
+    humanDaySkips: [],
     idempotencyNote: "replace: rows this importer previously created (created_by = import:excel) are deleted before re-inserting for a given (property, date).",
     ...overrides,
   };
@@ -57,6 +60,7 @@ describe("renderDaysCsv", () => {
             property: "hf",
             date: "2026-01-15",
             provenance: "transcribed",
+            storedProvenance: "transcribed",
             sourceSummarySheet: "15-1-69",
             sourceBookingWorkbook: "HF per-booking",
             sourceBookingSheet: "15-1-69",
@@ -71,7 +75,7 @@ describe("renderDaysCsv", () => {
     );
     const lines = csv.trim().split("\n");
     expect(lines[0]).toContain("property,date,provenance");
-    expect(lines[1]).toContain("hf,2026-01-15,transcribed,15-1-69,HF per-booking,15-1-69,12,7,2,true,");
+    expect(lines[1]).toContain("hf,2026-01-15,transcribed,transcribed,15-1-69,HF per-booking,15-1-69,12,7,2,true,");
   });
 });
 
@@ -161,6 +165,7 @@ describe("renderMarkdownReport", () => {
             property: "hf",
             date: "2026-01-15",
             provenance: "transcribed",
+            storedProvenance: "transcribed",
             sourceSummarySheet: "15-1-69",
             sourceBookingWorkbook: null,
             sourceBookingSheet: null,
@@ -243,6 +248,7 @@ describe("renderMarkdownReport", () => {
           property: "hf" as const,
           date,
           provenance: "reconstructed" as const,
+          storedProvenance: "reconstructed" as const,
           sourceSummarySheet: null,
           sourceBookingWorkbook: "Ville per-booking",
           sourceBookingSheet: date,

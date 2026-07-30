@@ -5,10 +5,15 @@
 //     Any other NODE_ENV value ignores DEV_USER — fails closed.
 //   - else: verify the `cf-access-jwt-assertion` header (RS256, JWKS cached
 //     1h, iss/aud/exp/nbf) — pattern copied from /Users/nut/hf-mcp/src/auth.ts.
-//     isManager = the verified email is a member of MANAGER_EMAILS.
+//     isManager = the verified email is a member of the live "HF Managers"
+//     tier, read from the HF Portal directory (see directory-client.ts) —
+//     replaces the old hand-maintained MANAGER_EMAILS copy.
 //
 // Cloudflare Access fronts the whole host, so this is defense in depth for
 // the API — never the only gate.
+
+import { db } from "./db.ts";
+import { ensureDirectoryCache, resolveManagerEmails } from "./directory-client.ts";
 
 export interface Identity {
   email: string;
@@ -19,14 +24,9 @@ type Json = Record<string, any>;
 
 const TEAM_DOMAIN = () => process.env.ACCESS_TEAM_DOMAIN || "laikaexpress.cloudflareaccess.com";
 
-export function managerEmails(): Set<string> {
-  return new Set(
-    (process.env.MANAGER_EMAILS ?? "")
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
-}
+// Created once at module load — idempotent (CREATE TABLE IF NOT EXISTS), so
+// safe alongside db.ts's own migrate() (already run at db.ts import time).
+ensureDirectoryCache(db);
 
 // ── base64url helpers ──────────────────────────────────────────────────
 const fromB64url = (s: string): Uint8Array<ArrayBuffer> => Uint8Array.from(Buffer.from(s, "base64url"));
@@ -90,7 +90,8 @@ export async function verifyAccessJwt(token: string): Promise<Json | null> {
 export async function identify(req: Request): Promise<Identity | null> {
   if (process.env.NODE_ENV === "development" && process.env.DEV_USER) {
     const email = process.env.DEV_USER.toLowerCase();
-    return { email, isManager: managerEmails().has(email) };
+    const managers = await resolveManagerEmails(db);
+    return { email, isManager: managers.has(email) };
   }
 
   const jwt = req.headers.get("cf-access-jwt-assertion");
@@ -98,5 +99,6 @@ export async function identify(req: Request): Promise<Identity | null> {
   const payload = await verifyAccessJwt(jwt);
   if (!payload?.email) return null;
   const email = String(payload.email).toLowerCase();
-  return { email, isManager: managerEmails().has(email) };
+  const managers = await resolveManagerEmails(db);
+  return { email, isManager: managers.has(email) };
 }

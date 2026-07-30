@@ -7,7 +7,11 @@
 process.env.DB_PATH = ":memory:";
 process.env.NODE_ENV = "development";
 process.env.DEV_USER = "tester@thehfhotel.org";
-process.env.MANAGER_EMAILS = "tester@thehfhotel.org";
+// Manager membership now comes from the portal directory (directory-client.ts);
+// PROTECTED_MANAGER is the one email always treated as a manager regardless of
+// portal reachability, so setting it here keeps this suite's manager-only
+// route tests working without a live portal or a seeded cache.
+process.env.PROTECTED_MANAGER = "tester@thehfhotel.org";
 process.env.PORT = "0"; // let the OS pick a free port — avoids clashing with `bun run dev`
 
 import { beforeAll, describe, expect, test } from "bun:test";

@@ -98,6 +98,8 @@ jobs:
           ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
           ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
           MANAGER_EMAILS: ${{ secrets.MANAGER_EMAILS }}
+          PORTAL_DIRECTORY_TOKEN: ${{ secrets.PORTAL_DIRECTORY_TOKEN }}
+          ANALYTICS_TOKEN: ${{ secrets.ANALYTICS_TOKEN }}
         run: |
           set -euo pipefail
           # Runtime env shipped alongside compose; docker compose reads
@@ -110,6 +112,16 @@ jobs:
             printf 'ACCESS_TEAM_DOMAIN=%s\n' "${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}"
             printf 'ACCESS_AUD=%s\n' "${ACCESS_AUD:-}"
             printf 'MANAGER_EMAILS=%s\n' "${MANAGER_EMAILS:-}"
+            # Manager list derived live from the HF Managers tier via the portal
+            # directory (directory-client.ts). URL is server-to-server over the
+            # shared-nginx docker network - not a secret; the token is.
+            printf 'PORTAL_DIRECTORY_URL=%s\n' "http://hf-erp-portal:3000/portal-api/directory/managers"
+            printf 'PORTAL_DIRECTORY_TOKEN=%s\n' "${PORTAL_DIRECTORY_TOKEN:-}"
+            printf 'PROTECTED_MANAGER=%s\n' "winut.hf@gmail.com"
+            # Daily-rollup outbox to hf-analytics (analytics-push.ts). Dormant
+            # when either is empty.
+            printf 'ANALYTICS_URL=%s\n' "http://hf-analytics:3000"
+            printf 'ANALYTICS_TOKEN=%s\n' "${ANALYTICS_TOKEN:-}"
           } > .env
           tar -czf /tmp/deploy.tar.gz docker-compose.yml .env
           rm -f .env

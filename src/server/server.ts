@@ -41,6 +41,7 @@ import {
   updateOtherIncomeItem,
 } from "./db.ts";
 import type { BookingLineInput } from "./db.ts";
+import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
 import { computeDayTotals } from "../shared/totals.ts";
 import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings } from "../shared/bookings.ts";
 import { isValidIso, isValidMonth } from "../shared/date.ts";
@@ -64,6 +65,11 @@ import type { BookingLine, CategoryKey, DaySheet, DaySummary, Me, Property, Tend
 
 const isProd = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT ?? 3000);
+
+// hf-analytics outbox: dormant unless ANALYTICS_URL/ANALYTICS_TOKEN are set
+// (see src/server/analytics-push.ts). Started unconditionally at module
+// init, same as the estate precedent (room-daily-reporter/src/server/push.ts).
+startAnalyticsPushWorker();
 
 // Paths that look like a static asset (have a recognized file extension)
 // must 404 when missing — never SPA-fallback them to index.html. Otherwise
@@ -401,6 +407,7 @@ export const api = new Elysia({ prefix: "/api" })
       const by = identity!.email;
       saveIncomeCell(property, date, categoryId, amountSatang, note ?? null, by);
       touchSheetDay(property, date, by);
+      enqueueAnalyticsPush(property, date);
 
       const { income, totals } = loadDayData(property, date);
       return { income, totals };
@@ -423,6 +430,7 @@ export const api = new Elysia({ prefix: "/api" })
       if (body.note !== null && !isValidNote(body.note)) return status(400, { error: "invalid note" });
 
       setSheetDayNote(property, date, body.note, identity!.email);
+      enqueueAnalyticsPush(property, date);
       return { note: body.note };
     },
     { body: t.Object({ note: t.Union([t.String(), t.Null()]) }) },
@@ -453,6 +461,7 @@ export const api = new Elysia({ prefix: "/api" })
       const by = identity!.email;
       const item = createExpenseItem(property, date, body.categoryId, body.amountSatang, body.note ?? null, by);
       touchSheetDay(property, date, by);
+      enqueueAnalyticsPush(property, date);
       return status(201, item);
     },
     {
@@ -498,6 +507,7 @@ export const api = new Elysia({ prefix: "/api" })
       const updated = updateExpenseItem(property, id, body, by);
       if (!updated) return status(404, { error: "expense not found" });
       touchSheetDay(property, updated.date, by);
+      enqueueAnalyticsPush(property, updated.date);
       return updated;
     },
     {
@@ -522,6 +532,7 @@ export const api = new Elysia({ prefix: "/api" })
 
     deleteExpenseItem(property, id);
     touchSheetDay(property, existing.date, identity!.email);
+    enqueueAnalyticsPush(property, existing.date);
     return status(204);
   })
 
@@ -550,6 +561,7 @@ export const api = new Elysia({ prefix: "/api" })
       const by = identity!.email;
       const line = createBookingLine(property, date, body as BookingLineInput, by);
       touchSheetDay(property, date, by);
+      enqueueAnalyticsPush(property, date);
       return status(201, line);
     },
     { body: bookingLineInputSchema },
@@ -574,6 +586,7 @@ export const api = new Elysia({ prefix: "/api" })
       const updated = updateBookingLine(property, id, body as BookingLineInput, by);
       if (!updated) return status(404, { error: "booking line not found" });
       touchSheetDay(property, updated.date, by);
+      enqueueAnalyticsPush(property, updated.date);
       return updated;
     },
     { body: bookingLineInputSchema },
@@ -592,6 +605,7 @@ export const api = new Elysia({ prefix: "/api" })
 
     deleteBookingLine(property, id);
     touchSheetDay(property, existing.date, identity!.email);
+    enqueueAnalyticsPush(property, existing.date);
     return status(204);
   })
 
@@ -614,6 +628,7 @@ export const api = new Elysia({ prefix: "/api" })
       const by = identity!.email;
       const item = createOtherIncomeItem(property, date, body.description, body.amountSatang, body.isCash, by);
       touchSheetDay(property, date, by);
+      enqueueAnalyticsPush(property, date);
       return status(201, item);
     },
     {
@@ -657,6 +672,7 @@ export const api = new Elysia({ prefix: "/api" })
       const updated = updateOtherIncomeItem(property, id, body, by);
       if (!updated) return status(404, { error: "other-income item not found" });
       touchSheetDay(property, updated.date, by);
+      enqueueAnalyticsPush(property, updated.date);
       return updated;
     },
     {
@@ -681,6 +697,7 @@ export const api = new Elysia({ prefix: "/api" })
 
     deleteOtherIncomeItem(property, id);
     touchSheetDay(property, existing.date, identity!.email);
+    enqueueAnalyticsPush(property, existing.date);
     return status(204);
   })
 
@@ -732,6 +749,11 @@ export const api = new Elysia({ prefix: "/api" })
         return { categoryKey: key, categoryId, beforeSatang, afterSatang, skippedManual };
       });
 
+    // Preview never writes anything, so it never needs a push; apply may
+    // have written new income cells for this day even when every diff line
+    // is unchanged in aggregate, so enqueue unconditionally on apply.
+    if (apply) enqueueAnalyticsPush(property, date);
+
     return { diff };
   })
 
@@ -751,6 +773,7 @@ export const api = new Elysia({ prefix: "/api" })
       }
 
       setCashBlockOverride(property, date, body, identity.email);
+      enqueueAnalyticsPush(property, date);
       const { categories, otherIncomeItems, income } = loadDayData(property, date);
       const derived = deriveCashBlock(categories, income, otherIncomeItems);
       const sheetDay = getSheetDay(property, date);
@@ -781,6 +804,7 @@ export const api = new Elysia({ prefix: "/api" })
       if (closed) return closed;
 
       setDayVerified(property, date, body.verified, identity!.email);
+      enqueueAnalyticsPush(property, date);
       const sheetDay = getSheetDay(property, date);
       return { verifiedAt: sheetDay?.verifiedAt ?? null, verifiedBy: sheetDay?.verifiedBy ?? null };
     },
@@ -805,6 +829,13 @@ export const api = new Elysia({ prefix: "/api" })
       if (!identity?.isManager) return status(403, { error: "manager only" });
 
       setMonthClosed(property, month, body.closed, identity.email);
+      // The wire payload itself carries no monthClosed field, but a close
+      // freezes every write path for the whole month (verify included) and
+      // a reopen unfreezes them again — re-enqueue every day in the month
+      // that has any data so a day whose push failed mid-month, or whose
+      // last write happened before analytics was wired up, still gets a
+      // fresh push rather than silently drifting.
+      for (const date of listDaysWithData(property, month)) enqueueAnalyticsPush(property, date);
       return { month, closed: body.closed };
     },
     { body: t.Object({ closed: t.Boolean() }) },

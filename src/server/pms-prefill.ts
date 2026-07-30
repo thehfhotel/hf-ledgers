@@ -106,7 +106,12 @@ export const LEDGER_QUERY = `
     c.cust_firstname,
     c.cust_lastname
   FROM ht_payment_ledger l
-  LEFT JOIN ht_customers c ON c.legacy_id = l.ledger_cust_no
+  LEFT JOIN ht_customers c
+    -- ledger_cust_no is a C-prefixed string ('C22006'); legacy_id is the bare
+    -- integer (22006). Verified against live data 2026-07-30 (183/183 of a
+    -- week's payments join); the naive equality is a type error in Postgres.
+    ON l.ledger_cust_no = 'C' || c.legacy_id::text
+    OR l.ledger_cust_no = c.legacy_id::text
   WHERE l.ledger_pay_date >= $1
     AND l.ledger_pay_date < $2
     AND l.ledger_status IS DISTINCT FROM 'ยกเลิก'

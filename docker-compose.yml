@@ -25,6 +25,10 @@ services:
     networks:
       - default
       - shared-nginx
+      # PMS prefill (ดึงข้อมูล): reach the PMS Postgres by container name on
+      # the hotel stack's private network — same pattern as hf-mcp. Read-only
+      # ledger_ro role; connection URLs come from GH secrets, never this file.
+      - hotel-network
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/healthz >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -47,3 +51,6 @@ networks:
   shared-nginx:
     external: true
     name: shared-nginx
+  hotel-network:
+    external: true
+    name: new-hotel-production_hotel-network

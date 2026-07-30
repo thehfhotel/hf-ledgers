@@ -113,6 +113,56 @@ body {
   color: #000 !important;
 }
 
+/* Print/PDF text sizes, bumped ~2px per step over the on-screen Tailwind
+   scale used by PrintableDaySummary.tsx, ReportSheet.tsx,
+   reportSheetBlocks.tsx, and bookingGridFrame.tsx's compact (print-only)
+   header/foot variants. Scoped to .print-stage, not global, because:
+     - Screen views of these same building blocks (the live entry grid,
+       DaySheetPage's on-screen summary cards) must keep their normal
+       sizes — only the print/PDF capture node should read larger.
+     - ReportPage's JPEG export renders ReportSheet OUTSIDE .print-stage
+       (see the color rule above this one), so the JPEG share/download
+       path is untouched by this block too.
+   Raising the fit-to-page SCALE instead (printGeometry.ts's
+   computeFitScale) would be a no-op here: that scale is computed from
+   the sheet's natural pixel size, and the sheet's column widths are
+   fixed values in JSX/inline styles, not derived from font metrics — a
+   bigger scale just upscales the same glyphs-to-page ratio, it doesn't
+   make letters bigger relative to the fixed A4 target. Bumping font-size
+   directly inside those fixed-width columns is what actually makes
+   glyphs bigger on paper. Taller rows this produces still pass through
+   the existing HEIGHT fitter, which shrinks a full day's sheet as
+   needed — that safety net (the one-A4 guarantee) is untouched here.
+   A single tight line-height ratio (1.35) is used for every bumped size:
+   it matches the tightest leading already used on the sheet
+   (leading-snug/leading-tight on the dense grid cells) so row growth
+   stays predictable for the height-fitter, rather than reintroducing
+   Tailwind's roomier default line-heights (up to 1.556 on text-lg). */
+.print-stage .text-\[10px\] {
+  font-size: 12px !important;
+  line-height: 1.35 !important;
+}
+.print-stage .text-\[11px\] {
+  font-size: 13px !important;
+  line-height: 1.35 !important;
+}
+.print-stage .text-xs {
+  font-size: 14px !important;
+  line-height: 1.35 !important;
+}
+.print-stage .text-sm {
+  font-size: 16px !important;
+  line-height: 1.35 !important;
+}
+.print-stage .text-base {
+  font-size: 18px !important;
+  line-height: 1.35 !important;
+}
+.print-stage .text-lg {
+  font-size: 20px !important;
+  line-height: 1.35 !important;
+}
+
 @media print {
   #root {
     display: none !important;

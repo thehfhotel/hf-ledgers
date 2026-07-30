@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { RECONCILE_TOLERANCE_SATANG, deriveIncomeFromBookings } from "../../shared/bookings.ts";
 import { shiftDays } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
+import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import { computeDayTotals } from "../../shared/totals.ts";
 import {
   NOTE_MAX_LEN,
+  TENDER_TO_CATEGORY_KEY,
+  type BookingLine,
   type Category,
   type CategoryKey,
   type DaySheet,
@@ -17,6 +21,7 @@ import {
   fillFromBookings,
   getDay,
   getMe,
+  listBookingLines,
   putDayNote,
   putIncomeCell,
   putVerify,
@@ -54,7 +59,27 @@ const CATEGORY_KEY_LABELS_TH: Record<CategoryKey, string> = {
   bar_transfer: "บาร์น้ำ โอน/เครดิต",
 };
 
+/** The seven income categories a booking row can derive (see
+ * TENDER_TO_CATEGORY_KEY). Tender "other" has no CategoryKey, and bar /
+ * รายการอื่นๆ income has no booking column at all, so both sides of the
+ * variance strip are summed over THIS set only — otherwise every day with
+ * bar sales would read as a mismatch. Same set, same reason, as
+ * HistoryPage's month-close preflight. */
+const DERIVABLE_CATEGORY_KEYS: CategoryKey[] = [...new Set(Object.values(TENDER_TO_CATEGORY_KEY) as CategoryKey[])];
+
 type SimpleSaveState = "idle" | "saving" | "saved" | "error";
+
+/**
+ * The amount-in-text tripwire's inline hint. Advisory only — nothing is
+ * blocked and the text saves as typed. The wording itself lives in
+ * src/shared/textAmount.ts so every field that shows it (day note, expense
+ * notes here, รายการอื่นๆ descriptions and booking หมายเหตุ elsewhere) reads
+ * identically.
+ */
+function AmountInTextHint({ text, className = "" }: { text: string; className?: string }) {
+  if (!looksLikeAmountInText(text)) return null;
+  return <p className={"text-xs text-warn " + className}>{AMOUNT_IN_TEXT_WARNING_TH}</p>;
+}
 
 function nowSqlUtc(): string {
   // Matches the shape of the server's `datetime('now')` audit strings
@@ -76,6 +101,7 @@ function formatUpdatedAt(updatedAtUtc: string): string {
 
 export function DaySheetPage({ property, date }: Props) {
   const [day, setDay] = useState<DaySheet | null>(null);
+  const [bookingLines, setBookingLines] = useState<BookingLine[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [meEmail, setMeEmail] = useState<string | null>(null);
   const [isManager, setIsManager] = useState(false);
@@ -98,6 +124,7 @@ export function DaySheetPage({ property, date }: Props) {
   useEffect(() => {
     let cancelled = false;
     setDay(null);
+    setBookingLines(null);
     setLoadError(null);
     setDayNoteState("idle");
     setVerifyError(null);
@@ -106,6 +133,20 @@ export function DaySheetPage({ property, date }: Props) {
         if (cancelled) return;
         setDay(sheet);
         setDayNoteDraft(sheet.note ?? "");
+        // The variance strip's booking side. Fetched only when the day has
+        // booking rows at all, and a failure just leaves the strip out —
+        // the summary itself must never depend on it.
+        if (sheet.bookingLineCount === 0) {
+          setBookingLines([]);
+          return;
+        }
+        listBookingLines(property, date)
+          .then((res) => {
+            if (!cancelled) setBookingLines(res.lines);
+          })
+          .catch(() => {
+            if (!cancelled) setBookingLines([]);
+          });
       })
       .catch((err) => {
         if (cancelled) return;
@@ -128,6 +169,56 @@ export function DaySheetPage({ property, date }: Props) {
     () => expenseCategories.filter((c) => !c.archivedAt),
     [expenseCategories],
   );
+
+  // ── Standing booking-vs-summary variance ──────────────────────────────
+  // Measured across the four imported workbooks, the office hand-adjusts its
+  // summary away from its own booking rows on 83% of HF days and 51% of
+  // Ville days. That is a habit, not an error: this strip only makes it
+  // visible and lets the reason be recorded. It never blocks, never nags,
+  // and never writes a figure — อัพเดทจากระบบจอง remains the only path that
+  // changes a number.
+  //
+  // Computed from the booking lines through the shared
+  // deriveIncomeFromBookings(), deliberately NOT from the
+  // POST fill-from-bookings preview: that preview reports
+  // afterSatang === beforeSatang for any cell flagged `manual`, and the
+  // Excel importer stamped every backfilled cell manual — so it reads zero
+  // variance on precisely the days this strip exists for.
+  const variance = useMemo(() => {
+    if (!day || !bookingLines || bookingLines.length === 0) return null;
+    const derived = deriveIncomeFromBookings(bookingLines);
+    const categoryKeyById = new Map(day.categories.map((c) => [c.id, c.categoryKey]));
+
+    const typedByKey = new Map<CategoryKey, number>();
+    for (const cell of Object.values(day.income)) {
+      const key = categoryKeyById.get(cell.categoryId);
+      if (key && DERIVABLE_CATEGORY_KEYS.includes(key)) {
+        typedByKey.set(key, (typedByKey.get(key) ?? 0) + cell.amountSatang);
+      }
+    }
+
+    let derivedSatang = 0;
+    let typedSatang = 0;
+    const rows: { categoryKey: CategoryKey; typedSatang: number; derivedSatang: number }[] = [];
+    for (const key of DERIVABLE_CATEGORY_KEYS) {
+      const keyDerived = derived[key] ?? 0;
+      const keyTyped = typedByKey.get(key) ?? 0;
+      derivedSatang += keyDerived;
+      typedSatang += keyTyped;
+      if (keyDerived !== keyTyped) rows.push({ categoryKey: key, typedSatang: keyTyped, derivedSatang: keyDerived });
+    }
+
+    // Sign matches HistoryPage's preflight: booking-derived minus typed, so a
+    // positive delta means the summary was typed LOWER than the booking rows.
+    const deltaSatang = derivedSatang - typedSatang;
+    return {
+      derivedSatang,
+      typedSatang,
+      deltaSatang,
+      beyondTolerance: Math.abs(deltaSatang) > RECONCILE_TOLERANCE_SATANG,
+      rows,
+    };
+  }, [day, bookingLines]);
 
   function applyLocal(mutate: (prev: DaySheet) => DaySheet) {
     setDay((prev) => (prev ? mutate(prev) : prev));
@@ -273,6 +364,24 @@ export function DaySheetPage({ property, date }: Props) {
     }
   }
 
+  // Live text of each expense note while it is being typed, so the
+  // amount-in-text tripwire can read it before the blur that saves it. A row
+  // with no entry here falls back to its saved note — an already-saved
+  // "ค่าซ่อม (โอนเงิน300)" is flagged on arrival, not only once edited.
+  const [expenseNoteDrafts, setExpenseNoteDrafts] = useState<Record<number, string>>({});
+
+  function setExpenseNoteDraft(id: number, text: string) {
+    setExpenseNoteDrafts((prev) => ({ ...prev, [id]: text }));
+  }
+  function clearExpenseNoteDraft(id: number) {
+    setExpenseNoteDrafts((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
   const [newCategoryId, setNewCategoryId] = useState<number | "">("");
   const [newNote, setNewNote] = useState("");
   const [newAmountText, setNewAmountText] = useState("");
@@ -321,6 +430,11 @@ export function DaySheetPage({ property, date }: Props) {
   }
 
   // ── Day note ─────────────────────────────────────────────────────────
+  // Editable even on a closed month, per api.md's Wave 2 note on endpoint 9:
+  // the note is commentary, not a figure, and after a close it is exactly
+  // the thing still worth recording. Every amount on this page stays locked.
+
+  const dayNoteRef = useRef<HTMLTextAreaElement | null>(null);
 
   async function commitDayNote() {
     if (!day) return;
@@ -336,6 +450,32 @@ export function DaySheetPage({ property, date }: Props) {
     } catch {
       setDayNoteState("error");
     }
+  }
+
+  /**
+   * The variance strip's one action: seed the day note with the reason line
+   * and hand the caret over. It only prefills — the person types the reason
+   * and the normal save-on-blur writes it, so nothing is recorded that a
+   * human did not write.
+   */
+  function startVarianceReason(deltaSatang: number) {
+    const direction = deltaSatang > 0 ? "น้อยกว่า" : "มากกว่า";
+    // The amount is parenthesised and carries no "บาท": written as
+    // "... 3,870.00 บาท" the line would trip the app's own amount-in-text
+    // tripwire on the note it just wrote, which reads as a bug.
+    const line = `กรอกยอด${direction}รายการจอง (ต่าง ${formatSatang(Math.abs(deltaSatang))}) เพราะ `;
+    setDayNoteDraft((prev) => {
+      const base = prev.trim();
+      return (base === "" ? line : `${base}\n${line}`).slice(0, NOTE_MAX_LEN);
+    });
+    // Focus after the prefill has rendered, then park the caret at the end so
+    // typing continues the sentence.
+    requestAnimationFrame(() => {
+      const el = dayNoteRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
   }
 
   // ── Verify / unverify (mgr) ──────────────────────────────────────────
@@ -439,7 +579,7 @@ export function DaySheetPage({ property, date }: Props) {
 
       {day.monthClosed && (
         <div className="rounded-lg border border-warn/40 bg-gold-50 px-4 py-2.5 text-sm font-medium text-warn">
-          เดือนนี้ปิดบัญชีแล้ว — ไม่สามารถแก้ไขรายรับ รายจ่าย หรือหมายเหตุได้
+          เดือนนี้ปิดบัญชีแล้ว — แก้ไขรายรับ รายจ่าย และการยืนยันไม่ได้ (ยังบันทึกหมายเหตุได้)
         </div>
       )}
 
@@ -497,6 +637,70 @@ export function DaySheetPage({ property, date }: Props) {
               อัพเดทจากระบบจอง
             </button>
           </div>
+        </section>
+      )}
+
+      {/* แถบเทียบยอดกับรายการจอง — ถาวร ไม่ใช่การเตือนให้แก้ */}
+      {variance && (
+        <section
+          className={
+            "rounded-lg border px-4 py-3 text-sm " +
+            (variance.beyondTolerance ? "border-warn/40 bg-gold-50" : "border-line bg-panel")
+          }
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className={"text-sm font-semibold " + (variance.beyondTolerance ? "text-warn" : "text-ink")}>
+              เทียบยอดกับรายการจอง
+            </h2>
+            {variance.beyondTolerance && (
+              <button
+                type="button"
+                onClick={() => startVarianceReason(variance.deltaSatang)}
+                className="rounded-md border border-warn/50 px-2.5 py-1 text-xs font-medium text-warn hover:bg-gold-100 focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+              >
+                บันทึกเหตุผลในหมายเหตุ
+              </button>
+            )}
+          </div>
+
+          {!variance.beyondTolerance ? (
+            <p className="mt-1 text-ink-muted">ยอดที่กรอกตรงกับรายการจอง</p>
+          ) : (
+            <>
+              <div className="mt-2 flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-muted">รวมจากรายการจอง</span>
+                  <span className="font-semibold tabular-nums text-ink">{formatSatang(variance.derivedSatang)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-muted">กรอกไว้ในสรุปวัน</span>
+                  <span className="font-semibold tabular-nums text-ink">{formatSatang(variance.typedSatang)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3 border-t border-warn/30 pt-1 font-semibold text-warn">
+                  <span>ต่าง</span>
+                  <span className="tabular-nums">{formatSatang(variance.deltaSatang)}</span>
+                </div>
+              </div>
+
+              {variance.rows.length > 0 && (
+                <div className="mt-2 flex flex-col gap-0.5 text-xs text-ink-muted">
+                  {variance.rows.map((row) => (
+                    <div key={row.categoryKey} className="flex items-center justify-between gap-3">
+                      <span>{categoryKeyLabel(day.categories, row.categoryKey)}</span>
+                      <span className="tabular-nums">
+                        กรอก {formatSatang(row.typedSatang)} / จอง {formatSatang(row.derivedSatang)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <p className="mt-2 text-xs text-ink-muted">
+                การปรับยอดสรุปให้ต่างจากรายการจองเป็นเรื่องปกติของสำนักงาน ไม่ใช่ข้อผิดพลาด — นับว่าต่างเมื่อเกิน{" "}
+                {formatSatang(RECONCILE_TOLERANCE_SATANG)} บาท บันทึกเหตุผลไว้เพื่อให้ตรวจย้อนหลังได้
+              </p>
+            </>
+          )}
         </section>
       )}
 
@@ -631,7 +835,8 @@ export function DaySheetPage({ property, date }: Props) {
               const options =
                 category && category.archivedAt ? [category, ...activeExpenseCategories] : activeExpenseCategories;
               return (
-                <div key={item.id} className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+                <div key={item.id} className="flex flex-col gap-1 px-4 py-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
                   <select
                     value={item.categoryId}
                     onChange={(e) => commitExpenseCategory(item, Number(e.target.value))}
@@ -653,7 +858,15 @@ export function DaySheetPage({ property, date }: Props) {
                     placeholder="หมายเหตุ"
                     aria-label="หมายเหตุรายจ่าย"
                     disabled={day.monthClosed}
-                    onBlur={(e) => commitExpenseNote(item, e.target.value)}
+                    maxLength={NOTE_MAX_LEN}
+                    onChange={(e) => setExpenseNoteDraft(item.id, e.target.value)}
+                    onBlur={(e) => {
+                      // Hand the row back to its saved note: commitExpenseNote
+                      // updates it optimistically and rolls back on failure,
+                      // so the tripwire always reads what is really in the row.
+                      clearExpenseNoteDraft(item.id);
+                      commitExpenseNote(item, e.target.value);
+                    }}
                     className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
                   />
                   <AmountInput
@@ -670,6 +883,8 @@ export function DaySheetPage({ property, date }: Props) {
                   >
                     ลบ
                   </button>
+                  </div>
+                  <AmountInTextHint text={expenseNoteDrafts[item.id] ?? item.note ?? ""} />
                 </div>
               );
             })}
@@ -701,6 +916,7 @@ export function DaySheetPage({ property, date }: Props) {
             placeholder="หมายเหตุ"
             aria-label="หมายเหตุรายจ่ายใหม่"
             disabled={day.monthClosed}
+            maxLength={NOTE_MAX_LEN}
             className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
           />
           <input
@@ -720,6 +936,7 @@ export function DaySheetPage({ property, date }: Props) {
           >
             เพิ่มรายการ
           </button>
+          <AmountInTextHint text={newNote} className="w-full" />
           {newExpenseError && <p className="w-full text-xs text-bad">{newExpenseError}</p>}
         </form>
 
@@ -740,15 +957,17 @@ export function DaySheetPage({ property, date }: Props) {
         </label>
         <textarea
           id="day-note"
+          ref={dayNoteRef}
           rows={2}
           value={dayNoteDraft}
           onChange={(e) => setDayNoteDraft(e.target.value)}
           onBlur={commitDayNote}
           maxLength={NOTE_MAX_LEN}
-          disabled={day.monthClosed}
           placeholder="บันทึกเพิ่มเติมสำหรับวันนี้ (ถ้ามี)"
-          className="w-full resize-none rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+          className="w-full resize-none rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
         />
+        <AmountInTextHint text={dayNoteDraft} className="mt-1" />
+        {day.monthClosed && <p className="mt-1 text-xs text-ink-muted">เดือนนี้ปิดบัญชีแล้ว แต่ยังบันทึกหมายเหตุได้</p>}
         {dayNoteState === "saved" && <p className="mt-1 text-xs text-ok">บันทึกแล้ว</p>}
         {dayNoteState === "error" && <p className="mt-1 text-xs text-bad">บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง</p>}
       </section>
@@ -787,6 +1006,13 @@ interface FillFromBookingsDialogProps {
   categories: Category[];
   onConfirm: () => void;
   onClose: () => void;
+}
+
+/** The manager-renameable name of a keyed category, falling back to the seed
+ * label when the property has no active category with that key. */
+function categoryKeyLabel(categories: Category[], categoryKey: CategoryKey): string {
+  const category = categories.find((c) => c.categoryKey === categoryKey);
+  return category ? category.nameTh : CATEGORY_KEY_LABELS_TH[categoryKey];
 }
 
 function categoryLabel(categories: Category[], row: FillFromBookingsDiffRow): string {

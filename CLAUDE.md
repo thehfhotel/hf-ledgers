@@ -40,9 +40,20 @@ bun run dev          # Bun --hot on http://localhost:3000
 bun run build         # scripts/build.ts -> dist/client
 bun run start          # NODE_ENV=production bun src/server/server.ts
 bun run typecheck      # tsc --noEmit
+bun test               # 271 tests across 14 files
 ```
 
-No test suite in this repo.
+CI runs typecheck, `bun test`, then build — in that order, so broken code cannot
+reach prod. Shared pure logic (`totals.ts`, `bookings.ts`, `textAmount.ts`) is
+unit-tested; `src/server/server.test.ts` drives `api.handle()` against
+`DB_PATH=:memory:` with the dev auth bypass (env must be set BEFORE importing the
+server module, since `db.ts` opens the DB and migrates at import time);
+`scripts/import-xls/*.test.ts` covers the one-time Excel backfill.
+
+One-time Excel import lives in `scripts/import-xls/` — dry-run by default,
+`--apply` commits, and `xlsx` is a devDependency ON PURPOSE (never ship SheetJS in
+the runtime image). It writes by copy-and-swap outside the app process, so a future
+run bypasses any outbox: re-run the analytics backfill after importing.
 
 ## Hard rules
 

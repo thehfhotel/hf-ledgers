@@ -212,6 +212,11 @@ Wave 2 additions:
   client slices to this bound on commit and the server validates against it,
   so lowering it silently destroys data on blur.
 - `roomCount`, `nights`: `0 ..= 999` (`COUNT_MAX`)
+- `remark` (BookingLine): ≤ 200 chars (`REMARK_MAX_LEN`) — settled at 200 to
+  match `NOTE_MAX_LEN` and the note convention. The bound was previously
+  unstated here, and the client allowed 500 while the server validated 200,
+  so a long remark 400'd on blur and the row's edit was lost. Both sides read
+  `REMARK_MAX_LEN`; neither re-declares the number locally.
 - `description` (OtherIncomeItem): ≤ 200 chars (`DESCRIPTION_MAX_LEN`)
 
 ## Endpoints (`/api`, Typebox; auth = any verified identity unless noted "mgr")
@@ -230,7 +235,13 @@ Wave 2 additions:
 4. **`PATCH /api/:property/categories/:id`** — mgr. Body: any subset of
    `{ nameTh?: string, isCash?: boolean, archived?: boolean }` → `Category`.
    `archived: true` sets `archived_at`; `archived: false` clears it (restore).
-   404 if `:id` doesn't belong to `:property`.
+   404 if `:id` doesn't belong to `:property`. **400 on `archived: true` for a
+   category whose `categoryKey` is non-null** (`cannot archive a category with
+   a category_key`) — a keyed category is what `fill-from-bookings` and the two
+   รายการอื่นๆ cells derive into, so archiving it would silently strip that
+   derivation from every future day. Renaming and `isCash` stay allowed. The
+   admin UI therefore does not offer archive on keyed rows at all (it used to,
+   and surfaced this English server message to a Thai-only screen).
 
 5. **`POST /api/:property/categories/reorder`** — mgr. Body
    `{ kind: CategoryKind, orderedIds: number[] }` where `orderedIds` must be

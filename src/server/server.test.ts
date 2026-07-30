@@ -11,7 +11,7 @@ process.env.MANAGER_EMAILS = "tester@thehfhotel.org";
 process.env.PORT = "0"; // let the OS pick a free port — avoids clashing with `bun run dev`
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { TENDERS } from "../shared/types.ts";
+import { REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
 import type { Category, CategoryKey, Tender } from "../shared/types.ts";
 
 const { api } = await import("./server.ts");
@@ -156,6 +156,32 @@ describe("booking-line CRUD", () => {
 
     const after = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
     expect(after.body.lines).toHaveLength(1);
+  });
+
+  test("remark is bounded by REMARK_MAX_LEN, the one constant both sides read", async () => {
+    const atBound = await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, {
+      guestName: "ทดสอบหมายเหตุยาว",
+      remark: "ก".repeat(REMARK_MAX_LEN),
+      tenders: zeroTenders(),
+    });
+    expect(atBound.status).toBe(201);
+    expect((atBound.body as { remark: string }).remark).toHaveLength(REMARK_MAX_LEN);
+
+    const overBound = await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, {
+      guestName: "ทดสอบหมายเหตุยาวเกิน",
+      remark: "ก".repeat(REMARK_MAX_LEN + 1),
+      tenders: zeroTenders(),
+    });
+    expect(overBound.status).toBe(400);
+    expect((overBound.body as { error: string }).error).toBe("invalid remark");
+
+    const created = (atBound.body as { id: number }).id;
+    const patchedOver = await call("PATCH", `/${PROPERTY}/bookings/${created}`, {
+      remark: "ก".repeat(REMARK_MAX_LEN + 1),
+    });
+    expect(patchedOver.status).toBe(400);
+
+    await call("DELETE", `/${PROPERTY}/bookings/${created}`);
   });
 
   test("a day touched only by a booking line still appears in GET /days", async () => {
@@ -369,6 +395,27 @@ describe("month close", () => {
     expect(cleared.body.verifiedAt).toBeNull();
 
     await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+  });
+
+  test("the day note stays writable on a closed month (api.md: endpoint 9 is not gated)", async () => {
+    const closed = await call<{ closed: boolean }>("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+    expect(closed.body.closed).toBe(true);
+
+    // A note is commentary, and after a close it is exactly the thing still
+    // worth recording — see src/shared/api.md, Wave 2 endpoints preamble.
+    const note = await call<{ note: string | null }>("PUT", `/${PROPERTY}/day/${DATE}/note`, {
+      note: "ปิดเดือนแล้ว บันทึกเพิ่มภายหลัง",
+    });
+    expect(note.status).toBe(200);
+    expect(note.body.note).toBe("ปิดเดือนแล้ว บันทึกเพิ่มภายหลัง");
+
+    const day = await call<{ note: string | null; monthClosed: boolean }>("GET", `/${PROPERTY}/day/${DATE}`);
+    expect(day.body.monthClosed).toBe(true);
+    expect(day.body.note).toBe("ปิดเดือนแล้ว บันทึกเพิ่มภายหลัง");
+
+    const cleared = await call<{ note: string | null }>("PUT", `/${PROPERTY}/day/${DATE}/note`, { note: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.note).toBeNull();
   });
 
   test("reopening the month allows writes again", async () => {

@@ -332,6 +332,11 @@ export interface Me {
 export const AMOUNT_SATANG_MIN = 0;
 export const AMOUNT_SATANG_MAX = 99_999_999_999;
 export const NOTE_MAX_LEN = 200;
+/** Bound for `BookingLine.remark`. Settled at 200 to match `NOTE_MAX_LEN`
+ * and the note convention: the client used to allow 500 while the server
+ * validated 200, so a long remark 400'd on blur with the row's edit lost.
+ * Both sides read THIS constant — never re-declare the number locally. */
+export const REMARK_MAX_LEN = 200;
 export const NAME_TH_MIN_LEN = 1;
 export const NAME_TH_MAX_LEN = 80;
 export const BOOKING_NO_MAX_LEN = 40;

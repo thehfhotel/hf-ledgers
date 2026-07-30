@@ -93,6 +93,13 @@ function CategoriesAdmin({ property }: { property: Property }) {
         .sort((a, b) => a.nameTh.localeCompare(b.nameTh, "th")),
     [categories, kind],
   );
+  // A keyed category (categoryKey !== null) is one the server derives income
+  // into — fill-from-bookings and the two รายการอื่นๆ cells. PATCH
+  // { archived: true } on one is a 400 by design (see api.md endpoint 4), so
+  // offering ซ่อน there could only ever fail, and it failed by surfacing the
+  // server's English error onto a Thai-only screen. The guard stays server-
+  // side; this just stops asking.
+  const hasKeyed = useMemo(() => active.some((c) => c.categoryKey !== null), [active]);
 
   async function persistPatch(id: number, body: Partial<{ nameTh: string; isCash: boolean; archived: boolean }>) {
     setBusyId(id);
@@ -208,6 +215,12 @@ function CategoriesAdmin({ property }: { property: Property }) {
         <>
           <section className="overflow-hidden rounded-lg border border-line bg-panel">
             <h2 className="border-b border-line px-4 py-3 text-sm font-semibold text-ink">หมวดหมู่ที่ใช้งานอยู่</h2>
+            {hasKeyed && (
+              <p className="border-b border-line bg-tint px-4 py-2 text-xs leading-relaxed text-ink-muted">
+                หมวดหมู่หลักตามแบบฟอร์มกระดาษจะซ่อนไม่ได้ เพราะระบบใช้หมวดหมู่เหล่านี้ลงยอดรายรับให้อัตโนมัติจากรายการจองและรายการอื่นๆ
+                ถ้าซ่อนไป ยอดที่ลงอัตโนมัติจะหายไปทุกวันถัดจากนี้ — เปลี่ยนชื่อ สลับ นับเป็นเงินสด และจัดลำดับได้ตามปกติ
+              </p>
+            )}
             {active.length === 0 ? (
               <p className="px-4 py-3 text-sm text-ink-muted">ยังไม่มีหมวดหมู่ — เพิ่มหมวดหมู่แรกด้านล่าง</p>
             ) : (
@@ -254,14 +267,18 @@ function CategoriesAdmin({ property }: { property: Property }) {
                       />
                       นับเป็นเงินสด
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => archive(category)}
-                      disabled={busyId === category.id}
-                      className="rounded-md border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink-muted hover:bg-tint disabled:opacity-50"
-                    >
-                      ซ่อน
-                    </button>
+                    {category.categoryKey === null ? (
+                      <button
+                        type="button"
+                        onClick={() => archive(category)}
+                        disabled={busyId === category.id}
+                        className="rounded-md border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink-muted hover:bg-tint disabled:opacity-50"
+                      >
+                        ซ่อน
+                      </button>
+                    ) : (
+                      <span className="px-1 text-xs text-ink-muted">หมวดหมู่หลัก ซ่อนไม่ได้</span>
+                    )}
                   </div>
                 ))}
               </div>

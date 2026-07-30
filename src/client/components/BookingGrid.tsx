@@ -1,10 +1,12 @@
 import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { computeBookingTotals, lineArithmeticMismatch } from "../../shared/bookings.ts";
 import { parseAmountToSatang } from "../../shared/money.ts";
+import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import {
   BOOKING_NO_MAX_LEN,
   COUNT_MAX,
   GUEST_NAME_MAX_LEN,
+  REMARK_MAX_LEN,
   ROOM_NO_MAX_LEN,
   TENDERS,
   TENDER_LABELS_TH,
@@ -34,8 +36,6 @@ import {
 // selection, clipboard handling. Tab/Shift+Tab move between cells and Enter
 // moves DOWN the same column (Excel muscle memory); that is the whole
 // keyboard model.
-
-const REMARK_MAX_LEN = 500;
 
 /** Plain non-negative integer count (roomCount/nights), never money — a
  * lighter parse than shared money.ts's baht parser, clamped to COUNT_MAX. */
@@ -90,8 +90,19 @@ function TextCell({
   value,
   maxLength,
   onCommit,
-}: CellProps & { value: string | null; maxLength: number; onCommit: (next: string | null) => void }) {
-  return (
+  onDraftChange,
+  warnAmountInText = false,
+}: CellProps & {
+  value: string | null;
+  maxLength: number;
+  onCommit: (next: string | null) => void;
+  /** Report every keystroke up so the parent can run the amount-in-text
+   * tripwire while the cell is still being typed (หมายเหตุ only). */
+  onDraftChange?: (text: string) => void;
+  /** The tripwire fired for this cell's current text. */
+  warnAmountInText?: boolean;
+}) {
+  const input = (
     <input
       type="text"
       // defaultValue + key: the committed value always wins on the next
@@ -108,13 +119,32 @@ function TextCell({
       // always intact in the field; this makes it readable without it.
       title={value ?? undefined}
       onKeyDown={gridEnter}
+      onChange={onDraftChange ? (e) => onDraftChange(e.target.value) : undefined}
       onBlur={(e) => {
         const trimmed = e.target.value.trim();
         const next = trimmed === "" ? null : trimmed.slice(0, maxLength);
         if (next !== value) onCommit(next);
       }}
-      className={CELL_INPUT}
+      className={warnAmountInText ? CELL_INPUT + " bg-gold-50" : CELL_INPUT}
     />
+  );
+  if (!onDraftChange) return input;
+  // The หมายเหตุ column is 104px wide, so the full Thai sentence cannot live
+  // in the cell — this mark carries it as a tooltip, and BookingGrid repeats
+  // the sentence in full, once, in a bar under the table.
+  return (
+    <span className="flex items-center">
+      {input}
+      {warnAmountInText && (
+        <span
+          title={AMOUNT_IN_TEXT_WARNING_TH}
+          aria-label={AMOUNT_IN_TEXT_WARNING_TH}
+          className="shrink-0 pr-1 text-xs font-bold text-warn"
+        >
+          !
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -245,6 +275,9 @@ interface BookingGridProps {
   onDelete: (line: BookingLine) => void;
 }
 
+/** Key for a หมายเหตุ draft: a saved row by id, the blank bottom row as "new". */
+const NEW_ROW_REMARK_KEY = "new";
+
 export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: BookingGridProps) {
   const totals = computeBookingTotals(lines);
   // The draft lives in a ref as well as state: a cell's own onBlur and the
@@ -253,6 +286,33 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
   const draftRef = useRef<NewRowDraft>(emptyDraft());
   const [draft, setDraft] = useState<NewRowDraft>(draftRef.current);
   const newRow = lines.length;
+
+  // ── Amount-in-text tripwire on หมายเหตุ ────────────────────────────────
+  // Live text per row while it is being typed; a row with no entry here
+  // falls back to its saved remark, so an imported row that already carries
+  // the defect ("...(โอนเงิน300)") is flagged on arrival, not only once
+  // someone edits it. Cleared on commit so the saved value takes over again.
+  const [remarkDrafts, setRemarkDrafts] = useState<Record<string, string>>({});
+
+  function setRemarkDraft(key: string, text: string) {
+    setRemarkDrafts((prev) => ({ ...prev, [key]: text }));
+  }
+  function clearRemarkDraft(key: string) {
+    setRemarkDrafts((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
+  function remarkText(key: string, saved: string | null): string {
+    return remarkDrafts[key] ?? saved ?? "";
+  }
+
+  const warnRemarkSeqs = lines
+    .filter((line) => looksLikeAmountInText(remarkText(String(line.id), line.remark)))
+    .map((line) => line.seq);
+  const warnNewRowRemark = looksLikeAmountInText(remarkText(NEW_ROW_REMARK_KEY, draft.remark));
 
   function patchDraft(patch: Partial<NewRowDraft>) {
     draftRef.current = { ...draftRef.current, ...patch };
@@ -267,13 +327,17 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
     if (disabled || draftIsEmpty(pending)) return;
     draftRef.current = emptyDraft();
     setDraft(draftRef.current);
+    clearRemarkDraft(NEW_ROW_REMARK_KEY);
     onCreate({ ...pending, source: "manual", draft: false, sourceSheet: null });
   }
 
   return (
-    // Height budgeted so the sticky header AND the pinned totals row are
-    // both on screen without scrolling the page — the rows scroll inside
-    // here instead. The floor keeps it usable on a short window.
+    // The scrolling grid, plus the tripwire's warning bar under it. Children
+    // keep the grid's own indentation — the wrapper is layout only.
+    <div className="flex flex-col">
+    {/* Height budgeted so the sticky header AND the pinned totals row are
+        both on screen without scrolling the page — the rows scroll inside
+        here instead. The floor keeps it usable on a short window. */}
     <div className="overflow-auto" style={{ maxHeight: "max(18rem, calc(100vh - 24rem))" }}>
       <table className="w-full min-w-[1360px] border-separate border-spacing-0 bg-panel text-sm">
         <BookingGridColgroup withActions />
@@ -288,6 +352,9 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
               disabled={disabled}
               onPatch={(patch) => onPatch(line, patch)}
               onDelete={() => onDelete(line)}
+              onRemarkDraft={(text) => setRemarkDraft(String(line.id), text)}
+              onRemarkCommitted={() => clearRemarkDraft(String(line.id))}
+              warnRemarkAmountInText={looksLikeAmountInText(remarkText(String(line.id), line.remark))}
             />
           ))}
 
@@ -403,6 +470,8 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
                 value={draft.remark}
                 maxLength={REMARK_MAX_LEN}
                 onCommit={(remark) => patchDraft({ remark })}
+                onDraftChange={(text) => setRemarkDraft(NEW_ROW_REMARK_KEY, text)}
+                warnAmountInText={warnNewRowRemark}
               />
             </td>
             <td className={CELL} />
@@ -414,6 +483,17 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
         <BookingGridFoot totals={totals} withActions sticky />
       </table>
     </div>
+
+    {/* The tripwire's full wording, once, where it cannot be clipped by the
+        104px หมายเหตุ column. A warning only: the row is already saved and
+        stays saved. */}
+    {(warnRemarkSeqs.length > 0 || warnNewRowRemark) && (
+      <p className="border-t border-warn/40 bg-gold-50 px-4 py-2 text-xs text-warn">
+        {AMOUNT_IN_TEXT_WARNING_TH}
+        {warnRemarkSeqs.length > 0 && <span className="ml-1 tabular-nums">(แถว {warnRemarkSeqs.join(", ")})</span>}
+      </p>
+    )}
+    </div>
   );
 }
 
@@ -423,9 +503,21 @@ interface BookingRowProps {
   disabled: boolean;
   onPatch: (patch: BookingLineInput) => void;
   onDelete: () => void;
+  onRemarkDraft: (text: string) => void;
+  onRemarkCommitted: () => void;
+  warnRemarkAmountInText: boolean;
 }
 
-function BookingRow({ line, row, disabled, onPatch, onDelete }: BookingRowProps) {
+function BookingRow({
+  line,
+  row,
+  disabled,
+  onPatch,
+  onDelete,
+  onRemarkDraft,
+  onRemarkCommitted,
+  warnRemarkAmountInText,
+}: BookingRowProps) {
   const mismatch = !line.draft && lineArithmeticMismatch(line);
 
   return (
@@ -564,7 +656,15 @@ function BookingRow({ line, row, disabled, onPatch, onDelete }: BookingRowProps)
           ariaLabel={`หมายเหตุ แถว ${line.seq}`}
           value={line.remark}
           maxLength={REMARK_MAX_LEN}
-          onCommit={(remark) => onPatch({ remark })}
+          onCommit={(remark) => {
+            // Hand the row back to its saved value: the parent updates
+            // line.remark optimistically, so the tripwire keeps reading the
+            // text that is actually in the row (and un-fires on a rollback).
+            onRemarkCommitted();
+            onPatch({ remark });
+          }}
+          onDraftChange={onRemarkDraft}
+          warnAmountInText={warnRemarkAmountInText}
         />
       </td>
       {/* Delete sits at the row edge, after หมายเหตุ — never a tab stop in

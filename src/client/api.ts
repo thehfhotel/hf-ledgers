@@ -250,7 +250,9 @@ export function putCashBlock(
   });
 }
 
-// 22. PUT /api/:property/day/:date/verify (mgr)
+// 22. PUT /api/:property/day/:date/verify
+// Any verified identity, NOT manager-only (api.md endpoint 22): front desk
+// signs off its own day.
 export function putVerify(
   property: Property,
   date: string,

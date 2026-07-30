@@ -1,11 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { shiftDays } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
-import { deriveCashBlock } from "../../shared/bookings.ts";
+import {
+  RECONCILE_TOLERANCE_SATANG,
+  deriveCashBlock,
+  deriveIncomeFromBookings,
+} from "../../shared/bookings.ts";
+import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import {
   DESCRIPTION_MAX_LEN,
+  TENDER_TO_CATEGORY_KEY,
   type BookingLine,
   type CashBlockAmounts,
+  type CategoryKey,
   type DaySheet,
   type OtherIncomeItem,
   type Property,
@@ -15,7 +22,6 @@ import {
   createOtherIncomeItem,
   deleteBookingLine,
   deleteOtherIncomeItem,
-  fillFromBookings,
   getDay,
   getMe,
   listBookingLines,
@@ -23,7 +29,6 @@ import {
   updateBookingLine,
   updateOtherIncomeItem,
   type BookingLineInput,
-  type FillFromBookingsDiffRow,
 } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { AmountInput } from "../components/AmountInput.tsx";
@@ -39,10 +44,23 @@ interface Props {
 
 const DEMO_PROPERTY: Property = "hf";
 
-type VarianceState =
-  | { status: "loading" }
-  | { status: "error"; message: string }
-  | { status: "ready"; rows: FillFromBookingsDiffRow[] };
+/** The seven income categories a booking row can derive (see
+ * TENDER_TO_CATEGORY_KEY). Tender "other" has no CategoryKey, and bar /
+ * รายการอื่นๆ income has no booking column at all, so both sides of the
+ * variance are summed over THIS set only. Same set, same reason, as
+ * DaySheetPage's strip and HistoryPage's month-close preflight. */
+const DERIVABLE_CATEGORY_KEYS: CategoryKey[] = [...new Set(Object.values(TENDER_TO_CATEGORY_KEY) as CategoryKey[])];
+
+/**
+ * The amount-in-text tripwire's inline hint — the same one DaySheetPage shows
+ * on the day note and expense notes. Advisory only: nothing is blocked and
+ * the text saves as typed. The wording lives in src/shared/textAmount.ts so
+ * every field reads identically.
+ */
+function AmountInTextHint({ text, className = "" }: { text: string; className?: string }) {
+  if (!looksLikeAmountInText(text)) return null;
+  return <p className={"text-xs text-warn " + className}>{AMOUNT_IN_TEXT_WARNING_TH}</p>;
+}
 
 /**
  * รายงานรายรับโรงแรมรายวัน — the per-booking half of the paper, rebuilt as
@@ -65,7 +83,6 @@ export function BookingDayPage({ property, date }: Props) {
   const [daySheet, setDaySheet] = useState<DaySheet | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isManager, setIsManager] = useState(false);
-  const [variance, setVariance] = useState<VarianceState>({ status: "loading" });
 
   useEffect(() => {
     if (isDemo) return;
@@ -76,28 +93,16 @@ export function BookingDayPage({ property, date }: Props) {
       });
   }, [isDemo]);
 
-  function refreshVariance() {
-    if (isDemo) return;
-    setVariance({ status: "loading" });
-    fillFromBookings(effectiveProperty, effectiveDate, false)
-      .then((res) => setVariance({ status: "ready", rows: res.diff }))
-      .catch((err) =>
-        setVariance({ status: "error", message: err instanceof Error ? err.message : "โหลดข้อมูลเปรียบเทียบไม่สำเร็จ" }),
-      );
-  }
-
   useEffect(() => {
     if (isDemo) {
       setLines(fixtureBookingLines);
       setDaySheet(fixtureDaySheet);
-      setVariance({ status: "ready", rows: [] });
       return;
     }
     let cancelled = false;
     setLines(null);
     setDaySheet(null);
     setLoadError(null);
-    setVariance({ status: "loading" });
 
     Promise.all([listBookingLines(effectiveProperty, effectiveDate), getDay(effectiveProperty, effectiveDate)])
       .then(([bookingsRes, sheet]) => {
@@ -110,19 +115,6 @@ export function BookingDayPage({ property, date }: Props) {
         setLoadError(err instanceof Error ? err.message : "โหลดข้อมูลไม่สำเร็จ");
       });
 
-    fillFromBookings(effectiveProperty, effectiveDate, false)
-      .then((res) => {
-        if (!cancelled) setVariance({ status: "ready", rows: res.diff });
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setVariance({
-            status: "error",
-            message: err instanceof Error ? err.message : "โหลดข้อมูลเปรียบเทียบไม่สำเร็จ",
-          });
-        }
-      });
-
     return () => {
       cancelled = true;
     };
@@ -130,6 +122,40 @@ export function BookingDayPage({ property, date }: Props) {
 
   const sortedLines = useMemo(() => [...(lines ?? [])].sort((a, b) => a.seq - b.seq), [lines]);
   const monthClosed = daySheet?.monthClosed ?? false;
+
+  // ── เปรียบเทียบกับสรุปวัน ──────────────────────────────────────────────
+  // Both sides computed here from the rows already on screen, through the
+  // shared deriveIncomeFromBookings() — deliberately NOT from the
+  // POST fill-from-bookings preview this strip used to call: that preview
+  // reports afterSatang === beforeSatang for any cell flagged `manual`, and
+  // the Excel importer stamped every backfilled cell manual, so the strip
+  // read "ต่าง 0.00" on precisely the hand-adjusted days it exists to show.
+  // Computing locally also keeps it live while rows are edited, with no
+  // refetch after every keystroke-commit.
+  const variance = useMemo(() => {
+    if (!daySheet) return null;
+    const derived = deriveIncomeFromBookings(sortedLines);
+    const categoryKeyById = new Map(daySheet.categories.map((c) => [c.id, c.categoryKey]));
+
+    let derivedSatang = 0;
+    for (const key of DERIVABLE_CATEGORY_KEYS) derivedSatang += derived[key] ?? 0;
+
+    let typedSatang = 0;
+    for (const cell of Object.values(daySheet.income)) {
+      const key = categoryKeyById.get(cell.categoryId);
+      if (key && DERIVABLE_CATEGORY_KEYS.includes(key)) typedSatang += cell.amountSatang;
+    }
+
+    // Sign matches DaySheetPage's strip and HistoryPage's preflight:
+    // booking-derived minus typed.
+    const deltaSatang = derivedSatang - typedSatang;
+    return {
+      derivedSatang,
+      typedSatang,
+      deltaSatang,
+      beyondTolerance: Math.abs(deltaSatang) > RECONCILE_TOLERANCE_SATANG,
+    };
+  }, [daySheet, sortedLines]);
 
   // ── Booking lines ────────────────────────────────────────────────────
 
@@ -169,7 +195,6 @@ export function BookingDayPage({ property, date }: Props) {
     try {
       const created = await createBookingLine(effectiveProperty, effectiveDate, input);
       setLines((prev) => [...(prev ?? []), created]);
-      refreshVariance();
     } catch (err) {
       window.alert(err instanceof Error ? err.message : "เพิ่มรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
     }
@@ -182,7 +207,6 @@ export function BookingDayPage({ property, date }: Props) {
     try {
       const updated = await updateBookingLine(effectiveProperty, line.id, patch);
       setLines((prev) => (prev ?? []).map((l) => (l.id === updated.id ? updated : l)));
-      refreshVariance();
     } catch (err) {
       setLines(prevLines);
       window.alert(err instanceof Error ? err.message : "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
@@ -196,7 +220,6 @@ export function BookingDayPage({ property, date }: Props) {
     if (isDemo) return;
     try {
       await deleteBookingLine(effectiveProperty, line.id);
-      refreshVariance();
     } catch (err) {
       setLines(prevLines);
       window.alert(err instanceof Error ? err.message : "ลบรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
@@ -210,6 +233,24 @@ export function BookingDayPage({ property, date }: Props) {
   const [newOtherIsCash, setNewOtherIsCash] = useState(true);
   const [addingOther, setAddingOther] = useState(false);
   const [newOtherError, setNewOtherError] = useState<string | null>(null);
+  // Live description text per saved row, so the amount-in-text tripwire can
+  // read it before the blur that saves it. A row with no entry here falls
+  // back to its saved description — an imported
+  // "ค่าจัดงานวันเกิดลค.ห้อง506(โอนเงิน350)" is flagged on arrival, not only
+  // once someone edits it. Cleared on commit so the saved value takes over.
+  const [otherDescriptionDrafts, setOtherDescriptionDrafts] = useState<Record<number, string>>({});
+
+  function setOtherDescriptionDraft(id: number, text: string) {
+    setOtherDescriptionDrafts((prev) => ({ ...prev, [id]: text }));
+  }
+  function clearOtherDescriptionDraft(id: number) {
+    setOtherDescriptionDrafts((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
 
   function applyOtherIncome(otherIncome: OtherIncomeItem[]) {
     setDaySheet((prev) =>
@@ -371,9 +412,6 @@ export function BookingDayPage({ property, date }: Props) {
     return <div className="p-6 text-sm text-ink-muted">กำลังโหลด...</div>;
   }
 
-  const varianceAfter = variance.status === "ready" ? variance.rows.reduce((s, r) => s + r.afterSatang, 0) : null;
-  const varianceBefore = variance.status === "ready" ? variance.rows.reduce((s, r) => s + r.beforeSatang, 0) : null;
-
   return (
     <div className="flex flex-col gap-4 pb-10">
       <div className="flex items-center justify-between">
@@ -424,7 +462,8 @@ export function BookingDayPage({ property, date }: Props) {
           ) : (
             <div className="divide-y divide-line">
               {daySheet.otherIncome.map((item) => (
-                <div key={item.id} className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+                <div key={item.id} className="flex flex-col gap-1 px-4 py-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
                   <input
                     type="text"
                     defaultValue={item.description ?? ""}
@@ -433,9 +472,15 @@ export function BookingDayPage({ property, date }: Props) {
                     aria-label="รายละเอียดรายการอื่นๆ"
                     disabled={monthClosed}
                     maxLength={DESCRIPTION_MAX_LEN}
+                    onChange={(e) => setOtherDescriptionDraft(item.id, e.target.value)}
                     onBlur={(e) => {
                       const trimmed = e.target.value.trim();
                       const description = trimmed === "" ? null : trimmed.slice(0, DESCRIPTION_MAX_LEN);
+                      // Hand the row back to its saved description:
+                      // commitOtherIncomeField updates it optimistically and
+                      // rolls back on failure, so the tripwire always reads
+                      // what is really in the row.
+                      clearOtherDescriptionDraft(item.id);
                       if (description !== item.description) commitOtherIncomeField(item, { description });
                     }}
                     className="min-w-[9rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
@@ -481,6 +526,8 @@ export function BookingDayPage({ property, date }: Props) {
                   >
                     ลบ
                   </button>
+                  </div>
+                  <AmountInTextHint text={otherDescriptionDrafts[item.id] ?? item.description ?? ""} />
                 </div>
               ))}
             </div>
@@ -539,6 +586,7 @@ export function BookingDayPage({ property, date }: Props) {
             >
               เพิ่มรายการ
             </button>
+            <AmountInTextHint text={newOtherDescription} className="w-full" />
             {newOtherError && <p className="w-full text-xs text-bad">{newOtherError}</p>}
           </div>
         </section>
@@ -588,32 +636,31 @@ export function BookingDayPage({ property, date }: Props) {
         {/* แถบเปรียบเทียบยอดจากรายการจอง — ถาวร ไม่ใช่การอัพเดทอัตโนมัติ */}
         <section className="rounded-lg border border-line bg-panel p-4 text-sm">
           <h2 className="mb-2 text-sm font-semibold text-ink">เปรียบเทียบกับสรุปวัน</h2>
-          {variance.status === "loading" && <p className="text-ink-muted">กำลังคำนวณ...</p>}
-          {variance.status === "error" && <p className="text-bad">{variance.message}</p>}
-          {variance.status === "ready" && varianceAfter != null && varianceBefore != null && (
+          {variance && (
             <div className="flex flex-col gap-1">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-ink-muted">รวมจากรายการจอง</span>
-                <span className="font-semibold tabular-nums text-ink">{formatSatang(varianceAfter)}</span>
+                <span className="font-semibold tabular-nums text-ink">{formatSatang(variance.derivedSatang)}</span>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span className="text-ink-muted">กรอกไว้</span>
-                <span className="font-semibold tabular-nums text-ink">{formatSatang(varianceBefore)}</span>
+                <span className="text-ink-muted">กรอกไว้ในสรุปวัน</span>
+                <span className="font-semibold tabular-nums text-ink">{formatSatang(variance.typedSatang)}</span>
               </div>
               <div
                 className={
                   "flex items-center justify-between gap-3 border-t border-line pt-1 " +
-                  (varianceAfter === varianceBefore ? "text-ink-muted" : "font-semibold text-warn")
+                  (variance.beyondTolerance ? "font-semibold text-warn" : "text-ink-muted")
                 }
               >
                 <span>ต่าง</span>
-                <span className="tabular-nums">{formatSatang(varianceAfter - varianceBefore)}</span>
+                <span className="tabular-nums">{formatSatang(variance.deltaSatang)}</span>
               </div>
+              {!variance.beyondTolerance && <p className="text-xs text-ink-muted">ยอดที่กรอกตรงกับรายการจอง</p>}
             </div>
           )}
           <p className="mt-2 text-xs text-ink-muted">
-            ยอดจากรายการจองไม่รวมช่องอื่นๆ สด/โอน/เครดิต (ไปคำนวณเป็นรายการอื่นๆแยกต่างหาก) — ปรับให้ตรงกับสรุปวันได้ที่ปุ่ม
-            &quot;อัพเดทจากระบบจอง&quot; ในหน้าสรุปวัน
+            ยอดจากรายการจองไม่รวมช่องอื่นๆ สด/โอน/เครดิต (ไปคำนวณเป็นรายการอื่นๆแยกต่างหาก) — นับว่าต่างเมื่อเกิน{" "}
+            {formatSatang(RECONCILE_TOLERANCE_SATANG)} บาท การปรับยอดให้ต่างจากรายการจองไม่ใช่ข้อผิดพลาด บันทึกเหตุผลได้ที่ช่องหมายเหตุในหน้าสรุปวัน
           </p>
         </section>
       </div>

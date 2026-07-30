@@ -54,6 +54,7 @@ import {
   NAME_TH_MAX_LEN,
   NAME_TH_MIN_LEN,
   NOTE_MAX_LEN,
+  REMARK_MAX_LEN,
   ROOM_NO_MAX_LEN,
   TENDERS,
   TENDER_TO_CATEGORY_KEY,
@@ -188,7 +189,10 @@ function validateBookingLineInput(body: Omit<BookingLineInput, "source"> & { sou
   if (body.source !== undefined && body.source !== "manual" && body.source !== "import" && body.source !== "pms") {
     return "invalid source";
   }
-  if (body.remark != null && !isValidNote(body.remark)) return "invalid remark";
+  // Remark has its own bound (REMARK_MAX_LEN) rather than borrowing
+  // NOTE_MAX_LEN — same number today, but the client reads the same named
+  // constant, so the two can never drift apart again silently.
+  if (body.remark != null && !isValidBoundedString(body.remark, REMARK_MAX_LEN)) return "invalid remark";
   return null;
 }
 

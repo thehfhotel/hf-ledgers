@@ -43,6 +43,18 @@ ICBC (`credit_icbc`), โอน/กสิกร (`transfer_kbank`), โอน IC
 Expense seed (all `is_cash = 1`, manager-editable): ซื้อของ/วัตถุดิบ,
 ค่าแรงรายวัน, ค่าซ่อมแซม, ค่าสาธารณูปโภค, อื่นๆ.
 
+> **Accounting rule — an advance deposit IS income on the day it is taken**
+> (owner decision, 2026-07-30). `มัดจำล่วงหน้า` (`deposit`) counts toward the day's
+> `รวม` like any other tender, because the deposit is 50% of the booking's payment,
+> collected to create the booking — not a liability held on someone else's behalf.
+> A handful of source sheets excluded it from their printed total (e.g. HF
+> 2026-05-08, printed 53,586.40 vs 54,976.40 with the 1,190 deposit); those sheets
+> are the exception and the app is deliberately not bug-compatible with them.
+> Cash refunded to a guest is NOT netted off income: the income cell stays gross and
+> the refund shows up in the cash block, so `รวม` and the banked figure legitimately
+> differ by the refund. Record the refund as a cash expense if it should reduce the
+> day's net.
+
 > **รายการอื่นๆ — RESOLVED, build to this.** The paper's single อื่นๆ column
 > mixes cash and transfer/credit, so one cash-flagged category cannot express
 > it (measured: bank-deposit figure wrong on 75 days, 68,528 THB). Three

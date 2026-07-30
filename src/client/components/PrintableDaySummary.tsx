@@ -42,7 +42,10 @@ export const PrintableDaySummary = forwardRef<HTMLDivElement, PrintableDaySummar
           className="flex flex-col gap-4 py-6"
           style={{ paddingLeft: SHEET_PADDING, paddingRight: SHEET_PADDING }}
         >
-          <ReportSheetTitle property={property} date={date} demo={demo} />
+          {/* Always the one-line print form — this component is print-only
+              (never the JPEG export), see reportSheetBlocks.tsx's
+              ReportSheetTitle. */}
+          <ReportSheetTitle property={property} date={date} demo={demo} inline />
           <IncomeExpenseSummaryCard categories={categories} income={income} expenses={expenses} totals={totals} />
           <CashSummaryCard cashBlock={cashBlock} totals={totals} note={note} otherIncome={otherIncome} />
           <ReportFooter provenance={provenance} verifiedAt={verifiedAt} verifiedBy={verifiedBy} updatedBy={updatedBy} />

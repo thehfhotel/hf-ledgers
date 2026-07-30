@@ -75,10 +75,15 @@ interface ReportSheetProps {
   /** Marks the header "(ตัวอย่าง)" — see reportSheetBlocks.tsx's
    * ReportSheetTitle. */
   demo?: boolean;
+  /** One-line title instead of the paper form's 3 stacked lines — for
+   * print/PDF output only (see reportSheetBlocks.tsx's ReportSheetTitle).
+   * BookingDayPage's "bookingsOnly" print/PDF portal sets this; ReportPage's
+   * JPEG export passes nothing, keeping the familiar stacked look. */
+  inlineTitle?: boolean;
 }
 
 export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function ReportSheet(
-  { property, date, sheet, lines, variant = "full", demo = false },
+  { property, date, sheet, lines, variant = "full", demo = false, inlineTitle = false },
   ref,
 ) {
   const { categories, income, expenses, totals, otherIncome, cashBlock, provenance, verifiedAt, verifiedBy, note, updatedBy } =
@@ -98,7 +103,7 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
 
       <div className="py-6" style={{ paddingLeft: SHEET_PADDING, paddingRight: SHEET_PADDING }}>
         {/* 1. Title block — the way the workbook heads each sheet. */}
-        <ReportSheetTitle property={property} date={date} demo={demo} />
+        <ReportSheetTitle property={property} date={date} demo={demo} inline={inlineTitle} />
 
         {/* 2. The booking grid, read-only, same frame as the entry screen. */}
         <section className="mb-5">

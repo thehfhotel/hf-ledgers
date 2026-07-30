@@ -67,6 +67,17 @@ export function storedStamp(stored: string): string {
 
 // ── Title block ────────────────────────────────────────────────────────
 
+/** PROPERTY_LABELS[property].th with a leading "โรงแรม " stripped, e.g.
+ * "โรงแรม HF" -> "HF" ("HF วิลล์" has no such prefix and passes through
+ * unchanged). Only used by the inline title below: it opens with
+ * "รายงานรายรับของโรงแรม" itself, so printing the full label after it
+ * would read "...ของโรงแรม โรงแรม HF". */
+function shortPropertyLabel(property: Property): string {
+  const th = PROPERTY_LABELS[property].th;
+  const prefix = "โรงแรม ";
+  return th.startsWith(prefix) ? th.slice(prefix.length) : th;
+}
+
 export interface ReportSheetTitleProps {
   property: Property;
   date: string;
@@ -74,9 +85,26 @@ export interface ReportSheetTitleProps {
    * flag — for a /demo print/PDF, so demo output is never mistaken for a
    * real property's report. */
   demo?: boolean;
+  /** ONE line ("รายงานรายรับของโรงแรม {short} ประจำวันที่ {date}") instead
+   * of the paper form's 3 stacked centered lines — for print/PDF output
+   * only, where vertical space is scarce. ReportPage's JPEG export (the
+   * familiar paper-photo look) never sets this; it keeps the stacked
+   * default. See BookingDayPage.tsx (ReportSheet's inlineTitle prop) and
+   * PrintableDaySummary.tsx (always inline — it is print-only). */
+  inline?: boolean;
 }
 
-export function ReportSheetTitle({ property, date, demo = false }: ReportSheetTitleProps) {
+export function ReportSheetTitle({ property, date, demo = false, inline = false }: ReportSheetTitleProps) {
+  if (inline) {
+    const short = shortPropertyLabel(property);
+    return (
+      <header className="mb-4 text-center">
+        <h1 className="text-lg font-bold text-brand-800">
+          {`รายงานรายรับของโรงแรม ${short}${demo ? " (ตัวอย่าง)" : ""} ประจำวันที่ ${isoToThaiLong(date)}`}
+        </h1>
+      </header>
+    );
+  }
   return (
     <header className="mb-4 text-center">
       <h1 className="text-lg font-bold text-brand-800">รายงานรายรับของโรงแรม</h1>

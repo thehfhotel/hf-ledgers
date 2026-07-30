@@ -880,6 +880,7 @@ export function BookingDayPage({ property, date }: Props) {
               lines={sortedLines}
               variant="bookingsOnly"
               demo={isDemo}
+              inlineTitle
             />
           </div>
         </div>

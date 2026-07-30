@@ -113,6 +113,18 @@ body {
   color: #000 !important;
 }
 
+/* Print/PDF grid & card rule lines print near-black — the theme's
+   --color-line / --color-line-strong (a light stone) read faint once
+   printed. Border-color only; backgrounds (the burgundy/gold rule bars,
+   tint fills) are deliberately untouched so the sheet's fills still
+   print. Same scope as the color rule above, same reasoning: it must
+   reach both the browser print dialog and the html2canvas-pro PDF
+   capture. Near-black (#333), not pure #000, per the owner's ask. */
+.print-stage,
+.print-stage * {
+  border-color: #333 !important;
+}
+
 /* Print/PDF text sizes, bumped ~2px per step over the on-screen Tailwind
    scale used by PrintableDaySummary.tsx, ReportSheet.tsx,
    reportSheetBlocks.tsx, and bookingGridFrame.tsx's compact (print-only)
@@ -164,7 +176,20 @@ body {
 }
 
 @media print {
-  #root {
+  /* Hide everything on the page except the print-stage branch, so
+     PrintPortal.tsx's sheet is the ONLY thing that reaches paper —
+     catches #root AND any other node appended directly to <body> outside
+     #root, such as the estate shell bar (erp.thehfhotel.org/shell/hf-bar.js)
+     injecting its own anonymous host div, which used to print at the top
+     of every page back when this rule named #root alone. PrintPortal.tsx
+     appends its OWN unlabeled wrapper <div> to <body> and renders
+     .print-stage one level inside that wrapper, not as a direct child of
+     <body> — so a plain `body > :not(.print-stage)` would hide that
+     wrapper too (it isn't .print-stage itself) and blank the printed page.
+     :has() lets the selector look one level down instead: keep a direct
+     child of <body> visible if a .print-stage lives anywhere inside it,
+     hide every other direct child. */
+  body > *:not(:has(.print-stage)) {
     display: none !important;
   }
   .print-stage {

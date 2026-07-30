@@ -20,9 +20,14 @@ import { categoriesForDay, db, getEffectiveIncomeForDay, getExpensesForDay, getO
 import { computeIncomeLedgerRollup } from "../shared/rollup.ts";
 import type { Property } from "../shared/types.ts";
 
-const URL_BASE = process.env.ANALYTICS_URL?.replace(/\/+$/, "");
-const TOKEN = process.env.ANALYTICS_TOKEN;
-const ENABLED = !!(URL_BASE && TOKEN);
+// Read LAZILY (call-time), never at module load: bun test runs every file
+// in one process, so whichever test file imports server.ts first would
+// otherwise freeze the enabled state for all later files - the discovery
+// order differs between filesystems, which made CI fail while local passed.
+// Same convention as directory-client.ts.
+const urlBase = (): string => (process.env.ANALYTICS_URL ?? "").replace(/\/+$/, "");
+const token = (): string => process.env.ANALYTICS_TOKEN ?? "";
+const enabled = (): boolean => !!(urlBase() && token());
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS _analytics_pending_pushes (
@@ -58,7 +63,7 @@ const markErrorStmt = db.prepare(
  * minute coalesce into one push.
  */
 export function enqueueAnalyticsPush(property: Property, date: string): void {
-  if (!ENABLED) return;
+  if (!enabled()) return;
   enqueueStmt.run(property, date);
 }
 
@@ -86,11 +91,11 @@ function buildPayload(property: Property, date: string) {
 
 async function postOne(property: Property, date: string): Promise<void> {
   const payload = buildPayload(property, date);
-  const r = await fetch(`${URL_BASE}/api/ingest/income-ledger`, {
+  const r = await fetch(`${urlBase()}/api/ingest/income-ledger`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${TOKEN}`,
+      authorization: `Bearer ${token()}`,
     },
     body: JSON.stringify(payload),
   });
@@ -101,7 +106,7 @@ async function postOne(property: Property, date: string): Promise<void> {
 
 let running = false;
 async function flush(): Promise<void> {
-  if (!ENABLED || running) return;
+  if (!enabled() || running) return;
   running = true;
   try {
     const pending = listPendingStmt.all();
@@ -129,11 +134,11 @@ let bootTimer: ReturnType<typeof setTimeout> | null = null;
 let intervalTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startAnalyticsPushWorker(): void {
-  if (!ENABLED) {
+  if (!enabled()) {
     console.log("[analytics-push] disabled (ANALYTICS_URL / ANALYTICS_TOKEN not set)");
     return;
   }
-  console.log(`[analytics-push] enabled -> ${URL_BASE}`);
+  console.log(`[analytics-push] enabled -> ${urlBase()}`);
   // First flush ~5s after boot so the server is fully up.
   bootTimer = setTimeout(flush, 5_000);
   intervalTimer = setInterval(flush, 30_000);

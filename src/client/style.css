@@ -125,6 +125,44 @@ body {
   border-color: #333 !important;
 }
 
+/* Square corners on paper. Two real printouts showed rounded card/table
+   corners (BOX = "rounded-lg border border-line" in reportSheetBlocks.tsx,
+   and the bookings grid's own rounded frames) with a visible gap at the
+   top — html2canvas's PDF capture and the browser's scaled print dialog
+   both rasterize a rounded border as separate top/right/bottom/left
+   strokes, and at print scale the top stroke's curve-to-straight
+   transition falls short of meeting the side strokes, leaving a hairline
+   gap at each top corner. Forcing border-radius to 0 removes the curve
+   entirely, so there is no corner transition left to drop — and it also
+   happens to match how the original paper form actually looks. Same
+   .print-stage scope as the rules above: screen UI and ReportPage's JPEG
+   export (which renders ReportSheet outside .print-stage) keep their
+   normal rounded corners. */
+.print-stage,
+.print-stage * {
+  border-radius: 0 !important;
+}
+
+/* Scale-resilient outer frame for the bookings grid. ReportSheet.tsx
+   (~line 111) draws the grid with only per-cell bottom/right rules plus a
+   1px border-t/border-l wrapper div to close the top and left of the
+   frame — cheap on screen, but on a second real printout the top edge of
+   that outer frame dropped out in segments. The sheet prints at a
+   fit-to-page scale around 0.8 (printGeometry.ts's computeFitScale), and a
+   1px CSS border scaled down like that can land on a sub-pixel boundary
+   that html2canvas / the print rasterizer rounds away entirely in
+   stretches, rather than just thinning it. Giving the <table> itself an
+   explicit 1px border means (with the existing border-separate spacing)
+   the table draws its own complete outer rectangle on all four sides,
+   independent of the wrapper div's border-t/border-l closers, so the
+   frame is redundant instead of relying on a single sub-pixel line
+   surviving the scale. Where it overlaps the wrapper's border-t/l the two
+   1px lines double up, but at print scale that just reads as one solid
+   rule, not a visible doubled line. */
+.print-stage table {
+  border: 1px solid #333 !important;
+}
+
 /* Print/PDF text sizes, bumped ~2px per step over the on-screen Tailwind
    scale used by PrintableDaySummary.tsx, ReportSheet.tsx,
    reportSheetBlocks.tsx, and bookingGridFrame.tsx's compact (print-only)

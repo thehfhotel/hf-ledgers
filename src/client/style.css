@@ -76,3 +76,30 @@ body {
 .rail::-webkit-scrollbar {
   display: none;
 }
+
+/* Print / PDF-export staging area — see components/PrintPortal.tsx,
+   components/printSheet.ts, components/usePrintExport.ts. The sheet is
+   ALWAYS laid out here (never display:none) so html2canvas can capture it
+   for the PDF export at any time, and its natural size can be measured for
+   the print scale-to-fit math — an ancestor with overflow:hidden +
+   max-height:0 clips a taller child from VIEW without changing the
+   child's own computed size (the same trick accordions use), unlike
+   display:none, which removes it from layout entirely and would zero out
+   both. Print media un-clips it and hides the rest of the app (#root) so
+   only this sheet reaches the printed page; PrintPortal.tsx keeps it
+   OUTSIDE #root in the DOM so #root's display:none can't take it down
+   too. */
+.print-stage {
+  max-height: 0;
+  overflow: hidden;
+}
+
+@media print {
+  #root {
+    display: none !important;
+  }
+  .print-stage {
+    max-height: none;
+    overflow: visible;
+  }
+}

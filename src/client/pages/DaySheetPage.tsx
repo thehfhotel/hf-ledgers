@@ -31,6 +31,9 @@ import {
 import { navigate } from "../App.tsx";
 import { AmountInput } from "../components/AmountInput.tsx";
 import { DateBar } from "../components/DateBar.tsx";
+import { PrintableDaySummary } from "../components/PrintableDaySummary.tsx";
+import { PrintPortal } from "../components/PrintPortal.tsx";
+import { usePrintExport } from "../components/usePrintExport.ts";
 import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
@@ -109,6 +112,11 @@ export function DaySheetPage({ property, date }: Props) {
   const [dayNoteState, setDayNoteState] = useState<SimpleSaveState>("idle");
   const [verifyBusy, setVerifyBusy] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  // ── พิมพ์ / PDF — the day summary only (no booking grid), portrait ─────
+  // Read-only actions: never gated on monthClosed — see usePrintExport.ts /
+  // PrintableDaySummary.tsx.
+  const printExport = usePrintExport({ orientation: "portrait", property, date });
 
   useEffect(() => {
     getMe()
@@ -980,16 +988,48 @@ export function DaySheetPage({ property, date }: Props) {
         <p className="text-xs text-ink-muted">
           บันทึกล่าสุด: {day.updatedBy} {formatUpdatedAt(day.updatedAt)}
         </p>
-        <button
-          type="button"
-          onClick={goToReport}
-          className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600 focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-        >
-          ส่งออกรูปภาพ
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={goToReport}
+            className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600 focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+          >
+            ส่งออกรูปภาพ
+          </button>
+          {/* พิมพ์ / PDF — read-only exports of this day's summary, never
+              disabled by monthClosed (see usePrintExport.ts). */}
+          <button
+            type="button"
+            onClick={printExport.handlePrint}
+            disabled={printExport.busy !== ""}
+            className="rounded-md border border-line-strong bg-panel px-4 py-2 text-sm font-medium text-ink hover:bg-tint disabled:opacity-50"
+          >
+            พิมพ์
+          </button>
+          <button
+            type="button"
+            onClick={printExport.handlePdf}
+            disabled={printExport.busy !== ""}
+            className="rounded-md border border-line-strong bg-panel px-4 py-2 text-sm font-medium text-ink hover:bg-tint disabled:opacity-50"
+          >
+            {printExport.busy === "pdf" ? "กำลังสร้าง PDF..." : "PDF"}
+          </button>
+        </div>
+        {printExport.error && <p className="text-xs text-bad">{printExport.error}</p>}
       </div>
       </div>
       {/* end of the หมายเหตุ | footer row */}
+
+      {/* พิมพ์/PDF target — the day summary only (PrintableDaySummary),
+          rendered read-only and hidden on screen; see PrintPortal.tsx /
+          style.css's .print-stage. */}
+      <PrintPortal>
+        <div className="print-stage">
+          <div ref={printExport.nodeRef} style={printExport.sheetStyle}>
+            <PrintableDaySummary property={property} date={date} sheet={day} />
+          </div>
+        </div>
+      </PrintPortal>
     </div>
   );
 }

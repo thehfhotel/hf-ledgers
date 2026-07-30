@@ -37,6 +37,9 @@ import { BookingGrid } from "../components/BookingGrid.tsx";
 import { DateBar } from "../components/DateBar.tsx";
 import { FIXTURE_DATE, fixtureBookingLines, fixtureDaySheet } from "../fixtures.ts";
 import { CASH_BLOCK_FIELDS } from "../labels.ts";
+import { PrintPortal } from "../components/PrintPortal.tsx";
+import { ReportSheet } from "../components/ReportSheet.tsx";
+import { usePrintExport } from "../components/usePrintExport.ts";
 import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
@@ -169,6 +172,14 @@ export function BookingDayPage({ property, date }: Props) {
 
   const sortedLines = useMemo(() => [...(lines ?? [])].sort((a, b) => a.seq - b.seq), [lines]);
   const monthClosed = daySheet?.monthClosed ?? false;
+
+  // ── พิมพ์ / PDF — the booking sheet only (grid + totals), landscape ────
+  // Read-only actions: unlike every mutation above, NEVER gated on
+  // monthClosed or demo mode — see usePrintExport.ts / ReportSheet.tsx's
+  // "bookingsOnly" variant. The print/PDF target is the SAME data already
+  // on screen (daySheet + sortedLines), rendered into a hidden print-stage
+  // (see PrintPortal.tsx) rather than the live editing grid.
+  const printExport = usePrintExport({ orientation: "landscape", property: effectiveProperty, date: effectiveDate });
 
   // ── เปรียบเทียบกับสรุปวัน ──────────────────────────────────────────────
   // Both sides computed here from the rows already on screen, through the
@@ -516,6 +527,26 @@ export function BookingDayPage({ property, date }: Props) {
           <p className="min-w-0 flex-1 text-xs text-ink-muted">
             พิมพ์ในแถวว่างท้ายตารางเพื่อเพิ่มรายการใหม่ — Tab เลื่อนช่องถัดไป, Enter เลื่อนลงในคอลัมน์เดิม, ปุ่มลูกศรเลื่อนขึ้น/ลง/ซ้าย/ขวา
           </p>
+          {/* พิมพ์ / PDF — read-only exports of the booking sheet, always
+              enabled (never gated on monthClosed/loading beyond "data is
+              here at all", matching the move button's !isDemo guard for
+              consistency though these two work in demo mode too). */}
+          <button
+            type="button"
+            onClick={printExport.handlePrint}
+            disabled={printExport.busy !== ""}
+            className="shrink-0 rounded-md border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-tint disabled:opacity-50"
+          >
+            พิมพ์
+          </button>
+          <button
+            type="button"
+            onClick={printExport.handlePdf}
+            disabled={printExport.busy !== ""}
+            className="shrink-0 rounded-md border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-tint disabled:opacity-50"
+          >
+            {printExport.busy === "pdf" ? "กำลังสร้าง PDF..." : "PDF"}
+          </button>
           {!isDemo && (
             <button
               type="button"
@@ -529,6 +560,9 @@ export function BookingDayPage({ property, date }: Props) {
         </div>
         {moveError && (
           <p className="border-b border-line bg-bad/5 px-4 py-2 text-xs text-bad">{moveError}</p>
+        )}
+        {printExport.error && (
+          <p className="border-b border-line bg-bad/5 px-4 py-2 text-xs text-bad">{printExport.error}</p>
         )}
         <BookingGrid
           lines={sortedLines}
@@ -751,6 +785,24 @@ export function BookingDayPage({ property, date }: Props) {
           </p>
         </section>
       </div>
+
+      {/* พิมพ์/PDF target — the booking sheet only (ReportSheet's
+          "bookingsOnly" variant), rendered read-only and hidden on screen;
+          see PrintPortal.tsx / style.css's .print-stage. */}
+      <PrintPortal>
+        <div className="print-stage">
+          <div ref={printExport.nodeRef} style={printExport.sheetStyle}>
+            <ReportSheet
+              property={effectiveProperty}
+              date={effectiveDate}
+              sheet={daySheet}
+              lines={sortedLines}
+              variant="bookingsOnly"
+              demo={isDemo}
+            />
+          </div>
+        </div>
+      </PrintPortal>
     </div>
   );
 }

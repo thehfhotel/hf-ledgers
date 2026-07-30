@@ -42,7 +42,7 @@ import type { Property } from "../src/shared/types.ts";
  */
 function listAllDatesWithData(property: Property): string[] {
   const rows = db
-    .query<{ date: string }, [string, string, string, string]>(
+    .query<{ date: string }, [string, string, string, string, string]>(
       `SELECT date FROM income_amounts WHERE property = ?
        UNION
        SELECT date FROM expense_items WHERE property = ?
@@ -50,9 +50,16 @@ function listAllDatesWithData(property: Property): string[] {
        SELECT date FROM sheet_days WHERE property = ? AND note IS NOT NULL
        UNION
        SELECT date FROM booking_lines WHERE property = ?
+       UNION
+       -- A day whose ONLY money is itemized other-income (e.g. hfville
+       -- 2025-10-20: one 60-baht pool fee, reconstructed, no booking rows)
+       -- exists in no other table. Omitting this arm silently dropped that
+       -- day from the first backfill — found by reconciling analytics
+       -- totals against the ledger to the satang.
+       SELECT date FROM other_income_items WHERE property = ?
        ORDER BY date ASC`,
     )
-    .all(property, property, property, property);
+    .all(property, property, property, property, property);
   return rows.map((r) => r.date);
 }
 

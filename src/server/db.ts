@@ -898,14 +898,17 @@ export function setSheetDayNote(property: Property, date: string, note: string |
 }
 
 /** Distinct dates in `month` (YYYY-MM) that have income, an expense, a
- * booking line, or an explicit day note — descending. See
- * src/shared/api.md endpoint 6. A day touched only via booking lines (no
- * summary income/expense/note) would otherwise never surface here — the
- * sheet_days arm alone requires note IS NOT NULL. */
+ * booking line, an itemized other-income entry, or an explicit day note —
+ * descending. See src/shared/api.md endpoint 6. Every arm exists because a
+ * day can be touched through that table ALONE: booking lines carry no
+ * summary cells, and a day whose only money is an itemized other-income
+ * entry (real case: hfville 2025-10-20, one 60-baht pool fee on a
+ * reconstructed day) exists in no other table — omitting that arm rendered
+ * it as a missing day in History while it held money. */
 export function listDaysWithData(property: Property, month: string): string[] {
   const like = `${month}-%`;
   const rows = db
-    .query<{ date: string }, [string, string, string, string, string, string, string, string]>(
+    .query<{ date: string }, [string, string, string, string, string, string, string, string, string, string]>(
       `SELECT date FROM income_amounts WHERE property = ? AND date LIKE ?
        UNION
        SELECT date FROM expense_items WHERE property = ? AND date LIKE ?
@@ -913,9 +916,11 @@ export function listDaysWithData(property: Property, month: string): string[] {
        SELECT date FROM sheet_days WHERE property = ? AND date LIKE ? AND note IS NOT NULL
        UNION
        SELECT date FROM booking_lines WHERE property = ? AND date LIKE ?
+       UNION
+       SELECT date FROM other_income_items WHERE property = ? AND date LIKE ?
        ORDER BY date DESC`,
     )
-    .all(property, like, property, like, property, like, property, like);
+    .all(property, like, property, like, property, like, property, like, property, like);
   return rows.map((r) => r.date);
 }
 

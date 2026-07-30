@@ -502,3 +502,26 @@ describe("day sheet amendments", () => {
     expect(cleared.body.entered).toBeNull();
   });
 });
+
+describe("a day whose only money is itemized other-income", () => {
+  // Real production case: hfville 2025-10-20 held one 60-baht pool fee and
+  // nothing else, and was invisible to GET /days (and to the analytics
+  // backfill, same UNION) until the other_income_items arm was added.
+  const DATE = "2026-04-05";
+
+  test("surfaces in GET /days", async () => {
+    const created = await call("POST", `/${PROPERTY}/day/${DATE}/other-income`, {
+      description: "ค่าเล่นสระน้ำ เด็ก",
+      amountSatang: 6_000,
+      isCash: true,
+    });
+    expect(created.status).toBe(201);
+
+    const days = await call<{ days: Array<{ date: string }> }>("GET", `/${PROPERTY}/days?month=2026-04`);
+    expect(days.status).toBe(200);
+    expect(days.body.days.some((d) => d.date === DATE)).toBe(true);
+
+    const id = (created.body as { id: number }).id;
+    await call("DELETE", `/${PROPERTY}/other-income/${id}`);
+  });
+});

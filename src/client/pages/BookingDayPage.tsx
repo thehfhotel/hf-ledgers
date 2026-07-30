@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { shiftDays } from "../../shared/date.ts";
+import { isoToThaiLong, shiftDays } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
 import {
   RECONCILE_TOLERANCE_SATANG,
@@ -9,6 +9,7 @@ import {
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import {
   DESCRIPTION_MAX_LEN,
+  PROPERTY_LABELS,
   TENDER_TO_CATEGORY_KEY,
   type BookingLine,
   type CashBlockAmounts,
@@ -23,8 +24,8 @@ import {
   deleteBookingLine,
   deleteOtherIncomeItem,
   getDay,
-  getMe,
   listBookingLines,
+  moveBookingDay,
   putCashBlock,
   updateBookingLine,
   updateOtherIncomeItem,
@@ -36,6 +37,7 @@ import { BookingGrid } from "../components/BookingGrid.tsx";
 import { DateBar } from "../components/DateBar.tsx";
 import { FIXTURE_DATE, fixtureBookingLines, fixtureDaySheet } from "../fixtures.ts";
 import { CASH_BLOCK_FIELDS } from "../labels.ts";
+import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
   property: Property | "demo";
@@ -82,22 +84,12 @@ export function BookingDayPage({ property, date }: Props) {
   const [lines, setLines] = useState<BookingLine[] | null>(null);
   const [daySheet, setDaySheet] = useState<DaySheet | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [isManager, setIsManager] = useState(false);
   // Rows created optimistically: temp id -> the in-flight POST, so an edit
   // landing before the server answers can wait for the real row (see
   // addBookingLine / commitLinePatch). Counter keeps same-millisecond temp
   // ids distinct.
   const pendingCreates = useRef(new Map<number, Promise<BookingLine>>());
   const tempIdCounter = useRef(0);
-
-  useEffect(() => {
-    if (isDemo) return;
-    getMe()
-      .then((me) => setIsManager(me.isManager))
-      .catch(() => {
-        /* /api/me failing just means cash-block overrides stay read-only */
-      });
-  }, [isDemo]);
 
   useEffect(() => {
     if (isDemo) {
@@ -125,6 +117,55 @@ export function BookingDayPage({ property, date }: Props) {
       cancelled = true;
     };
   }, [isDemo, effectiveProperty, effectiveDate]);
+
+  // ── Move this day to the other property ──────────────────────────────
+  // Scope is locked (see api.ts moveBookingDay + the confirm text below):
+  // ONLY booking_lines + other_income_items for this date move, merging into
+  // whatever the destination already has. The day sheet (income/expenses/
+  // note) and the cash-block override are single-valued per property and
+  // stay put on both sides — the confirm dialog says so explicitly, since
+  // this is the exact mistake (wrong-hotel entry) the feature exists to fix.
+  const otherProperty: Property = effectiveProperty === "hf" ? "hfville" : "hf";
+  const [moving, setMoving] = useState(false);
+  const [moveError, setMoveError] = useState<string | null>(null);
+
+  async function reloadAfterMoveFailure() {
+    // Best-effort resync only: a failed move should never leave this page
+    // showing stale rows if the server actually committed before the error
+    // reached the client (timeout, 502, ...). The failure message itself is
+    // already shown separately, so a second failure here just leaves it be.
+    try {
+      const [bookingsRes, sheet] = await Promise.all([
+        listBookingLines(effectiveProperty, effectiveDate),
+        getDay(effectiveProperty, effectiveDate),
+      ]);
+      setLines(bookingsRes.lines);
+      setDaySheet(sheet);
+    } catch {
+      /* keep whatever is on screen — the move error is already shown */
+    }
+  }
+
+  async function handleMoveDay() {
+    if (isDemo || monthClosed || moving) return;
+    const confirmed = window.confirm(
+      `ย้ายข้อมูลวันที่ ${isoToThaiLong(effectiveDate)} จาก${PROPERTY_LABELS[effectiveProperty].th} ไปยัง${PROPERTY_LABELS[otherProperty].th}\n\n` +
+        "จะย้ายเฉพาะรายการจองและรายการอื่นๆของวันนี้ทั้งหมด — ถ้าฝั่งปลายทางมีรายการอยู่แล้ว จะรวมเข้าด้วยกัน ไม่ทับข้อมูลเดิม\n\n" +
+        "สรุปวัน (รายรับ/รายจ่าย/หมายเหตุ) และการปรับยอดเงินสด (**หมายเหตุ) ของทั้งสองฝั่งจะไม่ถูกย้าย ต้องไปแก้ไขเองภายหลังถ้าจำเป็น\n\n" +
+        "ดำเนินการย้ายหรือไม่",
+    );
+    if (!confirmed) return;
+    setMoveError(null);
+    setMoving(true);
+    try {
+      await moveBookingDay(effectiveProperty, effectiveDate, otherProperty);
+      navigate(`/${otherProperty}/bookings/${effectiveDate}`);
+    } catch (err) {
+      setMoveError(err instanceof Error ? err.message : "ย้ายวันไม่สำเร็จ ลองใหม่อีกครั้ง");
+      setMoving(false);
+      await reloadAfterMoveFailure();
+    }
+  }
 
   const sortedLines = useMemo(() => [...(lines ?? [])].sort((a, b) => a.seq - b.seq), [lines]);
   const monthClosed = daySheet?.monthClosed ?? false;
@@ -453,7 +494,10 @@ export function BookingDayPage({ property, date }: Props) {
         >
           กลับไปสรุปวัน
         </button>
-        <h1 className="text-sm font-semibold text-ink">รายงานรายรับโรงแรมรายวัน</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-sm font-semibold text-ink">รายงานรายรับโรงแรมรายวัน</h1>
+          <PropertyBadge property={effectiveProperty} demo={isDemo} />
+        </div>
         <span aria-hidden className="w-8" />
       </div>
 
@@ -467,12 +511,25 @@ export function BookingDayPage({ property, date }: Props) {
 
       {/* Panel รายการจอง — the spreadsheet grid */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
-        <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-2.5">
           <h2 className="text-sm font-semibold text-ink">รายการจอง</h2>
-          <p className="text-xs text-ink-muted">
+          <p className="min-w-0 flex-1 text-xs text-ink-muted">
             พิมพ์ในแถวว่างท้ายตารางเพื่อเพิ่มรายการใหม่ — Tab เลื่อนช่องถัดไป, Enter เลื่อนลงในคอลัมน์เดิม, ปุ่มลูกศรเลื่อนขึ้น/ลง/ซ้าย/ขวา
           </p>
+          {!isDemo && (
+            <button
+              type="button"
+              onClick={handleMoveDay}
+              disabled={monthClosed || moving}
+              className="shrink-0 rounded-md border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-tint disabled:opacity-50"
+            >
+              {moving ? "กำลังย้าย..." : `ย้ายวันนี้ไปยัง${PROPERTY_LABELS[otherProperty].th}`}
+            </button>
+          )}
         </div>
+        {moveError && (
+          <p className="border-b border-line bg-bad/5 px-4 py-2 text-xs text-bad">{moveError}</p>
+        )}
         <BookingGrid
           lines={sortedLines}
           disabled={monthClosed}
@@ -626,7 +683,7 @@ export function BookingDayPage({ property, date }: Props) {
         <section className="rounded-lg border border-line bg-tint p-4">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-ink">**หมายเหตุ (สรุปเงินสด)</h2>
-            {daySheet.cashBlock.entered && isManager && (
+            {daySheet.cashBlock.entered && (
               <button
                 type="button"
                 onClick={clearCashOverride}
@@ -655,13 +712,12 @@ export function BookingDayPage({ property, date }: Props) {
                     value={shown}
                     onCommit={(satang) => commitCashOverrideField(key, satang)}
                     ariaLabel={label}
-                    disabled={!isManager || monthClosed}
+                    disabled={monthClosed}
                   />
                 </div>
               );
             })}
           </div>
-          {!isManager && <p className="mt-2 text-xs text-ink-muted">ปรับยอดได้เฉพาะผู้จัดการ</p>}
         </section>
 
         {/* แถบเปรียบเทียบยอดจากรายการจอง — ถาวร ไม่ใช่การอัพเดทอัตโนมัติ */}

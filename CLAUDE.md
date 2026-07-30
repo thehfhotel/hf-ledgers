@@ -5,9 +5,22 @@
 สรุปรายรับ-รายจ่าย — a daily income + expense ledger for HF Hotel front
 desk. Digitizes the paper daily income summary (income by tender category:
 ค่าห้องเงินสด, บัตรเครดิต/กสิกร, บัตรเครดิต ICBC, โอน/กสิกร, โอน ICBC,
-เว็ปไซด์, บาร์น้ำ…), adds itemized daily expenses, and exports a clean JPEG
-day report the user shares onward (LINE) themselves. Front desk + managers
-enter data; managers additionally admin the category list.
+เว็ปไซด์, บาร์น้ำ…), adds itemized daily expenses, exports a clean JPEG
+day report the user shares onward (LINE) themselves, and can move a day's
+bookings and other-income to the other property (merge into the
+destination; the day sheet itself is not moved) via `POST
+/:property/day/:date/move`. Front desk enters the data.
+
+**No in-app roles.** Cloudflare Access is the only gate on who reaches
+income.thehfhotel.org — everyone it admits, including the office-1 and
+reception kiosk identities, can use every feature, category list included.
+A second, in-app permission tier would have permanently locked out those
+shared kiosk terminals — they are place identities and can never hold a
+manager role — which is the work the front desk actually does. What
+survived: authentication (401 without a verified identity), the dev
+bypass under `NODE_ENV=development` + `DEV_USER`, month-close as a
+data-state lock returning 409, and the
+created_by/updated_by/verified_by/closed_by provenance columns.
 
 Stack: Bun + Elysia (`prefix:"/api"`, Typebox) mounted in `Bun.serve`,
 serving the built React SPA + `/healthz`; `bun:sqlite` WAL with inline
@@ -83,9 +96,13 @@ run bypasses any outbox: re-run the analytics backfill after importing.
   and must respond even if the DB is briefly unavailable — the deploy shim
   only retries 15 times at 2s intervals.
 - **Never commit secrets.** `.env` is gitignored. Runtime env
-  (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `MANAGER_EMAILS`) is materialized
-  into the container's `.env` by `.github/workflows/deploy.yml` from GitHub
-  secrets — reference locations, never values, in this repo.
+  (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) is materialized into the container's
+  `.env` by `.github/workflows/deploy.yml` from GitHub secrets — reference
+  locations, never values, in this repo. `PORTAL_DIRECTORY_URL`,
+  `PORTAL_DIRECTORY_TOKEN`, and `PROTECTED_MANAGER` (with
+  `src/server/directory-client.ts`) are retired — the app no longer
+  depends on the HF portal being reachable at runtime; `ACCESS_TEAM_DOMAIN`
+  and `ACCESS_AUD` remain, still required for JWT verification.
 - **This repo is public.** Keep LAN IPs and internal network topology out
   of it; that context lives in the (private) `HF-erp` repo, which owns
   Cloudflare-as-code for the whole estate.

@@ -11,9 +11,6 @@ services:
       - TZ=${TZ:-Asia/Bangkok}
       - ACCESS_TEAM_DOMAIN=${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}
       - ACCESS_AUD=${ACCESS_AUD:-}
-      - PORTAL_DIRECTORY_URL=${PORTAL_DIRECTORY_URL:-}
-      - PORTAL_DIRECTORY_TOKEN=${PORTAL_DIRECTORY_TOKEN:-}
-      - PROTECTED_MANAGER=${PROTECTED_MANAGER:-}
       - ANALYTICS_URL=${ANALYTICS_URL:-}
       - ANALYTICS_TOKEN=${ANALYTICS_TOKEN:-}
       - DB_PATH=/app/data/ledger.db

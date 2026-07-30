@@ -28,6 +28,7 @@ import {
   listDaysWithData,
   mergeCashBlockOverride,
   monthIsClosed,
+  moveBookingDay,
   reorderCategories,
   saveIncomeCell,
   setCashBlockOverride,
@@ -205,10 +206,10 @@ function validateBookingLineInput(body: Omit<BookingLineInput, "source"> & { sou
 // ── /api routes ────────────────────────────────────────────────────────
 // Every handler implements one endpoint from src/shared/api.md — the
 // contract of record. Auth: a scoped derive resolves identity and a
-// top-level onBeforeHandle 401s when absent; requireManager (via .guard())
-// 403s non-managers on the three admin endpoints (create/patch/reorder
-// categories). Static assets and GET /healthz (outside this group) are
-// unguarded — Cloudflare Access fronts the whole host.
+// top-level onBeforeHandle 401s when absent — that is authentication
+// (Cloudflare Access decides who reaches this host), never a role. Static
+// assets and GET /healthz (outside this group) are unguarded — Cloudflare
+// Access fronts the whole host.
 
 export const api = new Elysia({ prefix: "/api" })
   .derive(async ({ request }) => ({ identity: await identify(request) }))
@@ -217,7 +218,7 @@ export const api = new Elysia({ prefix: "/api" })
   })
 
   // 1. GET /api/me
-  .get("/me", ({ identity }): Me => ({ email: identity!.email, isManager: identity!.isManager }))
+  .get("/me", ({ identity }): Me => ({ email: identity!.email }))
 
   // 2. GET /api/:property/categories?includeArchived=1
   .get("/:property/categories", ({ params, query, status }) => {
@@ -227,101 +228,94 @@ export const api = new Elysia({ prefix: "/api" })
     return { categories: listCategories(property, includeArchived) };
   })
 
-  // 3-5. Manager-only category admin.
-  .guard({}, (app) =>
-    app
-      .onBeforeHandle(({ identity, status }) => {
-        if (!identity?.isManager) return status(403, { error: "manager only" });
-      })
-      // 3. POST /api/:property/categories
-      .post(
-        "/:property/categories",
-        ({ params, body, status }) => {
-          const { property } = params;
-          if (!isProperty(property)) return status(400, { error: "invalid property" });
-          if (body.kind !== "income" && body.kind !== "expense") {
-            return status(400, { error: "invalid kind" });
-          }
-          if (!isValidNameTh(body.nameTh)) return status(400, { error: "invalid nameTh" });
-          if (typeof body.isCash !== "boolean") return status(400, { error: "invalid isCash" });
+  // 3. POST /api/:property/categories
+  .post(
+    "/:property/categories",
+    ({ params, body, status }) => {
+      const { property } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (body.kind !== "income" && body.kind !== "expense") {
+        return status(400, { error: "invalid kind" });
+      }
+      if (!isValidNameTh(body.nameTh)) return status(400, { error: "invalid nameTh" });
+      if (typeof body.isCash !== "boolean") return status(400, { error: "invalid isCash" });
 
-          try {
-            const category = createCategory(property, body.kind, body.nameTh, body.isCash);
-            return status(201, category);
-          } catch (err) {
-            if (isUniqueConstraintError(err)) return status(409, { error: "duplicate category name" });
-            throw err;
-          }
-        },
-        { body: t.Object({ kind: t.String(), nameTh: t.String(), isCash: t.Boolean() }) },
-      )
+      try {
+        const category = createCategory(property, body.kind, body.nameTh, body.isCash);
+        return status(201, category);
+      } catch (err) {
+        if (isUniqueConstraintError(err)) return status(409, { error: "duplicate category name" });
+        throw err;
+      }
+    },
+    { body: t.Object({ kind: t.String(), nameTh: t.String(), isCash: t.Boolean() }) },
+  )
 
-      // 4. PATCH /api/:property/categories/:id
-      .patch(
-        "/:property/categories/:id",
-        ({ params, body, status }) => {
-          const { property } = params;
-          if (!isProperty(property)) return status(400, { error: "invalid property" });
-          const id = Number(params.id);
-          if (!Number.isInteger(id)) return status(404, { error: "category not found" });
-          if (body.nameTh !== undefined && !isValidNameTh(body.nameTh)) {
-            return status(400, { error: "invalid nameTh" });
-          }
-          if (body.isCash !== undefined && typeof body.isCash !== "boolean") {
-            return status(400, { error: "invalid isCash" });
-          }
-          if (body.archived !== undefined && typeof body.archived !== "boolean") {
-            return status(400, { error: "invalid archived" });
-          }
-          if (body.archived === true) {
-            const existing = getCategoryById(property, id);
-            if (!existing) return status(404, { error: "category not found" });
-            // A keyed category derives income (fill-from-bookings, the two
-            // รายการอื่นๆ cells) — archiving it would silently strip that
-            // derivation for every future day.
-            if (existing.categoryKey !== null) {
-              return status(400, { error: "cannot archive a category with a category_key" });
-            }
-          }
+  // 4. PATCH /api/:property/categories/:id
+  .patch(
+    "/:property/categories/:id",
+    ({ params, body, status }) => {
+      const { property } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      const id = Number(params.id);
+      if (!Number.isInteger(id)) return status(404, { error: "category not found" });
+      if (body.nameTh !== undefined && !isValidNameTh(body.nameTh)) {
+        return status(400, { error: "invalid nameTh" });
+      }
+      if (body.isCash !== undefined && typeof body.isCash !== "boolean") {
+        return status(400, { error: "invalid isCash" });
+      }
+      if (body.archived !== undefined && typeof body.archived !== "boolean") {
+        return status(400, { error: "invalid archived" });
+      }
+      if (body.archived === true) {
+        const existing = getCategoryById(property, id);
+        if (!existing) return status(404, { error: "category not found" });
+        // A keyed category derives income (fill-from-bookings, the two
+        // รายการอื่นๆ cells) — archiving it would silently strip that
+        // derivation for every future day.
+        if (existing.categoryKey !== null) {
+          return status(400, { error: "cannot archive a category with a category_key" });
+        }
+      }
 
-          try {
-            const updated = updateCategory(property, id, body);
-            if (!updated) return status(404, { error: "category not found" });
-            return updated;
-          } catch (err) {
-            if (isUniqueConstraintError(err)) return status(409, { error: "duplicate category name" });
-            throw err;
-          }
-        },
-        {
-          body: t.Object({
-            nameTh: t.Optional(t.String()),
-            isCash: t.Optional(t.Boolean()),
-            archived: t.Optional(t.Boolean()),
-          }),
-        },
-      )
+      try {
+        const updated = updateCategory(property, id, body);
+        if (!updated) return status(404, { error: "category not found" });
+        return updated;
+      } catch (err) {
+        if (isUniqueConstraintError(err)) return status(409, { error: "duplicate category name" });
+        throw err;
+      }
+    },
+    {
+      body: t.Object({
+        nameTh: t.Optional(t.String()),
+        isCash: t.Optional(t.Boolean()),
+        archived: t.Optional(t.Boolean()),
+      }),
+    },
+  )
 
-      // 5. POST /api/:property/categories/reorder
-      .post(
-        "/:property/categories/reorder",
-        ({ params, body, status }) => {
-          const { property } = params;
-          if (!isProperty(property)) return status(400, { error: "invalid property" });
-          if (body.kind !== "income" && body.kind !== "expense") {
-            return status(400, { error: "invalid kind" });
-          }
-          if (!body.orderedIds.every((n) => Number.isInteger(n))) {
-            return status(400, { error: "invalid orderedIds" });
-          }
-          const categories = reorderCategories(property, body.kind, body.orderedIds);
-          if (categories === null) {
-            return status(400, { error: "orderedIds must be exactly the active category ids" });
-          }
-          return { categories };
-        },
-        { body: t.Object({ kind: t.String(), orderedIds: t.Array(t.Number()) }) },
-      ),
+  // 5. POST /api/:property/categories/reorder
+  .post(
+    "/:property/categories/reorder",
+    ({ params, body, status }) => {
+      const { property } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (body.kind !== "income" && body.kind !== "expense") {
+        return status(400, { error: "invalid kind" });
+      }
+      if (!body.orderedIds.every((n) => Number.isInteger(n))) {
+        return status(400, { error: "invalid orderedIds" });
+      }
+      const categories = reorderCategories(property, body.kind, body.orderedIds);
+      if (categories === null) {
+        return status(400, { error: "orderedIds must be exactly the active category ids" });
+      }
+      return { categories };
+    },
+    { body: t.Object({ kind: t.String(), orderedIds: t.Array(t.Number()) }) },
   )
 
   // 6. GET /api/:property/days?month=YYYY-MM
@@ -757,14 +751,13 @@ export const api = new Elysia({ prefix: "/api" })
     return { diff };
   })
 
-  // 21. PUT /api/:property/day/:date/cash-block — mgr
+  // 21. PUT /api/:property/day/:date/cash-block
   .put(
     "/:property/day/:date/cash-block",
     ({ params, body, identity, status }) => {
       const { property, date } = params;
       if (!isProperty(property)) return status(400, { error: "invalid property" });
       if (!isValidIso(date)) return status(400, { error: "invalid date" });
-      if (!identity?.isManager) return status(403, { error: "manager only" });
 
       if (body !== null) {
         for (const value of Object.values(body)) {
@@ -772,7 +765,7 @@ export const api = new Elysia({ prefix: "/api" })
         }
       }
 
-      setCashBlockOverride(property, date, body, identity.email);
+      setCashBlockOverride(property, date, body, identity!.email);
       enqueueAnalyticsPush(property, date);
       const { categories, otherIncomeItems, income } = loadDayData(property, date);
       const derived = deriveCashBlock(categories, income, otherIncomeItems);
@@ -819,16 +812,15 @@ export const api = new Elysia({ prefix: "/api" })
     return { month, closed: monthIsClosed(property, month) };
   })
 
-  // 24. PUT /api/:property/months/:month/close — mgr
+  // 24. PUT /api/:property/months/:month/close
   .put(
     "/:property/months/:month/close",
     ({ params, body, identity, status }) => {
       const { property, month } = params;
       if (!isProperty(property)) return status(400, { error: "invalid property" });
       if (!isValidMonth(month)) return status(400, { error: "invalid month" });
-      if (!identity?.isManager) return status(403, { error: "manager only" });
 
-      setMonthClosed(property, month, body.closed, identity.email);
+      setMonthClosed(property, month, body.closed, identity!.email);
       // The wire payload itself carries no monthClosed field, but a close
       // freezes every write path for the whole month (verify included) and
       // a reopen unfreezes them again — re-enqueue every day in the month
@@ -839,6 +831,60 @@ export const api = new Elysia({ prefix: "/api" })
       return { month, closed: body.closed };
     },
     { body: t.Object({ closed: t.Boolean() }) },
+  )
+
+  // 25. POST /api/:property/day/:date/move — moves ONLY booking_lines and
+  // other_income_items for :date from :property to body.to; see
+  // src/shared/api.md and moveBookingDay() in db.ts for the full scope and
+  // seq-renumbering rule. `to` is intentionally t.Optional in the schema so
+  // a missing field reaches this handler as `undefined` and gets the same
+  // app-shaped 400 as any other invalid value, rather than Elysia's own
+  // schema-validation error.
+  .post(
+    "/:property/day/:date/move",
+    ({ params, body, identity, status }) => {
+      const { property, date } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (!isValidIso(date)) return status(400, { error: "invalid date" });
+
+      const { to } = body;
+      if (typeof to !== "string" || !isProperty(to)) return status(400, { error: "invalid to" });
+      if (to === property) return status(400, { error: "invalid to" });
+
+      // Both sides must be open before anything is written — a month can be
+      // closed on only one of the two properties.
+      const blockedSource = closedMonthResponse(property, date, status);
+      if (blockedSource) return blockedSource;
+      const blockedDest = closedMonthResponse(to, date, status);
+      if (blockedDest) return blockedDest;
+
+      const by = identity!.email;
+      let result: { bookingLines: number; otherIncome: number };
+      try {
+        result = moveBookingDay(property, to, date, by);
+      } catch (err) {
+        // Only real-world trigger: the destination day already has a
+        // booking line sharing a (property, date, pms_ref) with a moved
+        // row (partial unique index) — nothing writes pms_ref from the UI
+        // today, so this is theoretical, but fails cleanly rather than
+        // crashing. The transaction inside moveBookingDay() already rolled
+        // back, so nothing was moved.
+        if (isUniqueConstraintError(err)) {
+          return status(500, { error: "cannot move: conflicting pms_ref on destination day" });
+        }
+        throw err;
+      }
+
+      // One call changes two property-days' rollups.
+      enqueueAnalyticsPush(property, date);
+      enqueueAnalyticsPush(to, date);
+
+      return {
+        movedBookingLines: result.bookingLines,
+        movedOtherIncome: result.otherIncome,
+      };
+    },
+    { body: t.Object({ to: t.Optional(t.String()) }) },
   );
 
 const apiFetch = (req: Request) => api.handle(req);

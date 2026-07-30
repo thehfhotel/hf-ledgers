@@ -1295,3 +1295,79 @@ export function deleteOtherIncomeItem(property: Property, id: number): boolean {
   const info = db.prepare("DELETE FROM other_income_items WHERE id = ? AND property = ?").run(id, property);
   return info.changes > 0;
 }
+
+// ── moving a day between properties ────────────────────────────────────
+
+/**
+ * Moves ONE day's `booking_lines` and `other_income_items` from `from` to
+ * `to` — see src/shared/api.md `POST .../day/:date/move`. Deliberately
+ * narrow scope: `sheet_days` (income cells, expenses, the day note, the
+ * cash-block override) is never touched or re-keyed here — a merge of two
+ * single-valued cash-block overrides would be meaningless, and the day
+ * sheet is a separate page's territory. Both tables merge cleanly into
+ * whatever the destination day already holds; this never refuses on a
+ * non-empty destination.
+ *
+ * `booking_lines.seq` is a dense per-(property,date) row order the printed
+ * day sheet renders as the line number, but it is only a plain index, not
+ * unique — merging two days' rows verbatim would produce duplicate seq
+ * values and silently corrupt that numbering. So every moved row is
+ * renumbered starting at the destination day's current `MAX(seq) + 1`,
+ * walked in the moved rows' existing seq order (ties broken by `id`, their
+ * insertion order) so their relative order survives the merge.
+ * `other_income_items` carries no `seq` (or category) — it merges with a
+ * plain re-key, no renumbering needed.
+ *
+ * Runs as a single transaction: if the destination day already holds a
+ * booking line sharing a `(property, date, pms_ref)` with a moved row (the
+ * partial unique index — nothing writes `pms_ref` from the UI today, but
+ * a future importer might), the UPDATE throws, the transaction rolls back,
+ * and NOTHING is moved — callers must not partially apply this.
+ * `touchSheetDay()` bumps `updated_at`/`updated_by` on BOTH property-days'
+ * `sheet_days` row (creating it if the day has no row yet) so the move
+ * itself is visible in each day's own audit trail even though its content
+ * is untouched.
+ */
+export function moveBookingDay(
+  from: Property,
+  to: Property,
+  date: string,
+  actor: string,
+): { bookingLines: number; otherIncome: number } {
+  const tx = db.transaction(() => {
+    const destMax = db
+      .query<{ n: number }, [string, string]>(
+        "SELECT COALESCE(MAX(seq), 0) AS n FROM booking_lines WHERE property = ? AND date = ?",
+      )
+      .get(to, date);
+    let nextSeq = (destMax?.n ?? 0) + 1;
+
+    const movingLines = db
+      .query<{ id: number }, [string, string]>(
+        "SELECT id FROM booking_lines WHERE property = ? AND date = ? ORDER BY seq ASC, id ASC",
+      )
+      .all(from, date);
+
+    const moveLine = db.prepare(
+      `UPDATE booking_lines SET property = ?, seq = ?, updated_at = datetime('now'), updated_by = ?
+       WHERE id = ?`,
+    );
+    for (const line of movingLines) {
+      moveLine.run(to, nextSeq, actor, line.id);
+      nextSeq += 1;
+    }
+
+    const otherIncomeInfo = db
+      .prepare(
+        `UPDATE other_income_items SET property = ?, updated_at = datetime('now'), updated_by = ?
+         WHERE property = ? AND date = ?`,
+      )
+      .run(to, actor, from, date);
+
+    touchSheetDay(from, date, actor);
+    touchSheetDay(to, date, actor);
+
+    return { bookingLines: movingLines.length, otherIncome: otherIncomeInfo.changes };
+  });
+  return tx();
+}

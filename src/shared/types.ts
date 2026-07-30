@@ -325,7 +325,6 @@ export interface DaySummary {
 
 export interface Me {
   email: string;
-  isManager: boolean;
 }
 
 // ── Server-enforced bounds (validated server-side; see api.md) ────────────

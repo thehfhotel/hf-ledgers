@@ -7,16 +7,11 @@
 process.env.DB_PATH = ":memory:";
 process.env.NODE_ENV = "development";
 process.env.DEV_USER = "tester@thehfhotel.org";
-// Manager membership now comes from the portal directory (directory-client.ts);
-// PROTECTED_MANAGER is the one email always treated as a manager regardless of
-// portal reachability, so setting it here keeps this suite's manager-only
-// route tests working without a live portal or a seeded cache.
-process.env.PROTECTED_MANAGER = "tester@thehfhotel.org";
 process.env.PORT = "0"; // let the OS pick a free port — avoids clashing with `bun run dev`
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
-import type { Category, CategoryKey, Tender } from "../shared/types.ts";
+import type { Category, CategoryKey, Property, Tender } from "../shared/types.ts";
 
 const { api } = await import("./server.ts");
 
@@ -383,7 +378,7 @@ describe("month close", () => {
     expect(verify.status).toBe(409);
   });
 
-  test("verify is open to any signed-in user, not managers only", async () => {
+  test("verify is open to any signed-in user (no roles in this app)", async () => {
     const reopened = await call<{ closed: boolean }>("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
     expect(reopened.body.closed).toBe(false);
 
@@ -523,5 +518,178 @@ describe("a day whose only money is itemized other-income", () => {
 
     const id = (created.body as { id: number }).id;
     await call("DELETE", `/${PROPERTY}/other-income/${id}`);
+  });
+});
+
+describe("move a booking day to the other property", () => {
+  const OTHER: Property = "hfville";
+
+  describe("clean move: rows land on the destination, source day left empty", () => {
+    const DATE = "2026-05-01";
+
+    test("moves booking lines (renumbered seq 1..n) and other-income items", async () => {
+      await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, {
+        guestName: "ผู้เข้าพัก A",
+        tenders: zeroTenders(),
+      });
+      await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, {
+        guestName: "ผู้เข้าพัก B",
+        tenders: zeroTenders(),
+      });
+      await call("POST", `/${PROPERTY}/day/${DATE}/other-income`, {
+        description: "ค่าจอดรถ",
+        amountSatang: 2_000,
+        isCash: true,
+      });
+
+      const moved = await call<{ movedBookingLines: number; movedOtherIncome: number }>(
+        "POST",
+        `/${PROPERTY}/day/${DATE}/move`,
+        { to: OTHER },
+      );
+      expect(moved.status).toBe(200);
+      expect(moved.body.movedBookingLines).toBe(2);
+      expect(moved.body.movedOtherIncome).toBe(1);
+
+      const sourceBookings = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+      expect(sourceBookings.body.lines).toHaveLength(0);
+
+      const destBookings = await call<{ lines: Array<{ seq: number; guestName: string | null }> }>(
+        "GET",
+        `/${OTHER}/day/${DATE}/bookings`,
+      );
+      expect(destBookings.body.lines.map((l) => l.seq)).toEqual([1, 2]);
+      expect(destBookings.body.lines.map((l) => l.guestName)).toEqual(["ผู้เข้าพัก A", "ผู้เข้าพัก B"]);
+
+      const destDay = await call<{ otherIncome: Array<{ description: string | null; amountSatang: number }> }>(
+        "GET",
+        `/${OTHER}/day/${DATE}`,
+      );
+      expect(destDay.body.otherIncome).toHaveLength(1);
+      expect(destDay.body.otherIncome[0]?.amountSatang).toBe(2_000);
+    });
+  });
+
+  describe("merge into a non-empty destination", () => {
+    const DATE = "2026-05-02";
+
+    test("moved rows renumber contiguously after the destination's existing max seq, order preserved", async () => {
+      await call("POST", `/${OTHER}/day/${DATE}/bookings`, { guestName: "ปลายทาง 1", tenders: zeroTenders() });
+      await call("POST", `/${OTHER}/day/${DATE}/bookings`, { guestName: "ปลายทาง 2", tenders: zeroTenders() });
+
+      await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, { guestName: "ต้นทาง 1", tenders: zeroTenders() });
+      await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, { guestName: "ต้นทาง 2", tenders: zeroTenders() });
+      await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, { guestName: "ต้นทาง 3", tenders: zeroTenders() });
+
+      const moved = await call<{ movedBookingLines: number }>("POST", `/${PROPERTY}/day/${DATE}/move`, {
+        to: OTHER,
+      });
+      expect(moved.status).toBe(200);
+      expect(moved.body.movedBookingLines).toBe(3);
+
+      const dest = await call<{ lines: Array<{ seq: number; guestName: string | null }> }>(
+        "GET",
+        `/${OTHER}/day/${DATE}/bookings`,
+      );
+      const seqs = dest.body.lines.map((l) => l.seq);
+      expect(seqs).toEqual([1, 2, 3, 4, 5]);
+      expect(new Set(seqs).size).toBe(seqs.length); // no duplicates
+
+      expect(dest.body.lines.map((l) => l.guestName)).toEqual([
+        "ปลายทาง 1",
+        "ปลายทาง 2",
+        "ต้นทาง 1",
+        "ต้นทาง 2",
+        "ต้นทาง 3",
+      ]);
+
+      const source = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+      expect(source.body.lines).toHaveLength(0);
+    });
+  });
+
+  describe("validation", () => {
+    const DATE = "2026-05-04";
+
+    test("400 when to equals the source property", async () => {
+      const res = await call("POST", `/${PROPERTY}/day/${DATE}/move`, { to: PROPERTY });
+      expect(res.status).toBe(400);
+    });
+
+    test("400 when to is an unknown property", async () => {
+      const res = await call("POST", `/${PROPERTY}/day/${DATE}/move`, { to: "not-a-property" });
+      expect(res.status).toBe(400);
+    });
+
+    test("400 when to is absent", async () => {
+      const res = await call("POST", `/${PROPERTY}/day/${DATE}/move`, {});
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("month-close guards", () => {
+    test("409 when the SOURCE month is closed", async () => {
+      const MONTH = "2026-06";
+      const DATE = "2026-06-10";
+      await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+
+      const res = await call("POST", `/${PROPERTY}/day/${DATE}/move`, { to: OTHER });
+      expect(res.status).toBe(409);
+
+      await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+    });
+
+    test("409 when the DESTINATION month is closed", async () => {
+      const MONTH = "2026-07";
+      const DATE = "2026-07-10";
+      await call("PUT", `/${OTHER}/months/${MONTH}/close`, { closed: true });
+
+      const res = await call("POST", `/${PROPERTY}/day/${DATE}/move`, { to: OTHER });
+      expect(res.status).toBe(409);
+
+      await call("PUT", `/${OTHER}/months/${MONTH}/close`, { closed: false });
+    });
+  });
+
+  describe("the day sheet itself is out of scope", () => {
+    const DATE = "2026-05-10";
+
+    test("income cells and the cash-block override on BOTH sides survive a move unchanged", async () => {
+      await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, {
+        amountSatang: 12_300,
+        note: null,
+      });
+      await call("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { bankedSatang: 45_600 });
+      await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, {
+        guestName: "ผู้เข้าพักย้าย",
+        tenders: zeroTenders(),
+      });
+
+      const beforeDest = await call<{ income: Record<number, unknown>; cashBlock: { entered: unknown } }>(
+        "GET",
+        `/${OTHER}/day/${DATE}`,
+      );
+
+      const moved = await call("POST", `/${PROPERTY}/day/${DATE}/move`, { to: OTHER });
+      expect(moved.status).toBe(200);
+
+      const afterSource = await call<{
+        income: Record<number, { amountSatang: number }>;
+        cashBlock: { entered: { bankedSatang: number } | null };
+      }>("GET", `/${PROPERTY}/day/${DATE}`);
+      expect(afterSource.body.income[categoryId("room_cash")]?.amountSatang).toBe(12_300);
+      expect(afterSource.body.cashBlock.entered?.bankedSatang).toBe(45_600);
+
+      const afterDest = await call<{ income: Record<number, unknown>; cashBlock: { entered: unknown } }>(
+        "GET",
+        `/${OTHER}/day/${DATE}`,
+      );
+      expect(afterDest.body.income).toEqual(beforeDest.body.income);
+      expect(afterDest.body.cashBlock.entered).toEqual(beforeDest.body.cashBlock.entered);
+
+      // The booking line itself did move — proves the move actually ran.
+      const sourceBookings = await call<{ lines: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+      expect(sourceBookings.body.lines).toHaveLength(0);
+    });
   });
 });

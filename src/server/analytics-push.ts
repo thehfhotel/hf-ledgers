@@ -24,7 +24,6 @@ import type { Property } from "../shared/types.ts";
 // in one process, so whichever test file imports server.ts first would
 // otherwise freeze the enabled state for all later files - the discovery
 // order differs between filesystems, which made CI fail while local passed.
-// Same convention as directory-client.ts.
 const urlBase = (): string => (process.env.ANALYTICS_URL ?? "").replace(/\/+$/, "");
 const token = (): string => process.env.ANALYTICS_TOKEN ?? "";
 const enabled = (): boolean => !!(urlBase() && token());

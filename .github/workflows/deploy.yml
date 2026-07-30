@@ -106,7 +106,6 @@ jobs:
           IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
           ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
-          PORTAL_DIRECTORY_TOKEN: ${{ secrets.PORTAL_DIRECTORY_TOKEN }}
           ANALYTICS_TOKEN: ${{ secrets.ANALYTICS_TOKEN }}
         run: |
           set -euo pipefail
@@ -119,12 +118,6 @@ jobs:
             printf 'HOST_PORT=%s\n' "4040"
             printf 'ACCESS_TEAM_DOMAIN=%s\n' "${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}"
             printf 'ACCESS_AUD=%s\n' "${ACCESS_AUD:-}"
-            # Manager list derived live from the HF Managers tier via the portal
-            # directory (directory-client.ts). URL is server-to-server over the
-            # shared-nginx docker network - not a secret; the token is.
-            printf 'PORTAL_DIRECTORY_URL=%s\n' "http://hf-erp-portal:3000/portal-api/directory/managers"
-            printf 'PORTAL_DIRECTORY_TOKEN=%s\n' "${PORTAL_DIRECTORY_TOKEN:-}"
-            printf 'PROTECTED_MANAGER=%s\n' "winut.hf@gmail.com"
             # Daily-rollup outbox to hf-analytics (analytics-push.ts). Dormant
             # when either is empty.
             printf 'ANALYTICS_URL=%s\n' "http://hf-analytics:3000"

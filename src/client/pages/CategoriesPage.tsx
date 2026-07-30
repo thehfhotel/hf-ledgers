@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { NAME_TH_MAX_LEN, type Category, type CategoryKind, type Property } from "../../shared/types.ts";
-import { createCategory, getMe, listCategories, reorderCategories, updateCategory } from "../api.ts";
+import { createCategory, listCategories, reorderCategories, updateCategory } from "../api.ts";
+import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
   property: Property;
@@ -12,56 +13,11 @@ const TABS: { kind: CategoryKind; label: string }[] = [
 ];
 
 /**
- * Manager admin screen. Gating lives here (not App.tsx, see App.tsx's
- * routing comment): non-managers get a "สำหรับผู้จัดการเท่านั้น" panel
- * instead of the admin UI.
+ * Category admin screen. No role gate — Cloudflare Access already decides
+ * who reaches this app, and every signed-in user (kiosk identities
+ * included) administers the category list.
  */
 export function CategoriesPage({ property }: Props) {
-  const [meLoading, setMeLoading] = useState(true);
-  const [isManager, setIsManager] = useState(false);
-  const [meError, setMeError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getMe()
-      .then((me) => {
-        if (!cancelled) setIsManager(me.isManager);
-      })
-      .catch((err) => {
-        if (!cancelled) setMeError(err instanceof Error ? err.message : "ตรวจสอบสิทธิ์ไม่สำเร็จ");
-      })
-      .finally(() => {
-        if (!cancelled) setMeLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  if (meLoading) {
-    return <div className="p-6 text-sm text-ink-muted">กำลังตรวจสอบสิทธิ์...</div>;
-  }
-
-  if (meError) {
-    return (
-      <div className="rounded-lg border border-bad/30 bg-panel p-4 text-sm text-bad">
-        ตรวจสอบสิทธิ์ไม่สำเร็จ: {meError} — ลองรีเฟรชหน้านี้อีกครั้ง
-      </div>
-    );
-  }
-
-  if (!isManager) {
-    return (
-      <div className="rounded-lg border border-line bg-panel p-6 text-center text-sm text-ink-muted">
-        สำหรับผู้จัดการเท่านั้น
-      </div>
-    );
-  }
-
-  return <CategoriesAdmin property={property} />;
-}
-
-function CategoriesAdmin({ property }: { property: Property }) {
   const [kind, setKind] = useState<CategoryKind>("income");
   const [categories, setCategories] = useState<Category[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -191,6 +147,10 @@ function CategoriesAdmin({ property }: { property: Property }) {
 
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex items-center gap-2">
+        <h1 className="text-sm font-semibold text-ink">หมวดหมู่</h1>
+        <PropertyBadge property={property} />
+      </div>
       <div className="flex gap-1 rounded-lg border border-line bg-panel p-1">
         {TABS.map((tab) => (
           <button

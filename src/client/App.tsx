@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { todayBangkok } from "../shared/date.ts";
-import { isProperty, type Property } from "../shared/types.ts";
+import { PROPERTIES, PROPERTY_LABELS, isProperty, type Property } from "../shared/types.ts";
 import { DaySheetPage } from "./pages/DaySheetPage.tsx";
 import { HistoryPage } from "./pages/HistoryPage.tsx";
 import { CategoriesPage } from "./pages/CategoriesPage.tsx";
@@ -13,11 +13,9 @@ import { BookingDayPage } from "./pages/BookingDayPage.tsx";
 // DaySheetPage/HistoryPage/CategoriesPage, WP-C owns ReportPage); nobody
 // else touches App.tsx until Phase 2 integration.
 //
-// CategoriesPage is manager-only per the contract's screen spec, but that
-// gating happens INSIDE CategoriesPage.tsx (it renders a
-// "สำหรับผู้จัดการเท่านั้น" panel for non-managers) — this shell always
-// shows the nav item and lets the page itself decide, so App.tsx never
-// needs to fetch /api/me.
+// There are NO roles in this app (Cloudflare Access is the only gate), so
+// every nav item — Categories included — is available to everyone the app
+// admits, and App.tsx never needs to fetch /api/me.
 
 const PROPERTY_STORAGE_KEY = "ledger.property";
 
@@ -80,10 +78,25 @@ export function navigate(path: string) {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-const PROPERTY_CHIPS: { id: Property; label: string }[] = [
-  { id: "hf", label: "โรงแรม HF" },
-  { id: "hfville", label: "HF วิลล์" },
-];
+// Thai names come from PROPERTY_LABELS (src/shared/types.ts) ONLY — never
+// re-declare them here. That is the single source both this switcher and
+// every page-level PropertyBadge read from, so a wording change never needs
+// a second edit.
+const PROPERTY_CHIPS: { id: Property; label: string }[] = PROPERTIES.map((id) => ({
+  id,
+  label: PROPERTY_LABELS[id].th,
+}));
+
+// document.title's screen half, keyed by route kind — same names as
+// navItems' labels below (kept as a separate map since navItems only exists
+// inside the component, closed over `route`).
+const SCREEN_LABEL_TH: Record<Route["kind"], string> = {
+  day: "สรุปวัน",
+  bookings: "รายละเอียดรายรับ",
+  history: "ประวัติ",
+  categories: "หมวดหมู่",
+  report: "รายงาน",
+};
 
 function routeForProperty(route: Route, property: Property): string {
   switch (route.kind) {
@@ -124,6 +137,18 @@ export function App() {
       /* localStorage unavailable — property just won't persist */
     }
   }, [route.property]);
+
+  // Tab title names both the hotel and the screen (e.g. "โรงแรม HF ·
+  // รายละเอียดรายรับ") so the tab bar — and any screenshot of it — says which
+  // property is open, not just which app. The static <title> in index.html
+  // stays as the pre-hydration fallback; this effect takes over once React
+  // mounts and re-fires on every route change. The /demo route is flagged
+  // rather than silently presented as real "hf" data (see PropertyBadge).
+  useEffect(() => {
+    const propertyLabel =
+      PROPERTY_LABELS[displayProperty].th + (route.property === "demo" ? " (ตัวอย่าง)" : "");
+    document.title = `${propertyLabel} · ${SCREEN_LABEL_TH[route.kind]}`;
+  }, [displayProperty, route.kind, route.property]);
 
   // "/" (and any unrecognized path) redirects to {savedProperty|hf}/day/
   // {todayBangkok()} as a real navigation, so the URL bar reflects reality
@@ -182,22 +207,34 @@ export function App() {
           <span className="text-sm font-semibold tracking-wide text-white">
             สรุปรายรับ-รายจ่าย
           </span>
-          <div className="rail flex items-center gap-1.5 overflow-x-auto">
-            {PROPERTY_CHIPS.map((chip) => (
-              <button
-                key={chip.id}
-                type="button"
-                onClick={() => navigate(routeForProperty(route, chip.id))}
-                className={
-                  "shrink-0 rounded-full border px-3 py-1 text-xs font-medium transition " +
-                  (displayProperty === chip.id
-                    ? "border-gold-500 bg-gold-500 text-brand-900"
-                    : "border-brand-600 text-brand-100 hover:bg-brand-700")
-                }
-              >
-                {chip.label}
-              </button>
-            ))}
+          {/* Property switcher — deliberately NOT a row of gold pills like the
+              nav tabs below: this picks WHICH HOTEL, a different question
+              than the nav's WHICH SCREEN, so it reads as a physical toggle
+              switch (dark housing, one segment lit ivory) instead of another
+              set of buttons. The "โรงแรม" tag makes the control
+              self-describing even before either segment is read. */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span className="hidden text-[11px] font-semibold uppercase tracking-wider text-brand-300 sm:inline">
+              โรงแรม
+            </span>
+            <div className="flex items-center gap-0.5 rounded-full bg-brand-900 p-1 ring-1 ring-inset ring-brand-600">
+              {PROPERTY_CHIPS.map((chip) => (
+                <button
+                  key={chip.id}
+                  type="button"
+                  onClick={() => navigate(routeForProperty(route, chip.id))}
+                  aria-pressed={displayProperty === chip.id}
+                  className={
+                    "rounded-full px-3 py-1 text-xs font-semibold transition " +
+                    (displayProperty === chip.id
+                      ? "bg-shell text-brand-800 shadow-sm"
+                      : "text-brand-200 hover:text-white")
+                  }
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         <nav className={"rail " + SHELL_WIDTH + " flex gap-1 overflow-x-auto px-4 pb-2"}>

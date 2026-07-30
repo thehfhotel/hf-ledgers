@@ -9,9 +9,10 @@ import {
 } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
 import { TENDER_TO_CATEGORY_KEY, type CategoryKey, type DaySummary, type Property } from "../../shared/types.ts";
-import { getDay, getMe, getMonthClose, listBookingLines, listDays, putMonthClose } from "../api.ts";
+import { getDay, getMonthClose, listBookingLines, listDays, putMonthClose } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { PROVENANCE_LABELS_TH, PROVENANCE_SHORT_TH } from "../labels.ts";
+import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
   property: Property;
@@ -119,7 +120,6 @@ export function HistoryPage({ property }: Props) {
   const [month, setMonth] = useState(currentMonthBangkok());
   const [days, setDays] = useState<DaySummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isManager, setIsManager] = useState(false);
   const [closed, setClosed] = useState<boolean | null>(null);
   const [dialog, setDialog] = useState<null | "close" | "reopen">(null);
   const [preflight, setPreflight] = useState<PreflightState | null>(null);
@@ -128,14 +128,6 @@ export function HistoryPage({ property }: Props) {
   // Bumped whenever a preflight scan must abandon its in-flight results
   // (dialog closed, month switched) — the scan checks it between days.
   const scanToken = useRef(0);
-
-  useEffect(() => {
-    getMe()
-      .then((me) => setIsManager(me.isManager))
-      .catch(() => {
-        /* /api/me failing just means the close control stays hidden */
-      });
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -289,7 +281,10 @@ export function HistoryPage({ property }: Props) {
         >
           ‹
         </button>
-        <span className="text-sm font-semibold text-ink">{monthLabel}</span>
+        <span className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+          {monthLabel}
+          <PropertyBadge property={property} />
+        </span>
         <button
           type="button"
           onClick={() => setMonth((m) => shiftMonths(m, 1))}
@@ -332,27 +327,23 @@ export function HistoryPage({ property }: Props) {
               </span>
             </span>
           )}
-          {isManager ? (
-            closed ? (
-              <button
-                type="button"
-                onClick={openReopenDialog}
-                className="rounded-md border border-line-strong bg-panel px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-tint"
-              >
-                เปิดบัญชีอีกครั้ง
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={openCloseDialog}
-                disabled={days === null}
-                className="rounded-md bg-brand-500 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
-              >
-                ปิดบัญชีเดือนนี้
-              </button>
-            )
+          {closed ? (
+            <button
+              type="button"
+              onClick={openReopenDialog}
+              className="rounded-md border border-line-strong bg-panel px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-tint"
+            >
+              เปิดบัญชีอีกครั้ง
+            </button>
           ) : (
-            <span className="text-xs text-ink-muted">ปิดหรือเปิดบัญชีได้เฉพาะผู้จัดการ</span>
+            <button
+              type="button"
+              onClick={openCloseDialog}
+              disabled={days === null}
+              className="rounded-md bg-brand-500 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
+            >
+              ปิดบัญชีเดือนนี้
+            </button>
           )}
         </div>
       )}

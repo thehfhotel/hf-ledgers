@@ -14,7 +14,6 @@
 process.env.DB_PATH = ":memory:";
 process.env.NODE_ENV = "development";
 process.env.DEV_USER = "tester@thehfhotel.org";
-process.env.PROTECTED_MANAGER = "tester@thehfhotel.org";
 process.env.PORT = "0";
 // Enables the outbox (see analytics-push.ts's ENABLED gate) so enqueue
 // actually writes to the outbox table. The URL is deliberately unreachable

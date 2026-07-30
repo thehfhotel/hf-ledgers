@@ -52,7 +52,7 @@ export function listCategories(
   return request(`/${property}/categories${qs}`);
 }
 
-// 3. POST /api/:property/categories (mgr)
+// 3. POST /api/:property/categories
 export function createCategory(
   property: Property,
   body: { kind: CategoryKind; nameTh: string; isCash: boolean },
@@ -63,7 +63,7 @@ export function createCategory(
   });
 }
 
-// 4. PATCH /api/:property/categories/:id (mgr)
+// 4. PATCH /api/:property/categories/:id
 export function updateCategory(
   property: Property,
   id: number,
@@ -75,7 +75,7 @@ export function updateCategory(
   });
 }
 
-// 5. POST /api/:property/categories/reorder (mgr)
+// 5. POST /api/:property/categories/reorder
 export function reorderCategories(
   property: Property,
   kind: CategoryKind,
@@ -238,7 +238,7 @@ export function fillFromBookings(
   return request(`/${property}/day/${date}/fill-from-bookings${qs}`, { method: "POST" });
 }
 
-// 21. PUT /api/:property/day/:date/cash-block (mgr)
+// 21. PUT /api/:property/day/:date/cash-block
 export function putCashBlock(
   property: Property,
   date: string,
@@ -269,7 +269,7 @@ export function getMonthClose(property: Property, month: string): Promise<{ mont
   return request(`/${property}/months/${month}/close`);
 }
 
-// 24. PUT /api/:property/months/:month/close (mgr)
+// 24. PUT /api/:property/months/:month/close
 export function putMonthClose(
   property: Property,
   month: string,
@@ -278,5 +278,21 @@ export function putMonthClose(
   return request(`/${property}/months/${month}/close`, {
     method: "PUT",
     body: JSON.stringify({ closed }),
+  });
+}
+
+// 25. POST /api/:property/day/:date/move
+// Moves ONLY this day's booking_lines + other_income_items to the other
+// property (merging into any rows already there) — never the day-sheet
+// income/expenses/note, and never the cash-block override. See
+// BookingDayPage.tsx's confirm dialog for the exact scope told to the user.
+export function moveBookingDay(
+  property: Property,
+  date: string,
+  to: Property,
+): Promise<{ movedBookingLines: number; movedOtherIncome: number }> {
+  return request(`/${property}/day/${date}/move`, {
+    method: "POST",
+    body: JSON.stringify({ to }),
   });
 }

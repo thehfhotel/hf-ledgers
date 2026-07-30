@@ -165,20 +165,25 @@ either of those two categoryIds while items exist.
 
 ## Auth (`src/server/auth.ts`)
 
-`identify(req)` resolves the caller to `{ email, isManager } | null`:
+`identify(req)` resolves the caller to `{ email } | null` (`Identity`):
 
 - **development only** (`NODE_ENV === "development"`): `DEV_USER` env var
   bypass. Any other value of `NODE_ENV` ignores `DEV_USER` — fails closed.
 - **else**: verify the `cf-access-jwt-assertion` header via the
   `verifyAccessJwt` pattern (RS256, JWKS cached 1h, checks `iss`/`aud`/
-  `exp`/`nbf`) copied from `hf-mcp/src/auth.ts`. `isManager` = verified
-  email is a member of `MANAGER_EMAILS` (comma-separated, lowercase).
+  `exp`/`nbf`) copied from `hf-mcp/src/auth.ts`.
 
-Elysia wiring: a scoped `derive` resolves identity and 401s when absent;
-`onBeforeHandle` on endpoints 3–5 (category admin) 403s non-managers.
-Static assets and `GET /healthz` are unguarded — Cloudflare Access fronts
-the whole host, so the app-side check is defense in depth for the API, not
-the only gate.
+**There are no roles in this app.** Cloudflare Access alone decides who may
+reach `income.thehfhotel.org` — `identify()` only resolves WHO the caller is,
+never WHAT they may do. The resolved email is recorded as
+`created_by`/`updated_by`/`verified_by`/`closed_by` provenance on every
+write; it never gates access to an endpoint. Every endpoint below is open to
+any verified identity, including the office-1 and reception kiosk logins.
+
+Elysia wiring: a scoped `derive` resolves identity and a top-level
+`onBeforeHandle` 401s when it is absent. Static assets and `GET /healthz`
+are unguarded — Cloudflare Access fronts the whole host, so the app-side
+check is defense in depth for the API, not the only gate.
 
 ## Error shape
 
@@ -188,9 +193,8 @@ Every non-2xx API response body is `{ "error": string }`.
 |---|---|
 | 400 | Malformed input (bad date/property, amount/note/name out of bounds) |
 | 401 | No or invalid identity (see Auth above) |
-| 403 | Valid identity, but not a manager, on a manager-only endpoint (3–5) |
 | 404 | Property/category/expense not found, or references an unknown category |
-| 409 | Duplicate active category name (`property` + `kind` + `nameTh`) |
+| 409 | Duplicate active category name (`property` + `kind` + `nameTh`), or the target month is closed |
 
 `GET /healthz` lives OUTSIDE `/api`, requires no auth, and never touches the
 DB (the deploy shim only allows 15 attempts × 2s).
@@ -219,20 +223,20 @@ Wave 2 additions:
   `REMARK_MAX_LEN`; neither re-declares the number locally.
 - `description` (OtherIncomeItem): ≤ 200 chars (`DESCRIPTION_MAX_LEN`)
 
-## Endpoints (`/api`, Typebox; auth = any verified identity unless noted "mgr")
+## Endpoints (`/api`, Typebox; auth = any verified identity — no roles)
 
-1. **`GET /api/me`** → `{ email, isManager }` (`Me`)
+1. **`GET /api/me`** → `{ email }` (`Me`)
 
 2. **`GET /api/:property/categories?includeArchived=1`** →
    `{ categories: Category[] }`, ordered by `(kind, sort)`. Omit the query
    param (or any value other than `1`) to get only active categories.
 
-3. **`POST /api/:property/categories`** — mgr. Body
+3. **`POST /api/:property/categories`** — Body
    `{ kind: CategoryKind, nameTh: string, isCash: boolean }` → 201
    `Category`. 409 if an active category with the same `(property, kind,
    nameTh)` exists.
 
-4. **`PATCH /api/:property/categories/:id`** — mgr. Body: any subset of
+4. **`PATCH /api/:property/categories/:id`** — Body: any subset of
    `{ nameTh?: string, isCash?: boolean, archived?: boolean }` → `Category`.
    `archived: true` sets `archived_at`; `archived: false` clears it (restore).
    404 if `:id` doesn't belong to `:property`. **400 on `archived: true` for a
@@ -243,7 +247,7 @@ Wave 2 additions:
    admin UI therefore does not offer archive on keyed rows at all (it used to,
    and surfaced this English server message to a Thai-only screen).
 
-5. **`POST /api/:property/categories/reorder`** — mgr. Body
+5. **`POST /api/:property/categories/reorder`** — Body
    `{ kind: CategoryKind, orderedIds: number[] }` where `orderedIds` must be
    EXACTLY the active category ids of that `(property, kind)` (a permutation
    — no more, no fewer) → `{ categories: Category[] }`. 400 on mismatch.
@@ -313,15 +317,16 @@ Wave 2 additions:
 ## Wave 2 endpoints (built in `src/server/server.ts`)
 
 Implemented against the plan below. Same conventions as above: any verified
-identity unless noted "mgr"; every non-2xx body is `{ "error": string }`.
-Endpoints 8, 10-12, 14-19 and 22 additionally 409
+identity — no roles; every non-2xx body is `{ "error": string }`.
+Endpoints 8, 10-12, 14-19, 22 and 25 additionally 409
 (`{ error: "month is closed" }`) when the target date's month is closed
-(`closed_months`). Verify (22) is gated because a closed month is frozen
+(`closed_months`) — endpoint 25 checks it for BOTH the source and
+destination property. Verify (22) is gated because a closed month is frozen
 outright, sign-off included — you cannot flip the sign-off state of data
 nobody is allowed to change. Endpoint 9 (day note) and 21 (cash-block)
 are deliberately NOT gated: a note is commentary, and the cash-block
-override is a manager correction to a derived control figure, which is
-exactly the thing still worth recording after a close.
+override is a correction to a derived control figure, which is exactly the
+thing still worth recording after a close.
 
 13. **`GET /api/:property/day/:date/bookings`** →
     `{ lines: BookingLine[], totals: BookingTotals }`. `lines` ordered by
@@ -382,26 +387,74 @@ exactly the thing still worth recording after a close.
     was actually written — any cell flagged `manual: true` is left
     untouched (`skippedManual: true`) in both the preview and the apply.
 
-21. **`PUT /api/:property/day/:date/cash-block`** — mgr. body: any subset
+21. **`PUT /api/:property/day/:date/cash-block`** — body: any subset
     of `CashBlockAmounts`, or `null` to clear the override entirely
     (omitted/cleared fields fall back to `derived` for that field) →
     `CashBlock`.
 
-22. **`PUT /api/:property/day/:date/verify`** — any verified identity, NOT
-    mgr-only: front desk signs off its own day, which is the whole point of
-    the phase-2 "staff verify instead of type" workflow. 409s on a closed
-    month. body `{ verified: boolean }` →
+22. **`PUT /api/:property/day/:date/verify`** — front desk signs off its own
+    day, which is the whole point of the phase-2 "staff verify instead of
+    type" workflow. 409s on a closed month. body `{ verified: boolean }` →
     `{ verifiedAt: string | null, verifiedBy: string | null }`.
     `verified: false` clears both back to `null`.
 
 23. **`GET /api/:property/months/:month/close`** →
     `{ month: string, closed: boolean }`.
 
-24. **`PUT /api/:property/months/:month/close`** — mgr. body
+24. **`PUT /api/:property/months/:month/close`** — body
     `{ closed: boolean }` → `{ month: string, closed: boolean }`.
     `DaySheet.monthClosed` is a hint for the client to disable editing —
     it is NOT itself a server-side write lock on endpoints 8-21; if a write
     lock is added, document the enforcement here.
+
+25. **`POST /api/:property/day/:date/move`** — moves ONLY this day's
+    `booking_lines` and `other_income_items` from `:property` to another
+    property. Body `{ to: Property }` → 200
+    `{ movedBookingLines: number, movedOtherIncome: number }`. 400
+    (`{ error: "invalid to" }`) if `to` is missing/not `"hf"`/`"hfville"`, or
+    equals `:property`. 409 (`{ error: "month is closed" }`) if `:date`'s
+    month is closed on EITHER `:property` or `to` — checked for both sides
+    before anything is written.
+
+    **Scope, deliberately narrow:** only `booking_lines` and
+    `other_income_items` move. The day sheet itself — `sheet_days` (income
+    cells, expenses, the day note) — is NOT moved; that is a different
+    page's data and stays on its original property/date. Neither is the
+    cash-block override: it is a single-valued correction of a derived
+    figure, and merging two overrides is meaningless, so the client must
+    say so rather than attempt it (both properties keep their own
+    `entered`/`derived` cash block, untouched). `touchSheetDay()` still
+    bumps `updated_at`/`updated_by` on BOTH property-days' `sheet_days`
+    row (creating one if the day had none) from the caller's identity, so
+    the move itself is visible in each day's own audit trail even though
+    its content is untouched.
+
+    **Merge, never refuse:** if the destination day already holds rows,
+    the moved rows merge into them. `booking_lines.seq` is a dense
+    per-(property,date) row order the printed day sheet renders as the row
+    number, but it is only a plain index, not unique — so merging verbatim
+    would produce duplicate `seq` values and silently corrupt that
+    numbering. The server renumbers every moved booking line starting at
+    the destination day's current `MAX(seq) + 1`, walked in the moved
+    rows' existing `seq` order (ties broken by `id`) so their relative
+    order survives the merge. `other_income_items` carries no `seq` (or
+    category), so it merges with a plain re-key, no renumbering.
+
+    Runs as a single transaction (`moveBookingDay()` in `db.ts`): if the
+    destination day already has a booking line sharing a `(property, date,
+    pms_ref)` with a moved row (the partial unique index — nothing writes
+    `pms_ref` from the UI today, but a future importer might), the whole
+    move rolls back and responds 500 rather than partially applying or
+    crashing.
+
+    No permission check — this app has no roles (see Auth above); any
+    signed-in identity may move a day. Enqueues the analytics outbox for
+    BOTH `(property, date)` and `(to, date)` — one call changes two
+    property-days' rollups.
+
+    Client wrapper (`src/client/api.ts`):
+    `moveBookingDay(property: Property, date: string, to: Property):
+    Promise<{ movedBookingLines: number; movedOtherIncome: number }>`.
 
 ## Shared types (`src/shared/types.ts`, verbatim, READ-ONLY)
 

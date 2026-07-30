@@ -31,6 +31,7 @@ import {
 import { navigate } from "../App.tsx";
 import { AmountInput } from "../components/AmountInput.tsx";
 import { DateBar } from "../components/DateBar.tsx";
+import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
   property: Property;
@@ -104,7 +105,6 @@ export function DaySheetPage({ property, date }: Props) {
   const [bookingLines, setBookingLines] = useState<BookingLine[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [meEmail, setMeEmail] = useState<string | null>(null);
-  const [isManager, setIsManager] = useState(false);
   const [dayNoteDraft, setDayNoteDraft] = useState("");
   const [dayNoteState, setDayNoteState] = useState<SimpleSaveState>("idle");
   const [verifyBusy, setVerifyBusy] = useState(false);
@@ -114,7 +114,6 @@ export function DaySheetPage({ property, date }: Props) {
     getMe()
       .then((me) => {
         setMeEmail(me.email);
-        setIsManager(me.isManager);
       })
       .catch(() => {
         /* /api/me failing just means the footer falls back to server-attributed emails */
@@ -575,6 +574,10 @@ export function DaySheetPage({ property, date }: Props) {
 
   return (
     <div className="flex flex-col gap-4 pb-10">
+      <div className="flex items-center gap-2">
+        <h1 className="text-sm font-semibold text-ink">สรุปวัน</h1>
+        <PropertyBadge property={property} />
+      </div>
       <DateBar date={date} onPick={goToDate} onShift={shift} />
 
       {day.monthClosed && (

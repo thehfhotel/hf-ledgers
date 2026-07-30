@@ -94,6 +94,25 @@ body {
   overflow: hidden;
 }
 
+/* Paper output must be true black, regardless of the screen palette used
+   inside the sheet (text-ink is a near-black #26221e, text-ink-muted is a
+   gray, text-brand-800 is burgundy) — those read fine on a backlit screen
+   but print as washed-out gray/color on paper. This rule is scoped to
+   .print-stage and every descendant, so it reaches BOTH the browser print
+   dialog (@media print un-clips this node) and the PDF export (exportPdf.ts
+   captures this same node with html2canvas-pro while it sits hidden here) —
+   the one hook both outputs share. It is deliberately OUTSIDE @media print:
+   the PDF capture happens on-screen (in this always-present, visually
+   clipped node), so a @media print-only rule would never apply to it.
+   Text color only — backgrounds and borders (rule lines, tint fills) are
+   untouched so the sheet's structure still prints. Does not affect
+   ReportPage's JPEG export, which renders ReportSheet directly outside
+   .print-stage. */
+.print-stage,
+.print-stage * {
+  color: #000 !important;
+}
+
 @media print {
   #root {
     display: none !important;

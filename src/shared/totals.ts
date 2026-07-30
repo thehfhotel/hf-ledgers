@@ -34,6 +34,11 @@ export function computeDayTotals(
     expenseSatang,
     cashIncomeSatang,
     cashExpenseSatang,
+    // cashIncomeSatang IS the paper's "สรุปเงินสดฝากเข้าบัญชี" line.
+    // cashToDepositSatang additionally nets off same-day cash expenses —
+    // a useful but DIFFERENT figure. The report must label the two
+    // distinctly (see src/shared/api.md) rather than print this one under
+    // the paper's label, as it does today.
     cashToDepositSatang: cashIncomeSatang - cashExpenseSatang,
     netSatang: incomeSatang - expenseSatang,
   };

@@ -132,18 +132,24 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
                 <span className="tabular-nums">{formatSatang(cell.amountSatang)}</span>
               </div>
             ))}
-            {totals.cashExpenseSatang > 0 && (
-              <div className="flex items-baseline justify-between py-0.5 text-sm text-bad">
-                <span>หัก รายจ่ายเงินสด</span>
-                <span className="tabular-nums">-{formatSatang(totals.cashExpenseSatang)}</span>
-              </div>
-            )}
           </div>
+          {/* Three distinct, separately labeled lines — see api.md "Report
+              labeling": the paper's own สรุปเงินสดฝากเข้าบัญชี line is the
+              GROSS cash income (the amount actually banked); it must never
+              collapse into the netted figure below it. */}
           <div className="mt-2 flex items-baseline justify-between border-t border-line-strong pt-2">
-            <span className="text-sm font-bold text-brand-500">รวมฝากเข้าบัญชี</span>
+            <span className="text-sm font-bold text-brand-500">สรุปเงินสดฝากเข้าบัญชี (ยอดฝากจริง)</span>
             <span className="tabular-nums text-lg font-bold text-brand-500">
-              {formatSatang(totals.cashToDepositSatang)}
+              {formatSatang(totals.cashIncomeSatang)}
             </span>
+          </div>
+          <div className="mt-2 flex items-baseline justify-between border-t border-dotted border-line-strong pt-2 text-xs text-ink-muted">
+            <span>หัก รายจ่ายเงินสดวันนี้ (ไม่ได้หักออกจากยอดฝากข้างต้น)</span>
+            <span className="tabular-nums">-{formatSatang(totals.cashExpenseSatang)}</span>
+          </div>
+          <div className="mt-0.5 flex items-baseline justify-between text-xs font-medium text-ink-muted">
+            <span>คงเหลือสุทธิหลังหักรายจ่ายเงินสด (ข้อมูลอ้างอิง)</span>
+            <span className="tabular-nums">{formatSatang(totals.cashToDepositSatang)}</span>
           </div>
         </section>
 

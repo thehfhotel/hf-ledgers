@@ -2,15 +2,26 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { shiftDays } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
 import { computeDayTotals } from "../../shared/totals.ts";
-import { NOTE_MAX_LEN, type Category, type DaySheet, type ExpenseItem, type Property } from "../../shared/types.ts";
+import {
+  NOTE_MAX_LEN,
+  type Category,
+  type CategoryKey,
+  type DaySheet,
+  type DayProvenance,
+  type ExpenseItem,
+  type Property,
+} from "../../shared/types.ts";
 import {
   createExpense,
   deleteExpense,
+  fillFromBookings,
   getDay,
   getMe,
   putDayNote,
   putIncomeCell,
+  putVerify,
   updateExpense,
+  type FillFromBookingsDiffRow,
 } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { AmountInput } from "../components/AmountInput.tsx";
@@ -21,13 +32,34 @@ interface Props {
   date: string;
 }
 
-// The one income category whose entry row also carries a free-text note
-// (see api.md: IncomeCell.note "carries รายการอื่นๆ's free-text"). Matched
-// by name because the schema has no dedicated flag for it — a manager
-// spelling-fix rename keeps working (in-place relabel per the contract's
-// rename model); a genuine meaning-change is archive+new anyway, so it
-// naturally loses this special-casing along with everything else.
-const OTHER_INCOME_LABEL = "รายการอื่นๆ";
+// The two income categories computed from itemized other-income entries
+// once any exist (see api.md's RESOLVED รายการอื่นๆ note) — identified by
+// categoryKey, never nameTh, because managers can rename categories freely.
+const OTHER_INCOME_CATEGORY_KEYS = new Set(["other_cash", "other_transfer"]);
+
+const PROVENANCE_LABELS_TH: Record<DayProvenance, string> = {
+  app: "บันทึกในระบบนี้",
+  transcribed: "คัดลอกจากเอกสารเดิม",
+  reconstructed: "สร้างขึ้นใหม่จากข้อมูลเดิม (มีการปรับกระทบยอด)",
+  summary_only: "มีเฉพาะข้อมูลสรุป (ยังไม่มีรายการจองรายตัว)",
+};
+
+// Fallback labels for the fill-from-bookings diff, verbatim from api.md's
+// seed list — needed because a diff row's categoryId is null when the
+// property has no active category seeded with that key yet.
+const CATEGORY_KEY_LABELS_TH: Record<CategoryKey, string> = {
+  deposit: "มัดจำล่วงหน้า",
+  room_cash: "ค่าห้องเงินสด",
+  credit_kbank: "บัตรเครดิต/กสิกร",
+  credit_icbc: "บัตรเครดิต ICBC",
+  transfer_kbank: "โอน/กสิกร",
+  transfer_icbc: "โอน ICBC",
+  web: "เว็ปไซด์",
+  other_cash: "รายการอื่นๆ เงินสด",
+  other_transfer: "รายการอื่นๆ โอน/เครดิต",
+  bar_cash: "บาร์น้ำ เงินสด",
+  bar_transfer: "บาร์น้ำ โอน/เครดิต",
+};
 
 type SimpleSaveState = "idle" | "saving" | "saved" | "error";
 
@@ -53,13 +85,18 @@ export function DaySheetPage({ property, date }: Props) {
   const [day, setDay] = useState<DaySheet | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [meEmail, setMeEmail] = useState<string | null>(null);
-  const [otherNoteDraft, setOtherNoteDraft] = useState("");
+  const [isManager, setIsManager] = useState(false);
   const [dayNoteDraft, setDayNoteDraft] = useState("");
   const [dayNoteState, setDayNoteState] = useState<SimpleSaveState>("idle");
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
 
   useEffect(() => {
     getMe()
-      .then((me) => setMeEmail(me.email))
+      .then((me) => {
+        setMeEmail(me.email);
+        setIsManager(me.isManager);
+      })
       .catch(() => {
         /* /api/me failing just means the footer falls back to server-attributed emails */
       });
@@ -70,15 +107,12 @@ export function DaySheetPage({ property, date }: Props) {
     setDay(null);
     setLoadError(null);
     setDayNoteState("idle");
+    setVerifyError(null);
     getDay(property, date)
       .then((sheet) => {
         if (cancelled) return;
         setDay(sheet);
         setDayNoteDraft(sheet.note ?? "");
-        const otherCategory = sheet.categories.find(
-          (c) => c.kind === "income" && c.nameTh === OTHER_INCOME_LABEL,
-        );
-        setOtherNoteDraft(otherCategory ? (sheet.income[otherCategory.id]?.note ?? "") : "");
       })
       .catch((err) => {
         if (cancelled) return;
@@ -114,14 +148,8 @@ export function DaySheetPage({ property, date }: Props) {
 
   async function commitIncomeAmount(category: Category, satang: number | null) {
     if (!day) return;
-    const isOther = category.nameTh === OTHER_INCOME_LABEL;
     const prevIncome = day.income;
     const prevTotals = day.totals;
-    const noteForOther = isOther
-      ? otherNoteDraft.trim() === ""
-        ? null
-        : otherNoteDraft.trim().slice(0, NOTE_MAX_LEN)
-      : undefined;
 
     const optimisticIncome = { ...day.income };
     if (satang === null || satang === 0) {
@@ -130,7 +158,9 @@ export function DaySheetPage({ property, date }: Props) {
       optimisticIncome[category.id] = {
         categoryId: category.id,
         amountSatang: satang,
-        note: isOther ? (noteForOther ?? null) : (day.income[category.id]?.note ?? null),
+        note: day.income[category.id]?.note ?? null,
+        source: "manual",
+        manual: true,
         updatedAt: day.updatedAt,
         updatedBy: meEmail ?? day.updatedBy,
       };
@@ -142,48 +172,11 @@ export function DaySheetPage({ property, date }: Props) {
     }));
 
     try {
-      // Non-รายการอื่นๆ rows never surface a note field, so their commits
-      // omit the `note` key entirely rather than risk clobbering a value
-      // this UI never showed the user in the first place.
-      const body = isOther ? { amountSatang: satang, note: noteForOther } : { amountSatang: satang };
-      const res = await putIncomeCell(property, date, category.id, body);
+      const res = await putIncomeCell(property, date, category.id, { amountSatang: satang });
       applyLocal((prev) => ({ ...prev, income: res.income, totals: res.totals, ...touchAudit(prev) }));
-      if (isOther) setOtherNoteDraft(res.income[category.id]?.note ?? "");
     } catch (err) {
       applyLocal((prev) => ({ ...prev, income: prevIncome, totals: prevTotals }));
       throw err;
-    }
-  }
-
-  async function commitOtherNote() {
-    if (!day) return;
-    const category = incomeCategories.find((c) => c.nameTh === OTHER_INCOME_LABEL);
-    if (!category) return;
-    const existing = day.income[category.id];
-    // A note lives inside an income_amounts row (api.md), which only exists
-    // once an amount is saved (null/0 amount deletes the row). Without an
-    // amount yet, keep the draft local-only — the hint under the field
-    // explains this — rather than send a request that has nothing to attach to.
-    if (!existing || existing.amountSatang === 0) return;
-
-    const trimmed = otherNoteDraft.trim();
-    const note = trimmed === "" ? null : trimmed.slice(0, NOTE_MAX_LEN);
-    if (note === existing.note) return;
-
-    const prevIncome = day.income;
-    const optimisticIncome = { ...day.income, [category.id]: { ...existing, note } };
-    applyLocal((prev) => ({ ...prev, income: optimisticIncome }));
-    try {
-      const res = await putIncomeCell(property, date, category.id, {
-        amountSatang: existing.amountSatang,
-        note,
-      });
-      applyLocal((prev) => ({ ...prev, income: res.income, totals: res.totals, ...touchAudit(prev) }));
-      setOtherNoteDraft(res.income[category.id]?.note ?? "");
-    } catch {
-      applyLocal((prev) => ({ ...prev, income: prevIncome }));
-      // Keep the user's typed draft on screen even though the save failed —
-      // otherNoteDraft is untouched, so nothing they typed is lost.
     }
   }
 
@@ -352,6 +345,68 @@ export function DaySheetPage({ property, date }: Props) {
     }
   }
 
+  // ── Verify / unverify (mgr) ──────────────────────────────────────────
+
+  async function toggleVerify() {
+    if (!day) return;
+    setVerifyBusy(true);
+    setVerifyError(null);
+    const nextVerified = !day.verifiedAt;
+    try {
+      const res = await putVerify(property, date, nextVerified);
+      applyLocal((prev) => ({ ...prev, verifiedAt: res.verifiedAt, verifiedBy: res.verifiedBy }));
+    } catch (err) {
+      setVerifyError(err instanceof Error ? err.message : "บันทึกสถานะยืนยันไม่สำเร็จ");
+    } finally {
+      setVerifyBusy(false);
+    }
+  }
+
+  // ── อัพเดทจากระบบจอง (fill-from-bookings, explicit + confirm-gated) ───
+  // Deliberately never a standing auto-fill (see api.md endpoint 20 and the
+  // BookingDayPage variance strip): the office's typed figure and the
+  // booking rows disagree on roughly a third of historical days, so this
+  // always previews a diff and requires an explicit confirm before writing.
+
+  const [diffState, setDiffState] = useState<
+    | { status: "closed" }
+    | { status: "loading" }
+    | { status: "error"; message: string }
+    | { status: "ready"; rows: FillFromBookingsDiffRow[] }
+    | { status: "applying"; rows: FillFromBookingsDiffRow[] }
+  >({ status: "closed" });
+
+  async function openFillFromBookingsDiff() {
+    setDiffState({ status: "loading" });
+    try {
+      const res = await fillFromBookings(property, date, false);
+      setDiffState({ status: "ready", rows: res.diff });
+    } catch (err) {
+      setDiffState({ status: "error", message: err instanceof Error ? err.message : "โหลดข้อมูลเปรียบเทียบไม่สำเร็จ" });
+    }
+  }
+
+  function closeFillFromBookingsDiff() {
+    setDiffState({ status: "closed" });
+  }
+
+  async function confirmFillFromBookings() {
+    if (diffState.status !== "ready") return;
+    setDiffState({ status: "applying", rows: diffState.rows });
+    try {
+      await fillFromBookings(property, date, true);
+      // The apply response only carries the diff shape (categoryKey/before/
+      // after), not full IncomeCell audit fields — refetch the day so
+      // income + totals stay server-authoritative rather than reconstructed
+      // client-side (same "never recompute independently" rule as totals).
+      const fresh = await getDay(property, date);
+      setDay(fresh);
+      setDiffState({ status: "closed" });
+    } catch (err) {
+      setDiffState({ status: "error", message: err instanceof Error ? err.message : "อัพเดทจากระบบจองไม่สำเร็จ" });
+    }
+  }
+
   // ── Navigation ───────────────────────────────────────────────────────
 
   function goToDate(newDate: string) {
@@ -362,6 +417,9 @@ export function DaySheetPage({ property, date }: Props) {
   }
   function goToReport() {
     navigate(`/${property}/report/${date}`);
+  }
+  function goToBookings() {
+    navigate(`/${property}/bookings/${date}`);
   }
 
   if (loadError) {
@@ -380,9 +438,83 @@ export function DaySheetPage({ property, date }: Props) {
     .map((c) => ({ category: c, cell: day.income[c.id] }))
     .filter((row): row is { category: Category; cell: NonNullable<typeof row.cell> } => Boolean(row.cell) && row.cell!.amountSatang > 0);
 
+  const hasOtherIncomeItems = day.otherIncome.length > 0;
+
   return (
     <div className="flex flex-col gap-4 pb-10">
       <DateBar date={date} onPick={goToDate} onShift={shift} />
+
+      {day.monthClosed && (
+        <div className="rounded-lg border border-warn/40 bg-gold-50 px-4 py-2.5 text-sm font-medium text-warn">
+          เดือนนี้ปิดบัญชีแล้ว — ไม่สามารถแก้ไขรายรับ รายจ่าย หรือหมายเหตุได้
+        </div>
+      )}
+
+      {/* สถานะข้อมูล: ที่มา + การยืนยัน */}
+      <section className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-panel px-4 py-2.5 text-sm">
+        <span className="text-ink-muted">ที่มาของข้อมูล: {PROVENANCE_LABELS_TH[day.provenance]}</span>
+        <div className="flex items-center gap-2">
+          {day.verifiedAt ? (
+            <span
+              title={`ยืนยันโดย ${day.verifiedBy ?? "-"} เมื่อ ${formatUpdatedAt(day.verifiedAt)}`}
+              className="inline-flex items-center gap-1 rounded-full bg-ok/15 px-2.5 py-1 text-xs font-medium text-ok"
+            >
+              ยืนยันแล้ว
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-full bg-tint px-2.5 py-1 text-xs font-medium text-ink-muted">
+              ยังไม่ยืนยัน
+            </span>
+          )}
+          {/* Any signed-in user may verify: front desk signs off its own day.
+              A closed month is frozen, so sign-off is locked with it. */}
+          <button
+            type="button"
+            onClick={toggleVerify}
+            disabled={verifyBusy || day.monthClosed}
+            title={day.monthClosed ? "เดือนนี้ปิดแล้ว" : undefined}
+            className="rounded-md border border-line-strong px-2.5 py-1 text-xs font-medium text-ink hover:bg-tint disabled:opacity-50"
+          >
+            {day.verifiedAt ? "ยกเลิกการยืนยัน" : "ยืนยันข้อมูล"}
+          </button>
+        </div>
+      </section>
+      {verifyError && <p className="text-xs text-bad">{verifyError}</p>}
+
+      {/* สถานะรายการจอง */}
+      {day.bookingLineCount > 0 && (
+        <section className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-panel px-4 py-2.5 text-sm">
+          <span className="text-ink">
+            มีรายการจอง <span className="font-semibold tabular-nums">{day.bookingLineCount}</span> รายการ
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={goToBookings}
+              className="rounded-md border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-tint"
+            >
+              ดูรายละเอียดรายรับ
+            </button>
+            <button
+              type="button"
+              onClick={openFillFromBookingsDiff}
+              disabled={day.monthClosed}
+              className="rounded-md bg-brand-500 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
+            >
+              อัพเดทจากระบบจอง
+            </button>
+          </div>
+        </section>
+      )}
+
+      {diffState.status !== "closed" && (
+        <FillFromBookingsDialog
+          state={diffState}
+          categories={day.categories}
+          onConfirm={confirmFillFromBookings}
+          onClose={closeFillFromBookingsDiff}
+        />
+      )}
 
       {/* Panel รายรับ */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
@@ -393,7 +525,12 @@ export function DaySheetPage({ property, date }: Props) {
           <div className="divide-y divide-line">
             {incomeCategories.map((category) => {
               const cell = day.income[category.id];
-              const isOther = category.nameTh === OTHER_INCOME_LABEL;
+              // The two รายการอื่นๆ cells become read-only (computed from
+              // itemized other-income entries) once any exist for this day —
+              // see api.md's RESOLVED note. Identified by categoryKey, never
+              // nameTh, so a manager rename keeps this working.
+              const isComputedFromOtherIncome =
+                category.categoryKey != null && OTHER_INCOME_CATEGORY_KEYS.has(category.categoryKey) && hasOtherIncomeItems;
               return (
                 <div key={category.id} className="flex flex-col gap-2 px-4 py-2.5">
                   <div className="flex items-center justify-between gap-3">
@@ -405,24 +542,16 @@ export function DaySheetPage({ property, date }: Props) {
                       value={cell?.amountSatang ?? null}
                       onCommit={(satang) => commitIncomeAmount(category, satang)}
                       ariaLabel={category.nameTh}
+                      disabled={day.monthClosed || isComputedFromOtherIncome}
                     />
                   </div>
-                  {isOther && (
-                    <div>
-                      <input
-                        type="text"
-                        value={otherNoteDraft}
-                        onChange={(e) => setOtherNoteDraft(e.target.value)}
-                        onBlur={commitOtherNote}
-                        maxLength={NOTE_MAX_LEN}
-                        placeholder="หมายเหตุ"
-                        aria-label="หมายเหตุรายการอื่นๆ"
-                        className="w-full rounded-md border border-line-strong bg-panel px-2.5 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-                      />
-                      {(!cell || cell.amountSatang === 0) && otherNoteDraft.trim() !== "" && (
-                        <p className="mt-1 text-xs text-ink-muted">จะบันทึกหมายเหตุเมื่อกรอกจำนวนเงินด้านบน</p>
-                      )}
-                    </div>
+                  {isComputedFromOtherIncome && (
+                    <p className="text-xs text-ink-muted">
+                      คำนวณจากรายการย่อยในหน้ารายละเอียดรายรับ —{" "}
+                      <button type="button" onClick={goToBookings} className="font-medium text-brand-500 hover:underline">
+                        ไปแก้ไขรายการย่อย
+                      </button>
+                    </p>
                   )}
                 </div>
               );
@@ -451,8 +580,9 @@ export function DaySheetPage({ property, date }: Props) {
                   <select
                     value={item.categoryId}
                     onChange={(e) => commitExpenseCategory(item, Number(e.target.value))}
+                    disabled={day.monthClosed}
                     aria-label="หมวดหมู่รายจ่าย"
-                    className="min-w-[9rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                    className="min-w-[9rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
                   >
                     {options.map((c) => (
                       <option key={c.id} value={c.id}>
@@ -467,18 +597,21 @@ export function DaySheetPage({ property, date }: Props) {
                     key={`${item.id}-${item.note ?? ""}`}
                     placeholder="หมายเหตุ"
                     aria-label="หมายเหตุรายจ่าย"
+                    disabled={day.monthClosed}
                     onBlur={(e) => commitExpenseNote(item, e.target.value)}
-                    className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                    className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
                   />
                   <AmountInput
                     value={item.amountSatang}
                     onCommit={(satang) => commitExpenseAmount(item, satang)}
                     ariaLabel={`จำนวนเงิน ${category?.nameTh ?? ""}`}
+                    disabled={day.monthClosed}
                   />
                   <button
                     type="button"
                     onClick={() => removeExpense(item)}
-                    className="rounded-md border border-bad/40 px-2.5 py-1.5 text-xs font-medium text-bad hover:bg-bad/10"
+                    disabled={day.monthClosed}
+                    className="rounded-md border border-bad/40 px-2.5 py-1.5 text-xs font-medium text-bad hover:bg-bad/10 disabled:opacity-50"
                   >
                     ลบ
                   </button>
@@ -495,9 +628,9 @@ export function DaySheetPage({ property, date }: Props) {
           <select
             value={newCategoryId}
             onChange={(e) => setNewCategoryId(e.target.value === "" ? "" : Number(e.target.value))}
-            disabled={activeExpenseCategories.length === 0}
+            disabled={activeExpenseCategories.length === 0 || day.monthClosed}
             aria-label="หมวดหมู่รายจ่ายใหม่"
-            className="min-w-[9rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+            className="min-w-[9rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
           >
             {activeExpenseCategories.length === 0 && <option value="">ยังไม่มีหมวดหมู่รายจ่าย</option>}
             {activeExpenseCategories.map((c) => (
@@ -512,7 +645,8 @@ export function DaySheetPage({ property, date }: Props) {
             onChange={(e) => setNewNote(e.target.value)}
             placeholder="หมายเหตุ"
             aria-label="หมายเหตุรายจ่ายใหม่"
-            className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+            disabled={day.monthClosed}
+            className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
           />
           <input
             type="text"
@@ -521,11 +655,12 @@ export function DaySheetPage({ property, date }: Props) {
             onChange={(e) => setNewAmountText(e.target.value)}
             placeholder="0.00"
             aria-label="จำนวนเงินรายจ่ายใหม่"
-            className="w-28 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-right tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+            disabled={day.monthClosed}
+            className="w-28 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-right tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
           />
           <button
             type="submit"
-            disabled={addingExpense || activeExpenseCategories.length === 0}
+            disabled={addingExpense || activeExpenseCategories.length === 0 || day.monthClosed}
             className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
           >
             เพิ่มรายการ
@@ -539,7 +674,10 @@ export function DaySheetPage({ property, date }: Props) {
         </div>
       </section>
 
-      {/* Panel สรุปเงินสดฝากเข้าบัญชี (tint background) */}
+      {/* Panel สรุปเงินสดฝากเข้าบัญชี (tint background) — three distinct,
+          separately labeled lines per api.md "Report labeling": the
+          paper's own line is the GROSS cash income actually banked; it must
+          never collapse into the netted figure beneath it. */}
       <section className="rounded-lg border border-line bg-tint p-4">
         <h2 className="mb-2 text-sm font-semibold text-ink">สรุปเงินสดฝากเข้าบัญชี</h2>
         {cashIncomeRows.length === 0 && day.totals.cashExpenseSatang === 0 ? (
@@ -552,16 +690,18 @@ export function DaySheetPage({ property, date }: Props) {
                 <span className="tabular-nums text-ink">{formatSatang(cell.amountSatang)}</span>
               </div>
             ))}
-            {day.totals.cashExpenseSatang > 0 && (
-              <div className="flex items-center justify-between text-bad">
-                <span>หัก รายจ่ายเงินสด</span>
-                <span className="tabular-nums">-{formatSatang(day.totals.cashExpenseSatang)}</span>
-              </div>
-            )}
           </div>
         )}
         <div className="mt-2 flex items-center justify-between border-t border-line-strong pt-2 text-base font-bold text-brand-500">
-          <span>ยอดฝากเข้าบัญชี</span>
+          <span>สรุปเงินสดฝากเข้าบัญชี (ยอดฝากจริง)</span>
+          <span className="tabular-nums">{formatSatang(day.totals.cashIncomeSatang)}</span>
+        </div>
+        <div className="mt-2 flex items-center justify-between border-t border-dotted border-line-strong pt-2 text-xs text-ink-muted">
+          <span>หัก รายจ่ายเงินสดวันนี้ (ไม่ได้หักออกจากยอดฝากข้างต้น)</span>
+          <span className="tabular-nums">-{formatSatang(day.totals.cashExpenseSatang)}</span>
+        </div>
+        <div className="mt-0.5 flex items-center justify-between text-xs font-medium text-ink-muted">
+          <span>คงเหลือสุทธิหลังหักรายจ่ายเงินสด (ข้อมูลอ้างอิง)</span>
           <span className="tabular-nums">{formatSatang(day.totals.cashToDepositSatang)}</span>
         </div>
       </section>
@@ -578,8 +718,9 @@ export function DaySheetPage({ property, date }: Props) {
           onChange={(e) => setDayNoteDraft(e.target.value)}
           onBlur={commitDayNote}
           maxLength={NOTE_MAX_LEN}
+          disabled={day.monthClosed}
           placeholder="บันทึกเพิ่มเติมสำหรับวันนี้ (ถ้ามี)"
-          className="w-full resize-none rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+          className="w-full resize-none rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
         />
         {dayNoteState === "saved" && <p className="mt-1 text-xs text-ok">บันทึกแล้ว</p>}
         {dayNoteState === "error" && <p className="mt-1 text-xs text-bad">บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง</p>}
@@ -597,6 +738,144 @@ export function DaySheetPage({ property, date }: Props) {
         >
           ส่งออกรูปภาพ
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ── อัพเดทจากระบบจอง — diff dialog ────────────────────────────────────
+// Always preview-then-confirm (api.md endpoint 20): shows a per-category
+// before/after so the office can see exactly what would change, and clearly
+// marks cells the human already owns (manual: true) as skipped rather than
+// silently leaving them out of the list.
+
+interface FillFromBookingsDialogProps {
+  state:
+    | { status: "loading" }
+    | { status: "error"; message: string }
+    | { status: "ready"; rows: FillFromBookingsDiffRow[] }
+    | { status: "applying"; rows: FillFromBookingsDiffRow[] };
+  categories: Category[];
+  onConfirm: () => void;
+  onClose: () => void;
+}
+
+function categoryLabel(categories: Category[], row: FillFromBookingsDiffRow): string {
+  if (row.categoryId != null) {
+    const category = categories.find((c) => c.id === row.categoryId);
+    if (category) return category.nameTh;
+  }
+  return CATEGORY_KEY_LABELS_TH[row.categoryKey];
+}
+
+function FillFromBookingsDialog({ state, categories, onConfirm, onClose }: FillFromBookingsDialogProps) {
+  const rows = state.status === "ready" || state.status === "applying" ? state.rows : [];
+  const changingRows = rows.filter((r) => !r.skippedManual && r.beforeSatang !== r.afterSatang);
+  const skippedRows = rows.filter((r) => r.skippedManual);
+  const unchangedRows = rows.filter((r) => !r.skippedManual && r.beforeSatang === r.afterSatang);
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-lg bg-panel shadow-lg">
+        <div className="border-b border-line px-4 py-3">
+          <h2 className="text-sm font-semibold text-ink">อัพเดทจากระบบจอง</h2>
+          <p className="mt-0.5 text-xs text-ink-muted">
+            เปรียบเทียบยอดที่กรอกไว้กับยอดที่คำนวณจากรายการจอง ก่อนบันทึกจริง
+          </p>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          {state.status === "loading" && <p className="text-sm text-ink-muted">กำลังโหลดข้อมูลเปรียบเทียบ...</p>}
+          {state.status === "error" && <p className="text-sm text-bad">{state.message}</p>}
+
+          {(state.status === "ready" || state.status === "applying") && rows.length === 0 && (
+            <p className="text-sm text-ink-muted">ไม่มีรายการจองที่นำมาคำนวณได้สำหรับวันนี้</p>
+          )}
+
+          {(state.status === "ready" || state.status === "applying") && rows.length > 0 && (
+            <div className="flex flex-col gap-3">
+              {changingRows.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  <p className="text-xs font-semibold text-ink-muted">รายการที่จะเปลี่ยนแปลง</p>
+                  {changingRows.map((row) => (
+                    <div
+                      key={row.categoryKey}
+                      className="flex items-center justify-between rounded-md border border-line-strong px-2.5 py-1.5 text-sm"
+                    >
+                      <span className="text-ink">{categoryLabel(categories, row)}</span>
+                      <span className="tabular-nums text-ink-muted">
+                        {formatSatang(row.beforeSatang)} <span className="text-ink-muted">{"->"}</span>{" "}
+                        <span className="font-semibold text-brand-500">{formatSatang(row.afterSatang)}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {skippedRows.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  <p className="text-xs font-semibold text-ink-muted">ข้ามไว้ (กรอกเองแล้ว)</p>
+                  {skippedRows.map((row) => (
+                    <div
+                      key={row.categoryKey}
+                      className="flex items-center justify-between rounded-md border border-line px-2.5 py-1.5 text-sm text-ink-muted"
+                    >
+                      <span>{categoryLabel(categories, row)}</span>
+                      <span className="tabular-nums">
+                        {formatSatang(row.beforeSatang)}{" "}
+                        <span className="rounded-full bg-tint px-1.5 py-0.5 text-[11px]">ข้าม</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {unchangedRows.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  <p className="text-xs font-semibold text-ink-muted">ตรงกันอยู่แล้ว</p>
+                  {unchangedRows.map((row) => (
+                    <div
+                      key={row.categoryKey}
+                      className="flex items-center justify-between rounded-md px-2.5 py-1 text-sm text-ink-muted"
+                    >
+                      <span>{categoryLabel(categories, row)}</span>
+                      <span className="tabular-nums">{formatSatang(row.afterSatang)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={state.status === "applying"}
+            className="rounded-md border border-line-strong px-3 py-1.5 text-xs font-medium text-ink hover:bg-tint disabled:opacity-50"
+          >
+            ยกเลิก
+          </button>
+          {state.status === "ready" && changingRows.length > 0 && (
+            <button
+              type="button"
+              onClick={onConfirm}
+              className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-600"
+            >
+              ยืนยันอัพเดท
+            </button>
+          )}
+          {state.status === "applying" && (
+            <button
+              type="button"
+              disabled
+              className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white opacity-50"
+            >
+              กำลังบันทึก...
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

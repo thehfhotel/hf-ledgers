@@ -1,10 +1,16 @@
 import type {
+  BookingLine,
+  BookingTotals,
+  CashBlock,
+  CashBlockAmounts,
   Category,
+  CategoryKey,
   CategoryKind,
   DaySheet,
   DaySummary,
   ExpenseItem,
   Me,
+  OtherIncomeItem,
   Property,
 } from "../shared/types.ts";
 
@@ -143,4 +149,132 @@ export function updateExpense(
 // 12. DELETE /api/:property/expenses/:id
 export function deleteExpense(property: Property, id: number): Promise<void> {
   return request(`/${property}/expenses/${id}`, { method: "DELETE" });
+}
+
+// ── Wave 2 (Planned endpoints, src/shared/api.md §"Planned endpoints") ────
+
+/** The editable subset of BookingLine — everything except id/property/date
+ * and the audit quartet, per api.md endpoint 14. `seq` is optional: the
+ * server assigns `max(seq) + 1` for the day when the body omits it. */
+export type BookingLineInput = Partial<
+  Omit<BookingLine, "id" | "property" | "date" | "createdAt" | "createdBy" | "updatedAt" | "updatedBy">
+>;
+
+// 13. GET /api/:property/day/:date/bookings
+export function listBookingLines(
+  property: Property,
+  date: string,
+): Promise<{ lines: BookingLine[]; totals: BookingTotals }> {
+  return request(`/${property}/day/${date}/bookings`);
+}
+
+// 14. POST /api/:property/day/:date/bookings
+export function createBookingLine(property: Property, date: string, body: BookingLineInput): Promise<BookingLine> {
+  return request(`/${property}/day/${date}/bookings`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// 15. PATCH /api/:property/bookings/:id
+export function updateBookingLine(property: Property, id: number, body: BookingLineInput): Promise<BookingLine> {
+  return request(`/${property}/bookings/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+// 16. DELETE /api/:property/bookings/:id
+export function deleteBookingLine(property: Property, id: number): Promise<void> {
+  return request(`/${property}/bookings/${id}`, { method: "DELETE" });
+}
+
+// 17. POST /api/:property/day/:date/other-income
+export function createOtherIncomeItem(
+  property: Property,
+  date: string,
+  body: { description: string | null; amountSatang: number; isCash: boolean },
+): Promise<OtherIncomeItem> {
+  return request(`/${property}/day/${date}/other-income`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// 18. PATCH /api/:property/other-income/:id
+export function updateOtherIncomeItem(
+  property: Property,
+  id: number,
+  body: Partial<{ description: string | null; amountSatang: number; isCash: boolean }>,
+): Promise<OtherIncomeItem> {
+  return request(`/${property}/other-income/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+// 19. DELETE /api/:property/other-income/:id
+export function deleteOtherIncomeItem(property: Property, id: number): Promise<void> {
+  return request(`/${property}/other-income/${id}`, { method: "DELETE" });
+}
+
+export interface FillFromBookingsDiffRow {
+  categoryKey: CategoryKey;
+  categoryId: number | null;
+  beforeSatang: number;
+  afterSatang: number;
+  skippedManual: boolean;
+}
+
+// 20. POST /api/:property/day/:date/fill-from-bookings
+// `apply` picks the `?apply=true` query-flag form the contract offered as
+// one of two equivalent shapes — kept consistent here as the only caller.
+export function fillFromBookings(
+  property: Property,
+  date: string,
+  apply: boolean,
+): Promise<{ diff: FillFromBookingsDiffRow[] }> {
+  const qs = apply ? "?apply=true" : "";
+  return request(`/${property}/day/${date}/fill-from-bookings${qs}`, { method: "POST" });
+}
+
+// 21. PUT /api/:property/day/:date/cash-block (mgr)
+export function putCashBlock(
+  property: Property,
+  date: string,
+  body: Partial<CashBlockAmounts> | null,
+): Promise<CashBlock> {
+  return request(`/${property}/day/${date}/cash-block`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+// 22. PUT /api/:property/day/:date/verify (mgr)
+export function putVerify(
+  property: Property,
+  date: string,
+  verified: boolean,
+): Promise<{ verifiedAt: string | null; verifiedBy: string | null }> {
+  return request(`/${property}/day/${date}/verify`, {
+    method: "PUT",
+    body: JSON.stringify({ verified }),
+  });
+}
+
+// 23. GET /api/:property/months/:month/close
+export function getMonthClose(property: Property, month: string): Promise<{ month: string; closed: boolean }> {
+  return request(`/${property}/months/${month}/close`);
+}
+
+// 24. PUT /api/:property/months/:month/close (mgr)
+export function putMonthClose(
+  property: Property,
+  month: string,
+  closed: boolean,
+): Promise<{ month: string; closed: boolean }> {
+  return request(`/${property}/months/${month}/close`, {
+    method: "PUT",
+    body: JSON.stringify({ closed }),
+  });
 }

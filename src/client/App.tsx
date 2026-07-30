@@ -5,6 +5,7 @@ import { DaySheetPage } from "./pages/DaySheetPage.tsx";
 import { HistoryPage } from "./pages/HistoryPage.tsx";
 import { CategoriesPage } from "./pages/CategoriesPage.tsx";
 import { ReportPage } from "./pages/ReportPage.tsx";
+import { BookingDayPage } from "./pages/BookingDayPage.tsx";
 
 // pushState micro-router (RDR App.tsx pattern). This file is the router +
 // chip-rail shell ONLY — page components own their own screens. Every page
@@ -32,6 +33,7 @@ function savedProperty(): Property {
 
 type Route =
   | { kind: "day"; property: Property; date: string }
+  | { kind: "bookings"; property: Property; date: string }
   | { kind: "history"; property: Property }
   | { kind: "categories"; property: Property }
   | { kind: "report"; property: Property | "demo"; date: string };
@@ -56,6 +58,7 @@ function parseRoute(pathname: string): Route {
   if (!property) return homeRoute();
 
   if (parts[1] === "day" && parts[2]) return { kind: "day", property, date: parts[2] };
+  if (parts[1] === "bookings" && parts[2]) return { kind: "bookings", property, date: parts[2] };
   if (parts[1] === "history") return { kind: "history", property };
   if (parts[1] === "categories") return { kind: "categories", property };
   if (parts[1] === "report" && parts[2]) return { kind: "report", property, date: parts[2] };
@@ -77,6 +80,8 @@ function routeForProperty(route: Route, property: Property): string {
   switch (route.kind) {
     case "day":
       return `/${property}/day/${route.date}`;
+    case "bookings":
+      return `/${property}/bookings/${route.date}`;
     case "report":
       // A report is property+date specific; land on that property's day
       // sheet rather than re-render someone else's exported sheet.
@@ -127,12 +132,24 @@ export function App() {
     // for an unrecognized path, not a reaction to route/property changes.
   }, []);
 
+  // Shared by both date-anchored tabs below — switching between "สรุปวัน"
+  // and "รายละเอียดรายรับ" keeps the same date; landing from history/
+  // categories falls back to today, same as the pre-existing "day" tab did.
+  const currentDate =
+    route.kind === "day" || route.kind === "report" || route.kind === "bookings" ? route.date : todayBangkok();
+
   const navItems: { key: string; label: string; active: boolean; path: string }[] = [
     {
       key: "day",
       label: "สรุปวัน",
       active: route.kind === "day" || route.kind === "report",
-      path: `/${displayProperty}/day/${route.kind === "day" || route.kind === "report" ? route.date : todayBangkok()}`,
+      path: `/${displayProperty}/day/${currentDate}`,
+    },
+    {
+      key: "bookings",
+      label: "รายละเอียดรายรับ",
+      active: route.kind === "bookings",
+      path: `/${displayProperty}/bookings/${currentDate}`,
     },
     {
       key: "history",
@@ -173,14 +190,14 @@ export function App() {
             ))}
           </div>
         </div>
-        <nav className="mx-auto flex max-w-3xl gap-1 px-4 pb-2">
+        <nav className="rail mx-auto flex max-w-3xl gap-1 overflow-x-auto px-4 pb-2">
           {navItems.map((item) => (
             <button
               key={item.key}
               type="button"
               onClick={() => navigate(item.path)}
               className={
-                "rounded-md px-3 py-1.5 text-xs font-medium transition " +
+                "shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition " +
                 (item.active ? "bg-gold-500 text-brand-900" : "text-brand-100 hover:bg-brand-700")
               }
             >
@@ -192,6 +209,7 @@ export function App() {
 
       <main className="mx-auto max-w-3xl px-4 py-4">
         {route.kind === "day" && <DaySheetPage property={route.property} date={route.date} />}
+        {route.kind === "bookings" && <BookingDayPage property={route.property} date={route.date} />}
         {route.kind === "history" && <HistoryPage property={route.property} />}
         {route.kind === "categories" && <CategoriesPage property={route.property} />}
         {route.kind === "report" && <ReportPage property={route.property} date={route.date} />}

@@ -106,8 +106,26 @@ export function HistoryPage({ property }: Props) {
                 onClick={() => navigate(`/${property}/day/${d.date}`)}
                 className="grid w-full grid-cols-[auto_1fr_1fr_1fr] gap-2 px-3 py-2.5 text-left text-sm hover:bg-tint focus:outline-none focus:ring-2 focus:ring-inset focus:ring-brand-500/40"
               >
-                <span className="text-ink">
+                <span className="flex items-center gap-1 text-ink">
                   {isoToBuddhist(d.date)} <span className="text-ink-muted">{weekdayTh(d.date)}</span>
+                  {d.verified && (
+                    <span
+                      title="ตรวจสอบยืนยันแล้ว"
+                      aria-label="ตรวจสอบยืนยันแล้ว"
+                      className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-ok/15 text-ok"
+                    >
+                      <svg viewBox="0 0 16 16" className="h-3 w-3" aria-hidden="true">
+                        <path
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M3 8.5 6.5 12 13 4.5"
+                        />
+                      </svg>
+                    </span>
+                  )}
                 </span>
                 <span className="text-right tabular-nums text-ink">{formatSatang(d.incomeSatang)}</span>
                 <span className="text-right tabular-nums text-ink">{formatSatang(d.expenseSatang)}</span>

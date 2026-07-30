@@ -18,6 +18,12 @@ const result = await Bun.build({
   outdir,
   target: "browser",
   minify: true,
+  // Split dynamic imports into their own lazy chunks: jspdf + html2canvas are
+  // export-time-only and together dwarf the app itself. Without this they get
+  // INLINED and the kiosk parses ~1.6MB of JS per load for buttons it may
+  // never press; with it the main chunk halves and the export libs load on
+  // first use of PDF/JPEG/print.
+  splitting: true,
   sourcemap: "linked",
   plugins: [tailwind],
   publicPath: "/",
@@ -54,6 +60,20 @@ for (const f of readdirSync(outdir)) {
       .replace(/(href|src)="\.\/(?!\/)/g, '$1="/')
       .replace(/(href|src)='\.\/(?!\/)/g, "$1='/");
     writeFileSync(indexPath, html);
+  }
+}
+
+// Precompress every text asset (gzip -9 equivalent) so the server can serve
+// content-encoding: gzip without compressing per-request. ~1.6MB JS -> ~400KB
+// on the wire; the .gz sits beside the original and the server picks it when
+// the client accepts it.
+{
+  const zlib = await import("node:zlib");
+  for (const f of readdirSync(outdir)) {
+    if (/\.(js|css|html|map)$/.test(f)) {
+      const raw = readFileSync(join(outdir, f));
+      writeFileSync(join(outdir, f + ".gz"), zlib.gzipSync(raw, { level: 9 }));
+    }
   }
 }
 

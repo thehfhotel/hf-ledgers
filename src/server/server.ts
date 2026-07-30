@@ -972,7 +972,28 @@ if (isProd) {
       if (!filePath.startsWith(distDir)) return new Response("nope", { status: 400 });
 
       const f = Bun.file(filePath);
-      if (await f.exists()) return new Response(f);
+      if (await f.exists()) {
+        // Chunk names are content-hashed, so a chunk's bytes can never change
+        // under its URL — cache forever. index.html (and anything unhashed)
+        // must revalidate so a deploy is picked up on the next load. This is
+        // most of the kiosk's reload weight: without it every open re-fetched
+        // the whole bundle.
+        const immutable = /-[a-z0-9]{6,}\.[a-z.]+$/i.test(url.pathname);
+        const headers: Record<string, string> = {
+          "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+          vary: "Accept-Encoding",
+        };
+        // The build precompresses text assets; hand the .gz over when the
+        // client accepts it (~1.6MB JS -> ~400KB on the wire), keeping the
+        // original file's content-type.
+        const gz = Bun.file(filePath + ".gz");
+        if (/gzip/i.test(req.headers.get("accept-encoding") ?? "") && (await gz.exists())) {
+          headers["content-encoding"] = "gzip";
+          headers["content-type"] = f.type;
+          return new Response(gz, { headers });
+        }
+        return new Response(f, { headers });
+      }
 
       // A missing path that looks like an asset (has a file extension) is a
       // real 404 — e.g. a stale client asking for a chunk a newer deploy
@@ -983,7 +1004,7 @@ if (isProd) {
 
       // SPA fallback for /:property/day/:date, /:property/history, etc.
       return new Response(Bun.file(indexPath), {
-        headers: { "content-type": "text/html; charset=utf-8" },
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
       });
     },
   });

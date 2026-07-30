@@ -125,6 +125,9 @@ async function flush(): Promise<void> {
   }
 }
 
+let bootTimer: ReturnType<typeof setTimeout> | null = null;
+let intervalTimer: ReturnType<typeof setInterval> | null = null;
+
 export function startAnalyticsPushWorker(): void {
   if (!ENABLED) {
     console.log("[analytics-push] disabled (ANALYTICS_URL / ANALYTICS_TOKEN not set)");
@@ -132,8 +135,22 @@ export function startAnalyticsPushWorker(): void {
   }
   console.log(`[analytics-push] enabled -> ${URL_BASE}`);
   // First flush ~5s after boot so the server is fully up.
-  setTimeout(flush, 5_000);
-  setInterval(flush, 30_000);
+  bootTimer = setTimeout(flush, 5_000);
+  intervalTimer = setInterval(flush, 30_000);
+}
+
+/**
+ * Disarms the worker's timers. Tests that import server.ts (which arms the
+ * worker at module load) MUST call this immediately after import, or a
+ * flush firing mid-suite mutates the outbox under the assertions — exactly
+ * the race that kept CI red on GH runners while passing on faster local
+ * machines. Never called in production.
+ */
+export function stopAnalyticsPushWorker(): void {
+  if (bootTimer !== null) clearTimeout(bootTimer);
+  if (intervalTimer !== null) clearInterval(intervalTimer);
+  bootTimer = null;
+  intervalTimer = null;
 }
 
 // Test-only handles.

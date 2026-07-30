@@ -18,9 +18,10 @@ process.env.PROTECTED_MANAGER = "tester@thehfhotel.org";
 process.env.PORT = "0";
 // Enables the outbox (see analytics-push.ts's ENABLED gate) so enqueue
 // actually writes to the outbox table. The URL is deliberately unreachable
-// (port 1, refused instantly) — this suite only asserts enqueue, never a
-// live flush; a background flush attempt against it simply fails silently
-// (caught, recorded as last_error) without affecting these assertions.
+// (port 1) — this suite asserts enqueue only, never a live flush. The
+// worker's timers are disarmed right after import (see below); before that
+// disarm existed, the 5s boot flush fired mid-suite on slow CI runners and
+// mutated the outbox under the assertions.
 process.env.ANALYTICS_URL = "http://127.0.0.1:1";
 process.env.ANALYTICS_TOKEN = "test-analytics-token";
 
@@ -29,7 +30,12 @@ import { TENDERS } from "../shared/types.ts";
 import type { Category, CategoryKey, Tender } from "../shared/types.ts";
 
 const { api } = await import("./server.ts");
-const { _internal } = await import("./analytics-push.ts");
+const { _internal, stopAnalyticsPushWorker } = await import("./analytics-push.ts");
+// server.ts armed the worker at import (ENABLED is true here). Disarm it
+// NOW: on slow runners the 5s boot flush fires mid-suite and mutates the
+// outbox under these assertions — the exact race that kept CI red while
+// passing locally. This suite asserts enqueue only, never a live flush.
+stopAnalyticsPushWorker();
 
 const BASE = "http://localhost";
 

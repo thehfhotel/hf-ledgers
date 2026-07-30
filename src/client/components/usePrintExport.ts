@@ -67,13 +67,16 @@ export function usePrintExport({
         setPrintScale(null);
         setBusy("");
       });
-    } catch {
+    } catch (err) {
       // window.print() can throw (or printing can be disabled by policy).
       // Without this, `busy` sticks at "print" forever and BOTH buttons stay
       // disabled — same lesson as handlePdf's catch, learned the hard way.
+      console.error("print failed", err);
       setPrintScale(null);
       setBusy("");
-      setError("สั่งพิมพ์ไม่สำเร็จ ลองใหม่อีกครั้ง");
+      // Point at the working alternative, not just "try again" — a kiosk with
+      // a broken print path can still save the PDF and print that file.
+      setError("สั่งพิมพ์ไม่สำเร็จ — ลองใหม่ หรือกดปุ่ม PDF แล้วพิมพ์จากไฟล์แทน");
     }
   }
 

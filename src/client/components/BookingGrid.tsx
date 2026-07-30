@@ -2,6 +2,7 @@ import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "reac
 import { computeBookingTotals, lineArithmeticMismatch } from "../../shared/bookings.ts";
 import { parseAmountToSatang } from "../../shared/money.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
+import { shouldLeaveCell, stepColumn, stepRow } from "../../shared/gridNav.ts";
 import {
   BOOKING_NO_MAX_LEN,
   COUNT_MAX,
@@ -32,10 +33,11 @@ import {
 // bookingGridFrame.tsx because the printable day sheet renders the SAME
 // frame read-only — see components/ReportSheet.tsx.
 //
-// Deliberately NOT built: arrow-key grid navigation, a formula bar, range
-// selection, clipboard handling. Tab/Shift+Tab move between cells and Enter
-// moves DOWN the same column (Excel muscle memory); that is the whole
-// keyboard model.
+// Keyboard model: Tab/Shift+Tab move between cells, Enter moves DOWN the same
+// column, and the arrow keys move a cell in each direction (Excel muscle
+// memory). Left/Right only leave a cell once the caret is already at that
+// edge, so typing a guest name still works normally. Deliberately NOT built:
+// a formula bar, range selection, clipboard handling.
 
 /** Plain non-negative integer count (roomCount/nights), never money — a
  * lighter parse than shared money.ts's baht parser, clamped to COUNT_MAX. */
@@ -45,25 +47,78 @@ function parseCount(text: string): number | null {
   return Math.min(Number(trimmed), COUNT_MAX);
 }
 
-// ── Keyboard: Enter moves down the same column ───────────────────────────
+// ── Keyboard: Enter and the arrow keys move between cells ────────────────
 // Resolved by data attributes rather than refs so the blank bottom row (row
 // index = lines.length) is just "the next row down" with no special case.
+// The decisions that do not need the DOM live in shared/gridNav.ts.
 
-function gridEnter(event: ReactKeyboardEvent<HTMLInputElement>) {
-  if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
-  event.preventDefault();
+/** Left-to-right editable column order, the same order the cells are emitted
+ *  in below. Built from TENDERS so the money block can never drift out of
+ *  step with the printed sheet. */
+const NAV_COLUMNS: readonly string[] = [
+  "bookingNo",
+  "guestName",
+  "roomNo",
+  "roomCount",
+  "nights",
+  "grossRoomSatang",
+  "grossOtherSatang",
+  "discountSatang",
+  ...TENDERS,
+  "remark",
+];
+
+/** Focus the cell at (col,row) if it exists and is editable. Re-queried live
+ *  every time — an uncontrolled cell's <input> is replaced whenever its
+ *  committed value changes, so a cached ref would point at a dead node. */
+function focusCell(table: HTMLTableElement | null, col: string, row: number): boolean {
+  const next = table?.querySelector<HTMLInputElement>(`input[data-col="${col}"][data-row="${row}"]`);
+  if (!next || next.disabled) return false;
+  next.focus();
+  next.select();
+  // The grid scrolls inside its own box under a sticky header and footer, so
+  // plain focus() can park the row beneath one of them.
+  next.scrollIntoView({ block: "nearest", inline: "nearest" });
+  return true;
+}
+
+function gridKeys(event: ReactKeyboardEvent<HTMLInputElement>) {
+  // Thai IME: while a syllable is being composed the arrows belong to the
+  // candidate window, never to the grid.
+  if (event.nativeEvent.isComposing) return;
+  if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+
   const el = event.currentTarget;
   const col = el.dataset.col;
   const row = Number(el.dataset.row);
+  if (!col || Number.isNaN(row)) return;
   const table = el.closest("table");
-  const next = table?.querySelector<HTMLInputElement>(`input[data-col="${col}"][data-row="${row + 1}"]`);
-  if (next && !next.disabled) {
-    next.focus();
-    next.select();
+
+  if (event.key === "Enter" || event.key === "ArrowDown") {
+    event.preventDefault();
+    const target = stepRow(row, "down");
+    if (target !== null && focusCell(table, col, target)) return;
+    // Bottom of the column: commit in place (blur fires the save) and stay.
+    if (event.key === "Enter") el.blur();
     return;
   }
-  // Bottom of the column: commit in place (blur fires the save) and stay.
-  el.blur();
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    const target = stepRow(row, "up");
+    if (target !== null) focusCell(table, col, target);
+    return;
+  }
+
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    const dir = event.key === "ArrowLeft" ? "left" : "right";
+    // Inside the text, the arrow is the caret's — only step out at the edge.
+    if (!shouldLeaveCell(dir, el.selectionStart, el.selectionEnd, el.value.length)) return;
+    const target = stepColumn(col, dir, NAV_COLUMNS);
+    if (!target) return;
+    event.preventDefault();
+    focusCell(table, target, row);
+  }
 }
 
 // border-separate (not collapse) on purpose: collapsed borders are dropped
@@ -118,7 +173,7 @@ function TextCell({
       // group-booking room lists outrun any column width. The full value is
       // always intact in the field; this makes it readable without it.
       title={value ?? undefined}
-      onKeyDown={gridEnter}
+      onKeyDown={gridKeys}
       onChange={onDraftChange ? (e) => onDraftChange(e.target.value) : undefined}
       onBlur={(e) => {
         const trimmed = e.target.value.trim();
@@ -166,7 +221,7 @@ function CountCell({
       data-col={col}
       disabled={disabled}
       aria-label={ariaLabel}
-      onKeyDown={gridEnter}
+      onKeyDown={gridKeys}
       onBlur={(e) => {
         const next = parseCount(e.target.value);
         if (next !== value) onCommit(next);
@@ -210,7 +265,7 @@ function MoneyCell({
         setEditing(true);
       }}
       onChange={(e) => setDraft(e.target.value)}
-      onKeyDown={gridEnter}
+      onKeyDown={gridKeys}
       onBlur={() => {
         setEditing(false);
         const parsed = parseAmountToSatang(draft) ?? 0;
@@ -271,7 +326,9 @@ interface BookingGridProps {
   lines: BookingLine[];
   disabled: boolean;
   onPatch: (line: BookingLine, patch: BookingLineInput) => void;
-  onCreate: (input: BookingLineInput) => void;
+  /** Resolves false when the row could not be saved, so the typed values can
+   *  be put back in the blank row instead of being lost. */
+  onCreate: (input: BookingLineInput) => void | Promise<boolean>;
   onDelete: (line: BookingLine) => void;
 }
 
@@ -283,6 +340,7 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
   // The draft lives in a ref as well as state: a cell's own onBlur and the
   // row's bubbling onBlur run in the SAME event, so the row handler would
   // otherwise read a pre-update copy and drop the last cell typed.
+  const gridRef = useRef<HTMLDivElement>(null);
   const draftRef = useRef<NewRowDraft>(emptyDraft());
   const [draft, setDraft] = useState<NewRowDraft>(draftRef.current);
   const newRow = lines.length;
@@ -328,13 +386,29 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
     draftRef.current = emptyDraft();
     setDraft(draftRef.current);
     clearRemarkDraft(NEW_ROW_REMARK_KEY);
-    onCreate({ ...pending, source: "manual", draft: false, sourceSheet: null });
+    const result = onCreate({ ...pending, source: "manual", draft: false, sourceSheet: null });
+    // The page inserts the row optimistically, so the blank row can clear at
+    // once. If the save then fails it says so — put the typed values back
+    // rather than leaving the operator retyping a booking from memory.
+    void Promise.resolve(result).then((ok) => {
+      if (ok === false && draftIsEmpty(draftRef.current)) {
+        draftRef.current = pending;
+        setDraft(pending);
+      }
+    });
+  }
+
+  /** The blank bottom row is the "new row" — this just puts the caret in it.
+   *  Creation still happens the Excel way, when the row is left. */
+  function focusNewRow() {
+    const table = gridRef.current?.querySelector("table") ?? null;
+    focusCell(table, "bookingNo", newRow);
   }
 
   return (
     // The scrolling grid, plus the tripwire's warning bar under it. Children
     // keep the grid's own indentation — the wrapper is layout only.
-    <div className="flex flex-col">
+    <div className="flex flex-col" ref={gridRef}>
     {/* Height budgeted so the sticky header AND the pinned totals row are
         both on screen without scrolling the page — the rows scroll inside
         here instead. The floor keeps it usable on a short window. */}
@@ -483,6 +557,25 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
         <BookingGridFoot totals={totals} withActions sticky />
       </table>
     </div>
+
+    {/* The blank bottom row is easy to miss on a full sheet, so name it. The
+        button only moves the caret there — the row still becomes real when
+        it is left, so there is never a half-empty booking sitting in the
+        day. Hidden once the month is closed, like every other write. */}
+    {!disabled && (
+      <div className="flex items-center gap-2 border-t border-line px-4 py-2">
+        <button
+          type="button"
+          onClick={focusNewRow}
+          className="rounded-lg border border-brand-500 px-2.5 py-1 text-xs font-medium text-brand-500 hover:bg-brand-500 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+        >
+          + เพิ่มรายการจอง
+        </button>
+        <span className="text-xs text-ink-muted">
+          พิมพ์ในแถวว่างท้ายตาราง แล้วออกจากแถวเพื่อบันทึก
+        </span>
+      </div>
+    )}
 
     {/* The tripwire's full wording, once, where it cannot be clipped by the
         104px หมายเหตุ column. A warning only: the row is already saved and

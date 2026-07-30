@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { shiftDays } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
 import {
@@ -83,6 +83,12 @@ export function BookingDayPage({ property, date }: Props) {
   const [daySheet, setDaySheet] = useState<DaySheet | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isManager, setIsManager] = useState(false);
+  // Rows created optimistically: temp id -> the in-flight POST, so an edit
+  // landing before the server answers can wait for the real row (see
+  // addBookingLine / commitLinePatch). Counter keeps same-millisecond temp
+  // ids distinct.
+  const pendingCreates = useRef(new Map<number, Promise<BookingLine>>());
+  const tempIdCounter = useRef(0);
 
   useEffect(() => {
     if (isDemo) return;
@@ -159,44 +165,57 @@ export function BookingDayPage({ property, date }: Props) {
 
   // ── Booking lines ────────────────────────────────────────────────────
 
-  async function addBookingLine(input: BookingLineInput) {
+  async function addBookingLine(input: BookingLineInput): Promise<boolean> {
     const nextSeq = sortedLines.reduce((max, line) => Math.max(max, line.seq), 0) + 1;
-    if (isDemo) {
-      const localId = -Date.now();
-      setLines((prev) => [
-        ...(prev ?? []),
-        {
-          id: localId,
-          property: effectiveProperty,
-          date: effectiveDate,
-          seq: nextSeq,
-          bookingNo: null,
-          guestName: null,
-          roomNo: null,
-          roomCount: null,
-          nights: null,
-          grossRoomSatang: 0,
-          grossOtherSatang: 0,
-          discountSatang: 0,
-          tenders: { deposit: 0, cash: 0, credit_kbank: 0, credit_icbc: 0, transfer_kbank: 0, transfer_icbc: 0, web: 0, other: 0 },
-          remark: null,
-          source: "manual",
-          draft: false,
-          sourceSheet: null,
-          createdAt: "",
-          createdBy: "",
-          updatedAt: "",
-          updatedBy: "",
-          ...input,
-        },
-      ]);
-      return;
-    }
+    // The row appears NOW, carrying what was typed, and the POST settles it
+    // underneath. Without this the blank row is cleared synchronously while
+    // the real row only arrives a round trip later, so the booking visibly
+    // vanishes and comes back — the one mutation on this page that was not
+    // already optimistic. Temp ids are negative so they cannot collide with
+    // a server id, and a counter keeps two creates in the same millisecond
+    // apart.
+    const localId = -(Date.now() * 1000 + (tempIdCounter.current++ % 1000));
+    const optimistic: BookingLine = {
+      id: localId,
+      property: effectiveProperty,
+      date: effectiveDate,
+      seq: nextSeq,
+      bookingNo: null,
+      guestName: null,
+      roomNo: null,
+      roomCount: null,
+      nights: null,
+      grossRoomSatang: 0,
+      grossOtherSatang: 0,
+      discountSatang: 0,
+      tenders: { deposit: 0, cash: 0, credit_kbank: 0, credit_icbc: 0, transfer_kbank: 0, transfer_icbc: 0, web: 0, other: 0 },
+      remark: null,
+      source: "manual",
+      draft: false,
+      sourceSheet: null,
+      createdAt: "",
+      createdBy: "",
+      updatedAt: "",
+      updatedBy: "",
+      ...input,
+    };
+    setLines((prev) => [...(prev ?? []), optimistic]);
+    if (isDemo) return true;
+    // Editing a row whose POST is still in flight would otherwise PATCH a
+    // temp id and 404. Park the promise so commitLinePatch can wait for the
+    // real row instead.
+    const creating = createBookingLine(effectiveProperty, effectiveDate, input);
+    pendingCreates.current.set(localId, creating);
     try {
-      const created = await createBookingLine(effectiveProperty, effectiveDate, input);
-      setLines((prev) => [...(prev ?? []), created]);
+      const created = await creating;
+      setLines((prev) => (prev ?? []).map((l) => (l.id === localId ? created : l)));
+      return true;
     } catch (err) {
+      setLines((prev) => (prev ?? []).filter((l) => l.id !== localId));
       window.alert(err instanceof Error ? err.message : "เพิ่มรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
+      return false;
+    } finally {
+      pendingCreates.current.delete(localId);
     }
   }
 
@@ -204,8 +223,20 @@ export function BookingDayPage({ property, date }: Props) {
     const prevLines = lines;
     setLines((prev) => (prev ?? []).map((l) => (l.id === line.id ? { ...l, ...patch } : l)));
     if (isDemo) return;
+    // A negative id is a row still being created — wait for the server's real
+    // row and patch that instead of 404ing on the temp id.
+    let target = line;
+    if (line.id < 0) {
+      const creating = pendingCreates.current.get(line.id);
+      if (!creating) return;
+      try {
+        target = await creating;
+      } catch {
+        return; // the create already reported its own failure
+      }
+    }
     try {
-      const updated = await updateBookingLine(effectiveProperty, line.id, patch);
+      const updated = await updateBookingLine(effectiveProperty, target.id, patch);
       setLines((prev) => (prev ?? []).map((l) => (l.id === updated.id ? updated : l)));
     } catch (err) {
       setLines(prevLines);
@@ -439,7 +470,7 @@ export function BookingDayPage({ property, date }: Props) {
         <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
           <h2 className="text-sm font-semibold text-ink">รายการจอง</h2>
           <p className="text-xs text-ink-muted">
-            พิมพ์ในแถวว่างท้ายตารางเพื่อเพิ่มรายการใหม่ — Tab เลื่อนช่องถัดไป, Enter เลื่อนลงในคอลัมน์เดิม
+            พิมพ์ในแถวว่างท้ายตารางเพื่อเพิ่มรายการใหม่ — Tab เลื่อนช่องถัดไป, Enter เลื่อนลงในคอลัมน์เดิม, ปุ่มลูกศรเลื่อนขึ้น/ลง/ซ้าย/ขวา
           </p>
         </div>
         <BookingGrid

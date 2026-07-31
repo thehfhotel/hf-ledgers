@@ -144,6 +144,22 @@ box, and all three exports when nonzero; ปรับจาก overrides stay av
 contract update; analytics rollup unaffected (income cells only — verify). Opus money-review
 before ship. SEQUENCING: starts only after the hidden-row fix and the export-background fix
 land (same components — avoid a three-way tree collision).
+- Status: implemented (heldBackSatang/broughtForwardSatang on the cash block, one
+  deriveCashBlock formula, both page panels + gold-box print rows, 12 tests) + Opus-reviewed.
+  VERDICT: DO-NOT-SHIP as-is → fixes in flight: P0 clients re-send the MERGED entered
+  document so a materialized bankedSatang snapshot becomes a real override and swallows the
+  adjustment (fix: shared activeCashOverridePatch sending only genuine overrides + tests
+  that send real client bodies); P1 panel's under-lines still gross-based + api.md report
+  labeling stale; P3 bank line stale after income edits (income PUT to return cashBlock);
+  P4 adjustment inputs must stay enabled on closed months (server deliberately ungated);
+  P5 injection keyed on barCashSatang + AmountInput 0->null commit no-op. Side finding filed
+  as issue #2: deriveCashBlock counts itemized other-income only, dropping typed
+  รายการอื่นๆ เงินสด cells (pre-existing, print arithmetic doesn't close on such days).
+- ALL FIXES APPLIED AND SHIPPED: shared src/client/cashBlockPatches.ts (only genuine
+  overrides ever re-sent), client-simulated commit-sequence tests built from the production
+  patch builders, income PUT returns cashBlock, panel under-lines close on bankedShown,
+  adjustment inputs live on closed months, subsection rendering decoupled from field order,
+  explicit-0 commits via shouldCommitAmount. 462 tests.
 
 ## Shipping discipline
 

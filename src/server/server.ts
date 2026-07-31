@@ -42,7 +42,7 @@ import {
   updateExpenseItem,
   updateOtherIncomeItem,
 } from "./db.ts";
-import type { BookingLineInput } from "./db.ts";
+import type { BookingLineInput, SheetDay } from "./db.ts";
 import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
 import { fetchDayPayments, pmsConfigured } from "./pms-prefill.ts";
 import type { PrefillCandidate } from "./pms-prefill.ts";
@@ -65,7 +65,19 @@ import {
   TENDER_TO_CATEGORY_KEY,
   isProperty,
 } from "../shared/types.ts";
-import type { BookingLine, CategoryKey, DaySheet, DaySummary, Me, Property, Tender } from "../shared/types.ts";
+import type {
+  BookingLine,
+  CashBlock,
+  Category,
+  CategoryKey,
+  DaySheet,
+  DaySummary,
+  IncomeCell,
+  Me,
+  OtherIncomeItem,
+  Property,
+  Tender,
+} from "../shared/types.ts";
 
 const isProd = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT ?? 3000);
@@ -112,6 +124,30 @@ function loadDayData(property: Property, date: string) {
   const expenses = getExpensesForDay(property, date);
   const totals = computeDayTotals(categories, income, expenses);
   return { categories, otherIncomeItems, income, expenses, totals };
+}
+
+/**
+ * Composes a day's full CashBlock: reads the heldBack/broughtForward
+ * adjustment off `sheetDay` (see CashAdjustmentAmounts, shared/types.ts)
+ * and feeds it into deriveCashBlock() so it always participates in
+ * `derived.bankedSatang`, then layers the stored `CashBlockAmounts`
+ * override on top. The ONE path GET day (endpoint 7) and PUT cash-block
+ * (endpoint 21) both use — never recompute this arithmetic separately.
+ */
+function buildCashBlock(
+  categories: Category[],
+  income: Record<number, IncomeCell>,
+  otherIncomeItems: OtherIncomeItem[],
+  sheetDay: SheetDay | null,
+): CashBlock {
+  const derived = deriveCashBlock(
+    categories,
+    income,
+    otherIncomeItems,
+    sheetDay?.cashOverride.heldBackSatang ?? null,
+    sheetDay?.cashOverride.broughtForwardSatang ?? null,
+  );
+  return mergeCashBlockOverride(derived, sheetDay);
 }
 
 function isValidCount(n: unknown): n is number {
@@ -352,7 +388,6 @@ export const api = new Elysia({ prefix: "/api" })
 
     const { categories, otherIncomeItems, income, expenses, totals } = loadDayData(property, date);
     const sheetDay = getSheetDay(property, date);
-    const derived = deriveCashBlock(categories, income, otherIncomeItems);
 
     const sheet: DaySheet = {
       categories,
@@ -362,7 +397,7 @@ export const api = new Elysia({ prefix: "/api" })
       totals,
       bookingLineCount: countBookingLinesForDay(property, date),
       otherIncome: otherIncomeItems,
-      cashBlock: mergeCashBlockOverride(derived, sheetDay),
+      cashBlock: buildCashBlock(categories, income, otherIncomeItems, sheetDay),
       provenance: sheetDay?.provenance ?? "app",
       verifiedAt: sheetDay?.verifiedAt ?? null,
       verifiedBy: sheetDay?.verifiedBy ?? null,
@@ -406,8 +441,15 @@ export const api = new Elysia({ prefix: "/api" })
       touchSheetDay(property, date, by);
       enqueueAnalyticsPush(property, date);
 
-      const { income, totals } = loadDayData(property, date);
-      return { income, totals };
+      // P3 (Opus money-review, 2026-07-31): also returns the freshly
+      // recomputed cashBlock — room/bar cash and the two computed
+      // รายการอื่นๆ cells all feed straight into it, so without this the
+      // day page's "ยอดฝากจริง" bold line (and its print/PDF export) would
+      // go stale after every income edit until the next full day reload.
+      const dayData = loadDayData(property, date);
+      const sheetDay = getSheetDay(property, date);
+      const cashBlock = buildCashBlock(dayData.categories, dayData.income, dayData.otherIncomeItems, sheetDay);
+      return { income: dayData.income, totals: dayData.totals, cashBlock };
     },
     {
       body: t.Object({
@@ -774,9 +816,8 @@ export const api = new Elysia({ prefix: "/api" })
       setCashBlockOverride(property, date, body, identity!.email);
       enqueueAnalyticsPush(property, date);
       const { categories, otherIncomeItems, income } = loadDayData(property, date);
-      const derived = deriveCashBlock(categories, income, otherIncomeItems);
       const sheetDay = getSheetDay(property, date);
-      return mergeCashBlockOverride(derived, sheetDay);
+      return buildCashBlock(categories, income, otherIncomeItems, sheetDay);
     },
     {
       body: t.Union([
@@ -786,6 +827,12 @@ export const api = new Elysia({ prefix: "/api" })
           otherCashSatang: t.Optional(t.Number()),
           barCashSatang: t.Optional(t.Number()),
           bankedSatang: t.Optional(t.Number()),
+          // Deposit-machine reconciliation rows (docs/plan-unify-exports-
+          // tender-split.md item 6, Wave C) — see CashAdjustmentAmounts.
+          // Same absolute-replace body as the four fields above: present
+          // -> stored override, absent -> reset to "not recorded" (null).
+          heldBackSatang: t.Optional(t.Number()),
+          broughtForwardSatang: t.Optional(t.Number()),
         }),
       ]),
     },

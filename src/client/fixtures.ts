@@ -235,7 +235,15 @@ export const fixtureDaySheet: DaySheet = {
   totals: computeDayTotals(categories, income, expenses),
   bookingLineCount: fixtureBookingLines.length,
   otherIncome,
-  cashBlock: { derived: deriveCashBlock(categories, income, otherIncome), entered: null },
+  // No deposit-machine reconciliation adjustment in the demo data — the
+  // fixture's documented "sums to exactly the paper's printed total" note
+  // above must stay true.
+  cashBlock: {
+    derived: deriveCashBlock(categories, income, otherIncome),
+    entered: null,
+    heldBackSatang: null,
+    broughtForwardSatang: null,
+  },
   provenance: "app",
   verifiedAt: null,
   verifiedBy: null,

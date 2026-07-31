@@ -176,6 +176,33 @@ rows) twice in a row.
   fully-populated, ready-to-display object. The `derived` half is never
   stored — always recomputed via `deriveCashBlock()`
   (`src/shared/bookings.ts`).
+- **Deposit-machine reconciliation rows** (docs/plan-unify-exports-tender-
+  split.md item 6, Wave C, owner request 2026-07-31) — small change/coins
+  that can't always go into the deposit machine, so ยอดฝากจริง legitimately
+  differs from the day's raw cash total. Two more nullable columns on
+  **`sheet_days`**, same shape/persistence/audit as the cash-block override
+  above: `cash_held_back_satang` (today's cash held back — the owner's row
+  1, "เงินสดยังไม่ฝาก (เข้าตู้ไม่ได้)") and `cash_brought_forward_satang` (a
+  prior round's held-back cash deposited today — row 2, "เงินสดจากรอบก่อนที่
+  เข้าตู้ไม่ได้"). `null` = not recorded; an explicit `0` is meaningful and
+  distinct from `null` (never collapsed). They fold into `bankedSatang`
+  INSIDE `deriveCashBlock()`: `bankedSatang = roomCash + otherCash + barCash
+  - heldBackSatang + broughtForwardSatang` — subtract row 1, add row 2. An
+  explicit `entered.bankedSatang` override (above) still wins over this
+  computed figure, unchanged. Unlike the four `CashBlockAmounts` fields,
+  these two have **no `derived` counterpart** (there is nothing in the
+  day's income/expense data to derive them from — always a direct manual
+  entry), so on the wire they live directly on `CashBlock` as
+  `heldBackSatang`/`broughtForwardSatang: number | null` rather than inside
+  `derived`/`entered` (see `CashAdjustmentAmounts`, Shared types below).
+  `PUT .../cash-block`'s body accepts them as two more optional `number`
+  fields, same absolute-replace rule as the four above (present -> stored,
+  absent -> reset to `null`; a `null` body clears all six). **Not gated by
+  month close**, same reasoning as the cash-block override itself: a
+  reconciliation is exactly the thing still worth recording after a close.
+  Bounds: `AMOUNT_SATANG_MIN/MAX`, same as every other satang field — the
+  sign lives in the formula above, never in the stored value (both are
+  always non-negative).
 - **`sheet_days`** also gains nullable `verified_at`/`verified_by` (written
   by `PUT .../verify`) and `provenance` (TEXT, `NOT NULL DEFAULT 'app'` —
   every day this wave's write paths create is `"app"`; the Excel importer
@@ -300,7 +327,15 @@ Wave 2 additions:
 8. **`PUT /api/:property/day/:date/income/:categoryId`** — body
    `{ amountSatang: number | null, note?: string | null }`. `amountSatang`
    `null` or `0` DELETEs the cell (RDR empty-delete pattern). Upserts
-   `sheet_days` audit. → `{ income: DaySheet["income"], totals: DayTotals }`.
+   `sheet_days` audit. → `{ income: DaySheet["income"], totals: DayTotals,
+   cashBlock: CashBlock }`. **`cashBlock` is additive** (Opus money-review
+   P3, 2026-07-31): room/bar cash and the two computed รายการอื่นๆ cells
+   all feed `deriveCashBlock()`, so without returning it here the client's
+   cash-banking panel (and its print/PDF export) would read a stale
+   `cashBlock` after every income edit until the next full `GET day`.
+   Built the same way GET day (7) builds it — the stored heldBack/
+   broughtForward adjustment and any `CashBlockAmounts` override already
+   folded in.
 
 9. **`PUT /api/:property/day/:date/note`** — body `{ note: string | null }`
    → `{ note: string | null }`. Upserts `sheet_days`.
@@ -347,6 +382,25 @@ Wave 2 additions:
   (`cashExpenseSatang`), and the net (`cashToDepositSatang`). Do not collapse
   them back into one number under one label. No new field is needed:
   `cashIncomeSatang` already is the gross figure.
+
+  **Superseded in part by the deposit-machine reconciliation rows** (item 6
+  above, Wave C, Opus money-review 2026-07-31): `DaySheetPage.tsx`'s panel
+  header still lists the per-category cash rows (summing to
+  `cashIncomeSatang`, but no longer printed as an aggregate line of its
+  own), and its bold "(ยอดฝากจริง)" line is now `cashBlock.entered?.
+  bankedSatang ?? cashBlock.derived.bankedSatang` — **not**
+  `cashIncomeSatang` — since `bankedSatang` is the only figure that
+  reflects a till-count override or a heldBack/broughtForward adjustment.
+  The deduction line beneath it still reads `cashExpenseSatang` verbatim
+  (unaffected by either), but the net line below THAT is now computed
+  client-side as `bankedShown - cashExpenseSatang`, not the server's
+  `cashToDepositSatang` — the latter is gross-cash-derived and would
+  silently stop agreeing with the panel's own bold line once an override
+  or adjustment exists. `cashToDepositSatang` itself is unchanged
+  server-side (still `cashIncomeSatang - cashExpenseSatang`) and remains
+  the correct figure for any consumer that genuinely wants the un-adjusted
+  net — e.g. `GET .../days`'s `DaySummary.cashToDepositSatang`, which this
+  change does not touch.
 
 ## Wave 2 endpoints (built in `src/server/server.ts`)
 
@@ -426,9 +480,13 @@ thing still worth recording after a close.
     untouched (`skippedManual: true`) in both the preview and the apply.
 
 21. **`PUT /api/:property/day/:date/cash-block`** — body: any subset
-    of `CashBlockAmounts`, or `null` to clear the override entirely
-    (omitted/cleared fields fall back to `derived` for that field) →
-    `CashBlock`.
+    of `CashBlockAmounts` **plus** `CashAdjustmentAmounts`'s
+    `heldBackSatang`/`broughtForwardSatang` (the deposit-machine
+    reconciliation rows, item 6 above), or `null` to clear all six fields
+    entirely (omitted/cleared fields fall back to `derived` for the four
+    `CashBlockAmounts` fields, or to "not recorded" — `null` — for the two
+    adjustment fields) → `CashBlock`. NOT gated by month close (see item 6
+    above).
 
 22. **`PUT /api/:property/day/:date/verify`** — front desk signs off its own
     day, which is the whole point of the phase-2 "staff verify instead of
@@ -605,12 +663,12 @@ can rename categories), `TENDER_TO_CATEGORY_KEY` (the seven tenders that
 derive a category cell; `"other"` is deliberately absent — it becomes an
 itemized `OtherIncomeItem` instead), `Category` (now with `categoryKey`),
 `IncomeCell` (now with `source`/`manual`), `ExpenseItem`, `BookingLine`,
-`OtherIncomeItem`, `CashBlockAmounts`, `CashBlock`, `DayProvenance`,
+`OtherIncomeItem`, `CashBlockAmounts`, `CashAdjustmentAmounts`, `CashBlock`, `DayProvenance`,
 `DayTotals`, `BookingTotals`, `DaySheet`
 (see Wave 2 field additions above), `DaySummary` (now with
 `verified`/`provenance`), `Me`, plus the bounds constants above.
 
-`money.ts` (`formatSatang`, `parseAmountToSatang`), `totals.ts`
+`money.ts` (`formatSatang`, `parseAmountToSatang`, `shouldCommitAmount`), `totals.ts`
 (`computeDayTotals`), `bookings.ts` (`computeBookingTotals`,
 `deriveIncomeFromBookings`, `deriveCashBlock`, `lineArithmeticMismatch`,
 `RECONCILE_TOLERANCE_SATANG`) — same philosophy as `totals.ts`: the server

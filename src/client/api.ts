@@ -1,6 +1,7 @@
 import type {
   BookingLine,
   BookingTotals,
+  CashAdjustmentAmounts,
   CashBlock,
   CashBlockAmounts,
   Category,
@@ -98,12 +99,15 @@ export function getDay(property: Property, date: string): Promise<DaySheet> {
 }
 
 // 8. PUT /api/:property/day/:date/income/:categoryId
+// P3 (Opus money-review, 2026-07-31): response also carries the freshly
+// recomputed cashBlock (see api.md) — callers must merge it so the
+// day-page bank line never goes stale after an income-cell edit.
 export function putIncomeCell(
   property: Property,
   date: string,
   categoryId: number,
   body: { amountSatang: number | null; note?: string | null },
-): Promise<{ income: DaySheet["income"]; totals: DaySheet["totals"] }> {
+): Promise<{ income: DaySheet["income"]; totals: DaySheet["totals"]; cashBlock: DaySheet["cashBlock"] }> {
   return request(`/${property}/day/${date}/income/${categoryId}`, {
     method: "PUT",
     body: JSON.stringify(body),
@@ -241,10 +245,14 @@ export function fillFromBookings(
 }
 
 // 21. PUT /api/:property/day/:date/cash-block
+// body may also carry heldBackSatang/broughtForwardSatang (the deposit-
+// machine reconciliation rows, docs/plan-unify-exports-tender-split.md
+// item 6 — see CashAdjustmentAmounts) — same absolute-replace body as the
+// four CashBlockAmounts fields.
 export function putCashBlock(
   property: Property,
   date: string,
-  body: Partial<CashBlockAmounts> | null,
+  body: (Partial<CashBlockAmounts> & Partial<CashAdjustmentAmounts>) | null,
 ): Promise<CashBlock> {
   return request(`/${property}/day/${date}/cash-block`, {
     method: "PUT",

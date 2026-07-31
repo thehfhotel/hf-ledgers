@@ -97,13 +97,27 @@ export function deriveIncomeFromBookings(lines: BookingLine[]): Partial<Record<C
  * wrong on 75 days) because that one paper column mixes cash and
  * transfer/credit.
  *
+ * `heldBackSatang`/`broughtForwardSatang` (docs/plan-unify-exports-tender-
+ * split.md item 6, Wave C — see `CashAdjustmentAmounts` in types.ts) fold
+ * into `bankedSatang` here: small change that couldn't go into the deposit
+ * machine today is SUBTRACTED, and a prior round's held-back cash deposited
+ * today is ADDED — `bankedSatang = roomCash + otherCash + barCash -
+ * heldBackSatang + broughtForwardSatang`. `null` (not recorded) reads as 0
+ * in the formula, same as every other omitted-adjustment day. Both default
+ * to `null` so every pre-existing call site (no adjustment recorded)
+ * derives the exact same `bankedSatang` it always has.
+ *
  * Returns the `derived` half of a CashBlock; the caller layers a manager
- * `entered` override on top (see api.md `PUT .../cash-block`).
+ * `entered` override of `bankedSatang` itself on top (see api.md
+ * `PUT .../cash-block`) — that override still wins regardless of what this
+ * function computes.
  */
 export function deriveCashBlock(
   categories: Category[],
   income: Record<number, IncomeCell>,
   otherIncomeItems: OtherIncomeItem[],
+  heldBackSatang: number | null = null,
+  broughtForwardSatang: number | null = null,
 ): CashBlockAmounts {
   const categoryKeyByCategoryId = new Map(categories.map((category) => [category.id, category.categoryKey]));
 
@@ -123,7 +137,8 @@ export function deriveCashBlock(
     roomCashSatang,
     otherCashSatang,
     barCashSatang,
-    bankedSatang: roomCashSatang + otherCashSatang + barCashSatang,
+    bankedSatang:
+      roomCashSatang + otherCashSatang + barCashSatang - (heldBackSatang ?? 0) + (broughtForwardSatang ?? 0),
   };
 }
 

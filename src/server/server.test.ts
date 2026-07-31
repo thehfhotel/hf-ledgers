@@ -10,8 +10,9 @@ process.env.DEV_USER = "tester@thehfhotel.org";
 process.env.PORT = "0"; // let the OS pick a free port — avoids clashing with `bun run dev`
 
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../client/cashBlockPatches.ts";
 import { REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
-import type { Category, CategoryKey, Property, Tender } from "../shared/types.ts";
+import type { CashBlock, Category, CategoryKey, Property, Tender } from "../shared/types.ts";
 import type { PrefillCandidate } from "./pms-prefill.ts";
 
 const { api } = await import("./server.ts");
@@ -513,6 +514,284 @@ describe("day sheet amendments", () => {
 
     const cleared = await call<{ entered: unknown }>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, null);
     expect(cleared.body.entered).toBeNull();
+  });
+});
+
+// Deposit-machine reconciliation rows (docs/plan-unify-exports-tender-
+// split.md item 6, Wave C, owner request 2026-07-31): small change/coins
+// that couldn't go into the deposit machine. Own DATE, isolated from "day
+// sheet amendments" above, so month-close toggling here can't interact with
+// that describe's own tests.
+describe("cash-block deposit-machine adjustment (heldBackSatang/broughtForwardSatang)", () => {
+  const DATE = "2026-04-10";
+
+  test("round trip: persists, folds into derived.bankedSatang, and survives a GET", async () => {
+    await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, {
+      amountSatang: 50_000,
+      note: null,
+    });
+
+    const put = await call<{
+      derived: { bankedSatang: number };
+      entered: unknown;
+      heldBackSatang: number | null;
+      broughtForwardSatang: number | null;
+    }>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { heldBackSatang: 12_000, broughtForwardSatang: 8_500 });
+    expect(put.status).toBe(200);
+    expect(put.body.heldBackSatang).toBe(12_000);
+    expect(put.body.broughtForwardSatang).toBe(8_500);
+    expect(put.body.derived.bankedSatang).toBe(50_000 - 12_000 + 8_500);
+    // Neither field is a CashBlockAmounts field, so recording only these two
+    // never creates a phantom till-count override.
+    expect(put.body.entered).toBeNull();
+
+    const day = await call<{
+      cashBlock: {
+        derived: { bankedSatang: number };
+        heldBackSatang: number | null;
+        broughtForwardSatang: number | null;
+      };
+    }>("GET", `/${PROPERTY}/day/${DATE}`);
+    expect(day.body.cashBlock.heldBackSatang).toBe(12_000);
+    expect(day.body.cashBlock.broughtForwardSatang).toBe(8_500);
+    expect(day.body.cashBlock.derived.bankedSatang).toBe(50_000 - 12_000 + 8_500);
+  });
+
+  test("explicit 0 is stored and distinct from null (unset) — omitting a field resets it to null", async () => {
+    const zeroed = await call<{ heldBackSatang: number | null; broughtForwardSatang: number | null }>(
+      "PUT",
+      `/${PROPERTY}/day/${DATE}/cash-block`,
+      { heldBackSatang: 0, broughtForwardSatang: 8_500 },
+    );
+    expect(zeroed.body.heldBackSatang).toBe(0);
+    expect(zeroed.body.broughtForwardSatang).toBe(8_500);
+
+    // Absolute replace, same rule as the four CashBlockAmounts fields:
+    // heldBackSatang is absent from this body, so it resets to null.
+    const clearedOne = await call<{ heldBackSatang: number | null; broughtForwardSatang: number | null }>(
+      "PUT",
+      `/${PROPERTY}/day/${DATE}/cash-block`,
+      { broughtForwardSatang: 8_500 },
+    );
+    expect(clearedOne.body.heldBackSatang).toBeNull();
+    expect(clearedOne.body.broughtForwardSatang).toBe(8_500);
+  });
+
+  test("an explicit bankedSatang override still wins over the adjusted derived figure", async () => {
+    const res = await call<{
+      derived: { bankedSatang: number };
+      entered: { bankedSatang: number } | null;
+    }>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, {
+      heldBackSatang: 12_000,
+      broughtForwardSatang: 0,
+      bankedSatang: 999_999,
+    });
+    // derived still reflects the adjustment against the 50,000 room-cash
+    // income cell set by the first test in this describe...
+    expect(res.body.derived.bankedSatang).toBe(50_000 - 12_000 + 0);
+    // ...but entered.bankedSatang (the pre-existing override mechanism) is
+    // what every consumer actually reads (mergeCashBlockOverride in db.ts).
+    expect(res.body.entered?.bankedSatang).toBe(999_999);
+  });
+
+  test("negative amounts are rejected with 400 — the sign lives in the formula, never in the stored value", async () => {
+    const heldBack = await call("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { heldBackSatang: -100 });
+    expect(heldBack.status).toBe(400);
+
+    const broughtForward = await call("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { broughtForwardSatang: -1 });
+    expect(broughtForward.status).toBe(400);
+  });
+
+  test("NOT gated by month close — same rule as the existing cash-block override (api.md endpoint 21)", async () => {
+    const MONTH = "2026-04";
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+
+    const res = await call<{ heldBackSatang: number | null }>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, {
+      heldBackSatang: 5_000,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.heldBackSatang).toBe(5_000);
+
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+  });
+
+  test("clearing the adjustment alone does not disturb an active CashBlockAmounts override, and vice versa", async () => {
+    // Establish an override on one of the four fields alongside an
+    // adjustment in the same PUT (both fresh — this test's own baseline).
+    await call("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { roomCashSatang: 77_000, heldBackSatang: 3_000 });
+
+    // Re-sending the override field alone (mirrors clearCashAdjustment() in
+    // DaySheetPage.tsx/BookingDayPage.tsx — never a bare `null` body for
+    // this, or the override would be wiped too) clears ONLY the adjustment.
+    const clearedAdjustment = await call<{
+      entered: { roomCashSatang: number } | null;
+      heldBackSatang: number | null;
+      broughtForwardSatang: number | null;
+    }>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { roomCashSatang: 77_000 });
+    expect(clearedAdjustment.body.entered?.roomCashSatang).toBe(77_000);
+    expect(clearedAdjustment.body.heldBackSatang).toBeNull();
+    expect(clearedAdjustment.body.broughtForwardSatang).toBeNull();
+
+    // Re-establish the adjustment, then re-send it alone (mirrors
+    // clearCashOverride()'s adjustment-preserving branch) to clear ONLY the
+    // override.
+    await call("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { roomCashSatang: 77_000, heldBackSatang: 3_000 });
+    const clearedOverride = await call<{
+      entered: unknown;
+      heldBackSatang: number | null;
+    }>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { heldBackSatang: 3_000 });
+    expect(clearedOverride.body.entered).toBeNull();
+    expect(clearedOverride.body.heldBackSatang).toBe(3_000);
+  });
+});
+
+// P0 (Opus money-review, 2026-07-31): mergeCashBlockOverride() fully
+// populates `entered` (every field, including bankedSatang) the moment ANY
+// ONE of the four CashBlockAmounts fields is overridden — untouched fields
+// fall back to `derived` AT MERGE TIME. Blindly re-sending that merged
+// document in a later PUT (what every commit handler did before the fix)
+// stores the PRE-adjustment `bankedSatang` snapshot as a real, permanent
+// override, which then wins forever over any later recomputation. These
+// tests build each PUT body through the ACTUAL production helpers
+// (src/client/cashBlockPatches.ts) — the same functions DaySheetPage.tsx
+// and BookingDayPage.tsx import — starting from the FULL merged `entered`
+// document the previous response actually returned, never a hand-picked
+// "obviously correct" body. This is "what the client actually sends," proven
+// end to end through the real API.
+describe("client-simulated commit sequences (Opus money-review P0, 2026-07-31)", () => {
+  function bankedShown(cb: Pick<CashBlock, "derived" | "entered">): number {
+    return cb.entered?.bankedSatang ?? cb.derived.bankedSatang;
+  }
+
+  test("edit-after-override: override a component, record/correct held-back, override another component — the bank line always moves by the LIVE adjustment, never a stale snapshot", async () => {
+    const DATE = "2026-04-11";
+    await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, {
+      amountSatang: 50_000,
+      note: null,
+    });
+
+    // Step 1: override roomCashSatang (till-count correction, no
+    // adjustment recorded yet).
+    const step1 = await call<CashBlock>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { roomCashSatang: 60_000 });
+    expect(step1.status).toBe(200);
+    const bankedBeforeAdjustment = bankedShown(step1.body);
+    expect(bankedBeforeAdjustment).toBe(50_000); // bankedSatang was never itself overridden
+
+    // Step 2: record heldBackSatang = 30.00 baht. The client builds this
+    // PUT body from step1's FULL merged `entered` document (roomCashSatang
+    // overridden; otherCashSatang/barCashSatang/bankedSatang all present
+    // too, each having fallen back to derived) — proving the filtering
+    // actually strips the untouched fields rather than re-pinning them.
+    const step2Body = {
+      ...activeCashOverridePatch(step1.body),
+      ...activeCashAdjustmentPatch(step1.body),
+      heldBackSatang: 3_000,
+    };
+    expect(step2Body).toEqual({ roomCashSatang: 60_000, heldBackSatang: 3_000 });
+    const step2 = await call<CashBlock>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, step2Body);
+    // THE PROVEN BUG: pre-fix, this stayed at bankedBeforeAdjustment
+    // (unchanged) because the stale merged bankedSatang had been pinned as
+    // a permanent override.
+    expect(bankedShown(step2.body)).toBe(bankedBeforeAdjustment - 3_000);
+
+    // Step 3: override barCashSatang too (a second till-count correction,
+    // interleaved with the adjustment already in place).
+    await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("bar_cash")}`, {
+      amountSatang: 2_000,
+      note: null,
+    });
+    const step3Body = {
+      ...activeCashOverridePatch(step2.body),
+      ...activeCashAdjustmentPatch(step2.body),
+      barCashSatang: 5_000,
+    };
+    expect(step3Body).toEqual({ roomCashSatang: 60_000, heldBackSatang: 3_000, barCashSatang: 5_000 });
+    const step3 = await call<CashBlock>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, step3Body);
+    expect(bankedShown(step3.body)).toBe(50_000 + 2_000 - 3_000); // room + bar cash - held-back
+
+    // Step 4: correct the held-back figure from 30.00 to 40.00 baht — THE
+    // PROVEN BUG: pre-fix this went stale (still reflecting the OLD 30.00
+    // deduction) because re-sending the merged document each time kept
+    // re-pinning whatever bankedSatang snapshot existed at commit time.
+    const step4Body = {
+      ...activeCashOverridePatch(step3.body),
+      ...activeCashAdjustmentPatch(step3.body),
+      heldBackSatang: 4_000,
+    };
+    expect(step4Body).toEqual({ roomCashSatang: 60_000, barCashSatang: 5_000, heldBackSatang: 4_000 });
+    const step4 = await call<CashBlock>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, step4Body);
+    expect(bankedShown(step4.body)).toBe(50_000 + 2_000 - 4_000); // NOT stale at the old 30.00 deduction
+  });
+
+  test("clear-after-override: clearing the adjustment removes both its deduction AND its explanatory row, leaving the override untouched", async () => {
+    const DATE = "2026-04-12";
+    await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, {
+      amountSatang: 40_000,
+      note: null,
+    });
+
+    // Override roomCashSatang, then record a held-back adjustment on top.
+    const overridden = await call<CashBlock>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, {
+      roomCashSatang: 45_000,
+    });
+    const withAdjustment = await call<CashBlock>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, {
+      ...activeCashOverridePatch(overridden.body),
+      heldBackSatang: 5_000,
+    });
+    expect(bankedShown(withAdjustment.body)).toBe(40_000 - 5_000);
+
+    // clearCashAdjustment()'s exact body: the currently-active override
+    // patch, with the adjustment fields omitted entirely (never re-sent,
+    // not even as an explicit 0) — never a blind `entered` spread.
+    const clearBody = activeCashOverridePatch(withAdjustment.body);
+    expect(clearBody).toEqual({ roomCashSatang: 45_000 });
+    const cleared = await call<CashBlock>("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, clearBody);
+
+    // THE PROVEN BUG: pre-fix, the -5,000 deduction stayed baked into
+    // bankedSatang (a pinned stale snapshot) even after heldBackSatang
+    // itself went back to null — a deduction with no row left to explain
+    // it. Fixed: the bank line returns to its pre-adjustment figure...
+    expect(cleared.body.heldBackSatang).toBeNull();
+    expect(cleared.body.broughtForwardSatang).toBeNull();
+    expect(bankedShown(cleared.body)).toBe(40_000);
+    // ...while the unrelated till-count override survives untouched.
+    expect(cleared.body.entered?.roomCashSatang).toBe(45_000);
+  });
+});
+
+// P3 (Opus money-review, 2026-07-31): PUT income/:categoryId now also
+// returns the freshly recomputed cashBlock — without it, the day page's
+// "ยอดฝากจริง" bold line (and the print portal's export of it) went stale
+// after every income edit until the next full day reload.
+describe("PUT income cell response includes the recomputed cashBlock (Opus money-review P3, 2026-07-31)", () => {
+  const DATE = "2026-04-13";
+
+  test("cashBlock in the PUT income response reflects the just-written cash income immediately, without a follow-up GET", async () => {
+    const first = await call<{ cashBlock: { derived: { bankedSatang: number } } }>(
+      "PUT",
+      `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`,
+      { amountSatang: 30_000, note: null },
+    );
+    expect(first.status).toBe(200);
+    expect(first.body.cashBlock.derived.bankedSatang).toBe(30_000);
+
+    const second = await call<{ cashBlock: { derived: { bankedSatang: number } } }>(
+      "PUT",
+      `/${PROPERTY}/day/${DATE}/income/${categoryId("bar_cash")}`,
+      { amountSatang: 5_000, note: null },
+    );
+    expect(second.body.cashBlock.derived.bankedSatang).toBe(35_000);
+  });
+
+  test("an active heldBack/broughtForward adjustment still applies to the cashBlock returned by a PUT income response", async () => {
+    await call("PUT", `/${PROPERTY}/day/${DATE}/cash-block`, { heldBackSatang: 10_000 });
+    const res = await call<{
+      cashBlock: { derived: { bankedSatang: number }; heldBackSatang: number | null };
+    }>("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, { amountSatang: 50_000, note: null });
+    expect(res.body.cashBlock.heldBackSatang).toBe(10_000);
+    // 50,000 room (just written) + 5,000 bar (from the previous test) -
+    // 10,000 held back.
+    expect(res.body.cashBlock.derived.bankedSatang).toBe(50_000 + 5_000 - 10_000);
   });
 });
 

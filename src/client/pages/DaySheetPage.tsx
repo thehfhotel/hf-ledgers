@@ -8,6 +8,7 @@ import {
   NOTE_MAX_LEN,
   TENDER_TO_CATEGORY_KEY,
   type BookingLine,
+  type CashAdjustmentAmounts,
   type CashBlockAmounts,
   type Category,
   type CategoryKey,
@@ -15,7 +16,8 @@ import {
   type ExpenseItem,
   type Property,
 } from "../../shared/types.ts";
-import { CASH_BLOCK_FIELDS, PROVENANCE_LABELS_TH } from "../labels.ts";
+import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../cashBlockPatches.ts";
+import { CASH_ADJUSTMENT_FIELDS, CASH_BLOCK_FIELDS, PROVENANCE_LABELS_TH } from "../labels.ts";
 import {
   createExpense,
   deleteExpense,
@@ -281,6 +283,7 @@ export function DaySheetPage({ property, date }: Props) {
     if (!day) return;
     const prevIncome = day.income;
     const prevTotals = day.totals;
+    const prevCashBlock = day.cashBlock;
 
     const optimisticIncome = { ...day.income };
     if (satang === null || satang === 0) {
@@ -303,10 +306,21 @@ export function DaySheetPage({ property, date }: Props) {
     }));
 
     try {
+      // P3 (Opus money-review, 2026-07-31): PUT income also returns the
+      // freshly recomputed cashBlock (room/bar cash feed straight into it)
+      // — without merging it here, the bold "ยอดฝากจริง" line below (and
+      // this page's print/PDF export of it) would go stale on every income
+      // edit until the next full day reload.
       const res = await putIncomeCell(property, date, category.id, { amountSatang: satang });
-      applyLocal((prev) => ({ ...prev, income: res.income, totals: res.totals, ...touchAudit(prev) }));
+      applyLocal((prev) => ({
+        ...prev,
+        income: res.income,
+        totals: res.totals,
+        cashBlock: res.cashBlock,
+        ...touchAudit(prev),
+      }));
     } catch (err) {
-      applyLocal((prev) => ({ ...prev, income: prevIncome, totals: prevTotals }));
+      applyLocal((prev) => ({ ...prev, income: prevIncome, totals: prevTotals, cashBlock: prevCashBlock }));
       throw err;
     }
   }
@@ -315,11 +329,26 @@ export function DaySheetPage({ property, date }: Props) {
   // Same PUT .../cash-block endpoint and merge semantics BookingDayPage.tsx
   // already uses for its "**หมายเหตุ (สรุปเงินสด)" panel — surfaced here too
   // so a manager reviewing the day summary can see AND correct a till
-  // count without detouring to the bookings page. bankedSatang is
-  // deliberately left out of this editor: it stays BookingDayPage's own
-  // field, and this page's own gross/deduction/net lines (day.totals,
-  // per api.md "Report labeling") are computed independently and must not
-  // be re-derived from cashBlock here.
+  // count without detouring to the bookings page. bankedSatang itself is
+  // deliberately left out of THIS editor (it stays BookingDayPage's own
+  // field to type into directly) — but the panel's bold "ยอดฝากจริง" line
+  // below DOES read cashBlock.derived/entered.bankedSatang (see the JSX),
+  // so a room/other/bar override here still shows up there once bankedSatang
+  // itself is also overridden on BookingDayPage. day.totals (gross/
+  // deduction/net, per api.md "Report labeling") stay computed independently
+  // and are never re-derived from cashBlock.
+  //
+  // Every commit below re-sends ONLY the GENUINELY active fields on the
+  // other half — activeCashOverridePatch/activeCashAdjustmentPatch, shared
+  // with BookingDayPage.tsx via src/client/cashBlockPatches.ts — NEVER a
+  // blind `...cashBlock.entered` spread. `entered` is a fully-merged
+  // CashBlockAmounts the moment ANY field is overridden (every untouched
+  // field falls back to `derived` AT MERGE TIME), so re-sending it
+  // wholesale would store that PRE-adjustment `bankedSatang` snapshot as a
+  // real, permanent override — freezing the bank line against every later
+  // heldBack/broughtForward change (Opus money-review P0, 2026-07-31; see
+  // cashBlockPatches.ts's module doc for the three proven-broken sequences
+  // this fixes).
   async function commitCashOverrideField(field: keyof CashBlockAmounts, satang: number | null) {
     if (!day) return;
     const prevCashBlock = day.cashBlock;
@@ -327,7 +356,11 @@ export function DaySheetPage({ property, date }: Props) {
     const nextEntered: CashBlockAmounts = { ...baseline, [field]: satang ?? 0 };
     applyLocal((prev) => ({ ...prev, cashBlock: { ...prev.cashBlock, entered: nextEntered } }));
     try {
-      const res = await putCashBlock(property, date, nextEntered);
+      const res = await putCashBlock(property, date, {
+        ...activeCashOverridePatch(day.cashBlock),
+        [field]: satang ?? 0,
+        ...activeCashAdjustmentPatch(day.cashBlock),
+      });
       applyLocal((prev) => ({ ...prev, cashBlock: res, ...touchAudit(prev) }));
     } catch (err) {
       applyLocal((prev) => ({ ...prev, cashBlock: prevCashBlock }));
@@ -340,7 +373,53 @@ export function DaySheetPage({ property, date }: Props) {
     const prevCashBlock = day.cashBlock;
     applyLocal((prev) => ({ ...prev, cashBlock: { ...prev.cashBlock, entered: null } }));
     try {
-      const res = await putCashBlock(property, date, null);
+      // Scoped to the four till-count fields only: when an adjustment is
+      // also recorded, re-send it explicitly so this button — which only
+      // promises to clear the till-count override — doesn't silently wipe
+      // the held-back/brought-forward adjustment too.
+      const adjustment = activeCashAdjustmentPatch(day.cashBlock);
+      const res = await putCashBlock(property, date, Object.keys(adjustment).length > 0 ? adjustment : null);
+      applyLocal((prev) => ({ ...prev, cashBlock: res, ...touchAudit(prev) }));
+    } catch (err) {
+      applyLocal((prev) => ({ ...prev, cashBlock: prevCashBlock }));
+      window.alert(err instanceof Error ? err.message : "ล้างการปรับยอดไม่สำเร็จ");
+    }
+  }
+
+  // ── Cash adjustment (heldBackSatang/broughtForwardSatang) ─────────────
+  // Deposit-machine reconciliation rows (docs/plan-unify-exports-tender-
+  // split.md item 6, Wave C, owner request 2026-07-31): small change/coins
+  // that couldn't go into the deposit machine. Same endpoint/persistence as
+  // the override above, but deliberately does NOT pin the four till-count
+  // fields into existence — see CashAdjustmentAmounts (shared/types.ts):
+  // unlike those four, these two have no "derived" fallback worth freezing,
+  // so an adjustment-only edit must never create a phantom override
+  // (activeCashOverridePatch, never a blind `entered` spread — see the
+  // override section's comment above for why).
+  async function commitCashAdjustmentField(field: keyof CashAdjustmentAmounts, satang: number | null) {
+    if (!day) return;
+    const prevCashBlock = day.cashBlock;
+    const value = satang ?? 0;
+    applyLocal((prev) => ({ ...prev, cashBlock: { ...prev.cashBlock, [field]: value } }));
+    try {
+      const res = await putCashBlock(property, date, {
+        ...activeCashOverridePatch(day.cashBlock),
+        ...activeCashAdjustmentPatch(day.cashBlock),
+        [field]: value,
+      });
+      applyLocal((prev) => ({ ...prev, cashBlock: res, ...touchAudit(prev) }));
+    } catch (err) {
+      applyLocal((prev) => ({ ...prev, cashBlock: prevCashBlock }));
+      throw err;
+    }
+  }
+
+  async function clearCashAdjustment() {
+    if (!day) return;
+    const prevCashBlock = day.cashBlock;
+    applyLocal((prev) => ({ ...prev, cashBlock: { ...prev.cashBlock, heldBackSatang: null, broughtForwardSatang: null } }));
+    try {
+      const res = await putCashBlock(property, date, activeCashOverridePatch(day.cashBlock));
       applyLocal((prev) => ({ ...prev, cashBlock: res, ...touchAudit(prev) }));
     } catch (err) {
       applyLocal((prev) => ({ ...prev, cashBlock: prevCashBlock }));
@@ -657,10 +736,26 @@ export function DaySheetPage({ property, date }: Props) {
 
   const hasOtherIncomeItems = day.otherIncome.length > 0;
 
-  // bankedSatang is BookingDayPage.tsx's own field (see the
-  // commitCashOverrideField comment above) — this page edits only the
-  // three components that roll up into it.
+  // bankedSatang itself is BookingDayPage.tsx's own field to type an
+  // override INTO (see the commitCashOverrideField comment above) — this
+  // page edits only the three components that roll up into it, plus the
+  // heldBack/broughtForward adjustment below. The bold "ยอดฝากจริง" line
+  // further down still READS bankedSatang (entered wins over derived), the
+  // same figure BookingDayPage's cash panel and every print/export show —
+  // see reportSheetBlocks.tsx's DayTenderSummary for the identical reading.
   const cashOverrideFields = CASH_BLOCK_FIELDS.filter((field) => field.key !== "bankedSatang");
+  const bankedDerived = day.cashBlock.derived.bankedSatang;
+  const bankedEntered = day.cashBlock.entered?.bankedSatang;
+  const bankedShown = bankedEntered ?? bankedDerived;
+  const bankedOverridden = bankedEntered != null && bankedEntered !== bankedDerived;
+  // P1 (Opus money-review, 2026-07-31): the two lines under the bold
+  // ยอดฝากจริง must close the printed arithmetic — หัก รายจ่ายเงินสดวันนี้ /
+  // คงเหลือสุทธิ read off bankedShown (the actual figure just displayed,
+  // override AND adjustment included), never day.totals.cashExpenseSatang/
+  // cashToDepositSatang, which are gross-cash-derived and would silently
+  // stop matching once either exists — these two never disagree with the
+  // panel's own bold line above them.
+  const bankedNetOfCashExpenseSatang = bankedShown - day.totals.cashExpenseSatang;
 
   return (
     <div className="flex flex-col gap-4 pb-10">
@@ -882,7 +977,11 @@ export function DaySheetPage({ property, date }: Props) {
         {/* Panel สรุปเงินสดฝากเข้าบัญชี (tint background) — three distinct,
             separately labeled lines per api.md "Report labeling": the
             paper's own line is the GROSS cash income actually banked; it must
-            never collapse into the netted figure beneath it. */}
+            never collapse into the netted figure beneath it. The bold
+            "ยอดฝากจริง" line below is a DIFFERENT figure again — the actual
+            deposit after the till-count override and the deposit-machine
+            adjustment below (cashBlock.bankedSatang), not the gross rows'
+            simple sum. */}
         <section className="rounded-lg border border-line bg-tint p-4">
           <h2 className="mb-2 text-sm font-semibold text-ink">สรุปเงินสดฝากเข้าบัญชี</h2>
           {cashIncomeRows.length === 0 && day.totals.cashExpenseSatang === 0 ? (
@@ -946,9 +1045,56 @@ export function DaySheetPage({ property, date }: Props) {
             })}
           </div>
 
+          {/* Deposit-machine reconciliation ("adjusting") subsection —
+              docs/plan-unify-exports-tender-split.md item 6, Wave C, owner
+              request 2026-07-31: small change/coins that can't always go
+              into the deposit machine. Same always-rendered rule as the
+              override subsection above (a recorded adjustment, including a
+              deliberate 0.00, must stay visible/editable), with its OWN
+              clear affordance scoped to just these two fields — clearing
+              the till-count override above must never silently wipe this
+              one, and vice versa (see clearCashAdjustment/
+              clearCashOverride). */}
+          <div className="mt-2 flex flex-col gap-2 border-t border-line-strong pt-2 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xs font-semibold text-ink-muted">ปรับยอดฝากจริง (เงินสดเข้าตู้ไม่ได้)</h3>
+              {(day.cashBlock.heldBackSatang != null || day.cashBlock.broughtForwardSatang != null) && (
+                <button
+                  type="button"
+                  onClick={clearCashAdjustment}
+                  className="rounded-md text-xs font-medium text-brand-500 hover:underline focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                >
+                  ล้างการปรับยอด
+                </button>
+              )}
+            </div>
+            {CASH_ADJUSTMENT_FIELDS.map(({ key, label }) => (
+              <div key={key} className="flex items-center justify-between gap-3">
+                <span className="text-ink">{label}</span>
+                <AmountInput
+                  value={day.cashBlock[key]}
+                  onCommit={(satang) => commitCashAdjustmentField(key, satang)}
+                  ariaLabel={label}
+                  // P4 (Opus money-review, 2026-07-31): NOT disabled on a
+                  // closed month, unlike the four pre-existing override
+                  // fields above — the server deliberately never gates this
+                  // endpoint (api.md endpoint 21) because a reconciliation
+                  // is exactly the thing still worth recording after a
+                  // close, same reasoning as the day note.
+                  zeroIsMeaningful
+                />
+              </div>
+            ))}
+          </div>
+
           <div className="mt-2 flex items-center justify-between gap-3 border-t border-line-strong pt-2 text-base font-bold text-brand-500">
-            <span>สรุปเงินสดฝากเข้าบัญชี (ยอดฝากจริง)</span>
-            <span className="tabular-nums">{formatSatang(day.totals.cashIncomeSatang)}</span>
+            <span>
+              สรุปเงินสดฝากเข้าบัญชี (ยอดฝากจริง)
+              {bankedOverridden && (
+                <span className="ml-1.5 text-xs font-normal text-ink-muted">(ปรับจาก {formatSatang(bankedDerived)})</span>
+              )}
+            </span>
+            <span className="tabular-nums">{formatSatang(bankedShown)}</span>
           </div>
           <div className="mt-2 flex items-center justify-between gap-3 border-t border-dotted border-line-strong pt-2 text-xs text-ink-muted">
             <span>หัก รายจ่ายเงินสดวันนี้ (ไม่ได้หักออกจากยอดฝากข้างต้น)</span>
@@ -956,7 +1102,7 @@ export function DaySheetPage({ property, date }: Props) {
           </div>
           <div className="mt-0.5 flex items-center justify-between gap-3 text-xs font-medium text-ink-muted">
             <span>คงเหลือสุทธิหลังหักรายจ่ายเงินสด (ข้อมูลอ้างอิง)</span>
-            <span className="tabular-nums">{formatSatang(day.totals.cashToDepositSatang)}</span>
+            <span className="tabular-nums">{formatSatang(bankedNetOfCashExpenseSatang)}</span>
           </div>
         </section>
 

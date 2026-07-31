@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { PROPERTIES, TENDERS } from "../shared/types.ts";
 import type {
   BookingLine,
+  CashAdjustmentAmounts,
   CashBlock,
   CashBlockAmounts,
   Category,
@@ -185,6 +186,13 @@ export function migrate(): void {
   addColumnIfMissing("sheet_days", "cash_other_satang", "INTEGER");
   addColumnIfMissing("sheet_days", "cash_bar_satang", "INTEGER");
   addColumnIfMissing("sheet_days", "banked_cash_satang", "INTEGER");
+  // Deposit-machine reconciliation rows (docs/plan-unify-exports-tender-
+  // split.md item 6, Wave C) — same nullable-column-on-sheet_days shape as
+  // the four cash-override columns above, persisted/audited/merged the
+  // same way (setCashBlockOverride/mergeCashBlockOverride), but with no
+  // "derived" counterpart: see CashAdjustmentAmounts in shared/types.ts.
+  addColumnIfMissing("sheet_days", "cash_held_back_satang", "INTEGER");
+  addColumnIfMissing("sheet_days", "cash_brought_forward_satang", "INTEGER");
   addColumnIfMissing("sheet_days", "provenance", "TEXT NOT NULL DEFAULT 'app'");
   addColumnIfMissing("sheet_days", "verified_at", "TEXT");
   addColumnIfMissing("sheet_days", "verified_by", "TEXT");
@@ -900,6 +908,8 @@ interface SheetDayRow {
   cash_other_satang: number | null;
   cash_bar_satang: number | null;
   banked_cash_satang: number | null;
+  cash_held_back_satang: number | null;
+  cash_brought_forward_satang: number | null;
   provenance: string;
   verified_at: string | null;
   verified_by: string | null;
@@ -909,7 +919,16 @@ export interface SheetDay {
   note: string | null;
   updatedAt: string;
   updatedBy: string;
-  cashOverride: { roomCashSatang: number | null; otherCashSatang: number | null; barCashSatang: number | null; bankedSatang: number | null };
+  cashOverride: {
+    roomCashSatang: number | null;
+    otherCashSatang: number | null;
+    barCashSatang: number | null;
+    bankedSatang: number | null;
+    /** See CashAdjustmentAmounts (shared/types.ts) — no `derived`
+     * counterpart of their own, unlike the four fields above. */
+    heldBackSatang: number | null;
+    broughtForwardSatang: number | null;
+  };
   provenance: DayProvenance;
   verifiedAt: string | null;
   verifiedBy: string | null;
@@ -925,6 +944,8 @@ function toSheetDay(row: SheetDayRow): SheetDay {
       otherCashSatang: row.cash_other_satang,
       barCashSatang: row.cash_bar_satang,
       bankedSatang: row.banked_cash_satang,
+      heldBackSatang: row.cash_held_back_satang,
+      broughtForwardSatang: row.cash_brought_forward_satang,
     },
     provenance: row.provenance as DayProvenance,
     verifiedAt: row.verified_at,
@@ -936,7 +957,8 @@ export function getSheetDay(property: Property, date: string): SheetDay | null {
   const row = db
     .query<SheetDayRow, [string, string]>(
       `SELECT note, updated_at, updated_by, cash_room_satang, cash_other_satang, cash_bar_satang,
-              banked_cash_satang, provenance, verified_at, verified_by
+              banked_cash_satang, cash_held_back_satang, cash_brought_forward_satang,
+              provenance, verified_at, verified_by
        FROM sheet_days WHERE property = ? AND date = ?`,
     )
     .get(property, date);
@@ -945,11 +967,21 @@ export function getSheetDay(property: Property, date: string): SheetDay | null {
 
 /**
  * Merges a day's stored cash-block override (any subset of the four
- * fields, nullable meaning "use derived") on top of the freshly computed
- * `derived` half — see PUT .../cash-block in src/shared/api.md. Returns
- * `entered: null` when no field is overridden, otherwise a fully-populated
- * CashBlockAmounts (overridden fields from the override row, the rest
- * falling back to derived) so callers can read it wholesale.
+ * `CashBlockAmounts` fields, nullable meaning "use derived") on top of the
+ * freshly computed `derived` half — see PUT .../cash-block in
+ * src/shared/api.md. Returns `entered: null` when no `CashBlockAmounts`
+ * field is overridden, otherwise a fully-populated CashBlockAmounts
+ * (overridden fields from the override row, the rest falling back to
+ * derived) so callers can read it wholesale.
+ *
+ * `heldBackSatang`/`broughtForwardSatang` are copied straight through from
+ * the stored override onto the returned CashBlock, independent of
+ * `hasOverride` above — they have no `derived` fallback of their own (see
+ * CashAdjustmentAmounts), so there is nothing to "merge": `null` genuinely
+ * means not recorded. Callers must have already folded them into `derived`
+ * (via deriveCashBlock's own heldBackSatang/broughtForwardSatang
+ * parameters) before calling this — this function only surfaces them for
+ * display/edit, it does not recompute bankedSatang from them.
  */
 export function mergeCashBlockOverride(
   derived: CashBlockAmounts,
@@ -962,49 +994,74 @@ export function mergeCashBlockOverride(
       override.otherCashSatang !== null ||
       override.barCashSatang !== null ||
       override.bankedSatang !== null);
-  if (!hasOverride || !override) return { derived, entered: null };
+  const entered =
+    !hasOverride || !override
+      ? null
+      : {
+          roomCashSatang: override.roomCashSatang ?? derived.roomCashSatang,
+          otherCashSatang: override.otherCashSatang ?? derived.otherCashSatang,
+          barCashSatang: override.barCashSatang ?? derived.barCashSatang,
+          bankedSatang: override.bankedSatang ?? derived.bankedSatang,
+        };
 
   return {
     derived,
-    entered: {
-      roomCashSatang: override.roomCashSatang ?? derived.roomCashSatang,
-      otherCashSatang: override.otherCashSatang ?? derived.otherCashSatang,
-      barCashSatang: override.barCashSatang ?? derived.barCashSatang,
-      bankedSatang: override.bankedSatang ?? derived.bankedSatang,
-    },
+    entered,
+    heldBackSatang: override?.heldBackSatang ?? null,
+    broughtForwardSatang: override?.broughtForwardSatang ?? null,
   };
 }
 
 /**
  * Replaces the whole cash-block override in one shot: fields present in
- * `patch` become the stored override, fields absent fall back to derived
+ * `patch` become the stored override, fields absent fall back to derived —
+ * or, for `heldBackSatang`/`broughtForwardSatang`, to "not recorded" —
  * (stored as NULL) — see PUT .../cash-block. `patch: null` clears every
- * field. Upserts sheet_days so a day with no other activity yet can still
- * carry a manager's override.
+ * field, both the four `CashBlockAmounts` overrides AND the two adjustment
+ * fields (callers that mean to clear only one half must re-send the other
+ * half's current values explicitly — see DaySheetPage.tsx/
+ * BookingDayPage.tsx's clearCashOverride()/clearCashAdjustment()). Upserts
+ * sheet_days so a day with no other activity yet can still carry a
+ * manager's override.
  */
 export function setCashBlockOverride(
   property: Property,
   date: string,
-  patch: Partial<CashBlockAmounts> | null,
+  patch: (Partial<CashBlockAmounts> & Partial<CashAdjustmentAmounts>) | null,
   by: string,
 ): void {
   const roomCashSatang = patch?.roomCashSatang ?? null;
   const otherCashSatang = patch?.otherCashSatang ?? null;
   const barCashSatang = patch?.barCashSatang ?? null;
   const bankedSatang = patch?.bankedSatang ?? null;
+  const heldBackSatang = patch?.heldBackSatang ?? null;
+  const broughtForwardSatang = patch?.broughtForwardSatang ?? null;
 
   db.prepare(
     `INSERT INTO sheet_days (property, date, note, updated_at, updated_by,
-       cash_room_satang, cash_other_satang, cash_bar_satang, banked_cash_satang)
-     VALUES (?, ?, NULL, datetime('now'), ?, ?, ?, ?, ?)
+       cash_room_satang, cash_other_satang, cash_bar_satang, banked_cash_satang,
+       cash_held_back_satang, cash_brought_forward_satang)
+     VALUES (?, ?, NULL, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (property, date) DO UPDATE SET
        updated_at = excluded.updated_at,
        updated_by = excluded.updated_by,
        cash_room_satang = excluded.cash_room_satang,
        cash_other_satang = excluded.cash_other_satang,
        cash_bar_satang = excluded.cash_bar_satang,
-       banked_cash_satang = excluded.banked_cash_satang`,
-  ).run(property, date, by, roomCashSatang, otherCashSatang, barCashSatang, bankedSatang);
+       banked_cash_satang = excluded.banked_cash_satang,
+       cash_held_back_satang = excluded.cash_held_back_satang,
+       cash_brought_forward_satang = excluded.cash_brought_forward_satang`,
+  ).run(
+    property,
+    date,
+    by,
+    roomCashSatang,
+    otherCashSatang,
+    barCashSatang,
+    bankedSatang,
+    heldBackSatang,
+    broughtForwardSatang,
+  );
 }
 
 /** Sets or clears a day's verification stamp. Any authenticated user may

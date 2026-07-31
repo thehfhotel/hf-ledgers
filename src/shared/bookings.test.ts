@@ -244,6 +244,58 @@ describe("deriveCashBlock", () => {
       bankedSatang: 0,
     });
   });
+
+  // Deposit-machine reconciliation rows (docs/plan-unify-exports-tender-
+  // split.md item 6, Wave C): bankedSatang = roomCash + otherCash + barCash
+  // - heldBackSatang + broughtForwardSatang. Every combination below reuses
+  // the SAME 56,000 satang cash total from the first test above
+  // (49,000 room + 2,000 bar + 5,000 other-cash) so only the adjustment's
+  // own effect varies.
+  describe("heldBackSatang/broughtForwardSatang adjustment", () => {
+    const income: Record<number, IncomeCell> = {
+      1: incomeCell(1, 49_000), // room cash
+      2: incomeCell(2, 2_000), // bar cash
+    };
+    const otherIncomeItems: OtherIncomeItem[] = [otherIncomeItem(5_000, true)];
+    const CASH_TOTAL_SATANG = 56_000;
+
+    test("neither set (default): bankedSatang is unaffected, same as no adjustment ever existed", () => {
+      const block = deriveCashBlock(categories, income, otherIncomeItems);
+      expect(block.bankedSatang).toBe(CASH_TOTAL_SATANG);
+    });
+
+    test("heldBackSatang only: subtracted from the cash total", () => {
+      const block = deriveCashBlock(categories, income, otherIncomeItems, 12_000, null);
+      expect(block.bankedSatang).toBe(CASH_TOTAL_SATANG - 12_000);
+      // The three components themselves are untouched by the adjustment —
+      // only the final bankedSatang figure moves.
+      expect(block.roomCashSatang).toBe(49_000);
+      expect(block.otherCashSatang).toBe(5_000);
+      expect(block.barCashSatang).toBe(2_000);
+    });
+
+    test("broughtForwardSatang only: added to the cash total", () => {
+      const block = deriveCashBlock(categories, income, otherIncomeItems, null, 8_500);
+      expect(block.bankedSatang).toBe(CASH_TOTAL_SATANG + 8_500);
+    });
+
+    test("both set: subtracts row 1 and adds row 2 in the same formula", () => {
+      const block = deriveCashBlock(categories, income, otherIncomeItems, 12_000, 8_500);
+      expect(block.bankedSatang).toBe(CASH_TOTAL_SATANG - 12_000 + 8_500);
+    });
+
+    test("explicit 0 for both behaves arithmetically identically to null (unset) for both", () => {
+      const withNulls = deriveCashBlock(categories, income, otherIncomeItems, null, null);
+      const withZeros = deriveCashBlock(categories, income, otherIncomeItems, 0, 0);
+      expect(withZeros.bankedSatang).toBe(withNulls.bankedSatang);
+      expect(withZeros.bankedSatang).toBe(CASH_TOTAL_SATANG);
+    });
+
+    test("a held-back amount larger than the cash total is allowed to go negative — the formula never clamps", () => {
+      const block = deriveCashBlock(categories, income, otherIncomeItems, CASH_TOTAL_SATANG + 1_000, null);
+      expect(block.bankedSatang).toBe(-1_000);
+    });
+  });
 });
 
 describe("lineArithmeticMismatch", () => {

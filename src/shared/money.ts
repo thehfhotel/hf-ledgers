@@ -26,3 +26,29 @@ export function parseAmountToSatang(input: string): number | null {
   if (!Number.isFinite(baht)) return null;
   return Math.round(baht * 100);
 }
+
+/**
+ * Whether `AmountInput` (components/AmountInput.tsx) should actually fire
+ * `onCommit` for a blur that parsed to `parsed`, given the field's current
+ * controlled `value`. Extracted as a pure function so this no-op decision
+ * — subtle, previously wrong for one real case — is unit-testable without
+ * a component-rendering harness (this repo has none).
+ *
+ * Income cells and expense lines (`zeroIsMeaningful` false) treat a
+ * committed 0 as equivalent to "empty" (the caller deletes the cell/row
+ * rather than storing a literal 0 — see `parseAmountToSatang`'s doc), so
+ * re-typing "0.00"/"0" into an already-empty field is a genuine no-op
+ * there. `zeroIsMeaningful` callers (the cash-block override/adjustment
+ * fields, `src/shared/types.ts` `CashBlockAmounts`/`CashAdjustmentAmounts`)
+ * must NOT get that normalization: an explicit 0 is a real, distinct value
+ * from "unset" there, so typing "0.00" into a previously-unset
+ * `zeroIsMeaningful` field must always fire `onCommit(0)` — applying the
+ * income-cell normalization made it compare equal to the unset `null`
+ * baseline and silently skip the commit entirely (Opus money-review P5,
+ * 2026-07-31).
+ */
+export function shouldCommitAmount(value: number | null, parsed: number | null, zeroIsMeaningful: boolean): boolean {
+  const prevNormalized = value ?? null;
+  const parsedNormalized = zeroIsMeaningful ? parsed : parsed === 0 ? null : parsed;
+  return parsedNormalized !== prevNormalized;
+}

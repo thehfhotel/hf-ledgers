@@ -233,6 +233,25 @@ export interface CashBlockAmounts {
 }
 
 /**
+ * The owner's deposit-machine reconciliation rows (docs/plan-unify-exports-
+ * tender-split.md item 6, Wave C, 2026-07-31): small change/coins can't
+ * always go into the deposit machine, so ยอดฝากจริง legitimately differs from
+ * the day's raw cash total. Layered on top of `CashBlockAmounts.bankedSatang`
+ * inside `deriveCashBlock()` (`bankedSatang = roomCash + otherCash + barCash
+ * - heldBackSatang + broughtForwardSatang`) — unlike the four
+ * `CashBlockAmounts` fields, these two have no `derived` counterpart of
+ * their own: there is nothing in the day's income/expense data to derive
+ * them FROM, they are always a direct manual entry. Used as the PUT
+ * .../cash-block body's optional extra fields (a plain `number` there, same
+ * as `CashBlockAmounts` fields) — `CashBlock`'s own copies are individually
+ * nullable instead (see below).
+ */
+export interface CashAdjustmentAmounts {
+  heldBackSatang: number;
+  broughtForwardSatang: number;
+}
+
+/**
  * The paper's `**หมายเหตุ` cash-banking block. `derived` is always computed
  * server-side from the day's income cells + itemized other-income (see
  * `deriveCashBlock()` in bookings.ts). `entered` is a manager's override of
@@ -241,10 +260,23 @@ export interface CashBlockAmounts {
  * Consumers read `entered ?? derived` per field (or treat a non-null
  * `entered` as authoritative wholesale); see api.md
  * `PUT /:property/day/:date/cash-block`.
+ *
+ * `heldBackSatang`/`broughtForwardSatang` (see `CashAdjustmentAmounts`) are
+ * persisted and audited the SAME way (same endpoint, same `sheet_days` row,
+ * NOT gated by month close), but sit outside the derived/entered pair since
+ * they have no `derived` fallback of their own: `null` = not recorded, an
+ * explicit `0` is meaningful (never collapsed to `null` — same
+ * `AmountInput` `zeroIsMeaningful` convention as the four fields above).
+ * They already participate in `derived.bankedSatang` (and therefore in
+ * `entered.bankedSatang` whenever that field itself isn't separately
+ * overridden) by the time this reaches a consumer — nothing downstream
+ * needs to apply the formula itself.
  */
 export interface CashBlock {
   derived: CashBlockAmounts;
   entered: CashBlockAmounts | null;
+  heldBackSatang: number | null;
+  broughtForwardSatang: number | null;
 }
 
 /**

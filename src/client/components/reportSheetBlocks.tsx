@@ -7,7 +7,7 @@ import {
   type DaySheet,
   type Property,
 } from "../../shared/types.ts";
-import { CASH_BLOCK_FIELDS, PROVENANCE_LABELS_TH } from "../labels.ts";
+import { CASH_ADJUSTMENT_FIELDS, CASH_BLOCK_FIELDS, PROVENANCE_LABELS_TH } from "../labels.ts";
 import {
   GRAND_TOTAL_LABEL_TH,
   groupDayIncomeForPrint,
@@ -225,6 +225,20 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
       }))
     : [];
 
+  // Deposit-machine reconciliation rows (docs/plan-unify-exports-tender-
+  // split.md item 6, Wave C) — print ONLY the rows that are actually
+  // nonzero (an unset/zero row is nothing to reconcile), each signed so the
+  // printed arithmetic reads top-to-bottom into ยอดฝากจริง below: row 1
+  // (heldBackSatang) SUBTRACTS, row 2 (broughtForwardSatang) ADDS — see
+  // deriveCashBlock() in shared/bookings.ts, the ONE place this formula is
+  // computed.
+  const cashAdjustmentRows = CASH_ADJUSTMENT_FIELDS.map((field) => ({
+    key: field.key,
+    label: field.label,
+    amountSatang: cashBlock[field.key] ?? 0,
+    sign: field.key === "heldBackSatang" ? ("-" as const) : ("+" as const),
+  })).filter((row) => row.amountSatang > 0);
+
   // The chart bar for `date` always reflects the LIVE sheet totals, never
   // the possibly-stale value the caller's listDays() fetch captured at load
   // time (see printWeekChart.ts's overrideDayIncome) — editing income and
@@ -360,6 +374,22 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
                   </span>
                   <span className="text-sm tabular-nums whitespace-nowrap text-ink">
                     {formatSatang(row.entered)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Deposit-machine reconciliation rows — same visibility rule as
+              overriddenCashComponents above: silent when both are
+              zero/unset, printed with an obvious sign otherwise so the
+              arithmetic into ยอดฝากจริง below reads top-to-bottom. */}
+          {cashAdjustmentRows.length > 0 && (
+            <div className="mb-1.5 flex flex-col gap-0.5 border-b border-line pb-1.5">
+              {cashAdjustmentRows.map((row) => (
+                <div key={row.key} className="flex items-baseline justify-between gap-3">
+                  <span className="text-sm text-ink">{row.label}</span>
+                  <span className="text-sm tabular-nums whitespace-nowrap text-ink">
+                    {row.sign} {formatSatang(row.amountSatang)}
                   </span>
                 </div>
               ))}

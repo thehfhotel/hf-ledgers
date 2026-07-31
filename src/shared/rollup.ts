@@ -32,11 +32,11 @@ import type { Category, CategoryKey, DayProvenance, ExpenseItem, IncomeCell, Pro
 export interface IncomeLedgerRollup {
   property: Property;
   date: string;
-  /** Keyed by the eleven CategoryKey values. A key with a zero amount is
+  /** Keyed by the fourteen CategoryKey values. A key with a zero amount is
    * omitted entirely — the wire contract never sends an explicit 0. */
   amounts: Partial<Record<CategoryKey, number>>;
   /** Satang landed on a manager-created category (category_key IS NULL
-   * upstream) — these don't map to any of the eleven CategoryKeys. */
+   * upstream) — these don't map to any of the fourteen CategoryKeys. */
   uncategorizedSatang: number;
   /** Always sum(amounts) + uncategorizedSatang. */
   totalSatang: number;

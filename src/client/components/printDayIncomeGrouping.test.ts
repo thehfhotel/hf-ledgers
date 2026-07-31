@@ -38,11 +38,13 @@ function makeCell(categoryId: number, amountSatang: number, overrides: Partial<I
   };
 }
 
-// The eleven standard categories, seeded verbatim from server/db.ts's
+// The fourteen standard categories, seeded verbatim from server/db.ts's
 // INCOME_SEED (nameTh + categoryKey), each with a distinctive amount so a
-// mis-grouped cell is easy to spot in a failing assertion.
+// mis-grouped cell is easy to spot in a failing assertion. Includes the
+// three เครดิต siblings split off มัดจำล่วงหน้า/รายการอื่นๆ โอน/บาร์น้ำ โอน
+// (Wave B, docs/plan-unify-exports-tender-split.md item 2).
 const STANDARD_CATEGORIES: Category[] = [
-  makeCategory({ id: 1, nameTh: "มัดจำล่วงหน้า", categoryKey: "deposit" }),
+  makeCategory({ id: 1, nameTh: "มัดจำล่วงหน้า โอน", categoryKey: "deposit" }),
   makeCategory({ id: 2, nameTh: "ค่าห้องเงินสด", categoryKey: "room_cash", isCash: true }),
   makeCategory({ id: 3, nameTh: "บัตรเครดิต/กสิกร", categoryKey: "credit_kbank" }),
   makeCategory({ id: 4, nameTh: "บัตรเครดิต ICBC", categoryKey: "credit_icbc" }),
@@ -50,9 +52,12 @@ const STANDARD_CATEGORIES: Category[] = [
   makeCategory({ id: 6, nameTh: "โอน ICBC", categoryKey: "transfer_icbc" }),
   makeCategory({ id: 7, nameTh: "เว็ปไซด์", categoryKey: "web" }),
   makeCategory({ id: 8, nameTh: "รายการอื่นๆ เงินสด", categoryKey: "other_cash", isCash: true }),
-  makeCategory({ id: 9, nameTh: "รายการอื่นๆ โอน/เครดิต", categoryKey: "other_transfer" }),
+  makeCategory({ id: 9, nameTh: "รายการอื่นๆ โอน", categoryKey: "other_transfer" }),
   makeCategory({ id: 10, nameTh: "บาร์น้ำ เงินสด", categoryKey: "bar_cash", isCash: true }),
-  makeCategory({ id: 11, nameTh: "บาร์น้ำ โอน/เครดิต", categoryKey: "bar_transfer" }),
+  makeCategory({ id: 11, nameTh: "บาร์น้ำ โอน", categoryKey: "bar_transfer" }),
+  makeCategory({ id: 12, nameTh: "มัดจำล่วงหน้า เครดิต", categoryKey: "deposit_credit" }),
+  makeCategory({ id: 13, nameTh: "รายการอื่นๆ เครดิต", categoryKey: "other_credit" }),
+  makeCategory({ id: 14, nameTh: "บาร์น้ำ เครดิต", categoryKey: "bar_credit" }),
 ];
 
 const STANDARD_INCOME: Record<number, IncomeCell> = {
@@ -67,6 +72,9 @@ const STANDARD_INCOME: Record<number, IncomeCell> = {
   9: makeCell(9, 7_000), // other_transfer
   10: makeCell(10, 2_000), // bar_cash
   11: makeCell(11, 3_000), // bar_transfer
+  12: makeCell(12, 4_000), // deposit_credit
+  13: makeCell(13, 1_000), // other_credit
+  14: makeCell(14, 6_000), // bar_credit
 };
 
 describe("groupDayIncomeForPrint", () => {
@@ -97,9 +105,15 @@ describe("groupDayIncomeForPrint", () => {
     expect(transfer.totalLabel).toBe("รวมเงินโอน");
 
     const card = grouped.groups[2]!;
-    expect(card.lines.map((l) => l.categoryKey)).toEqual(["credit_kbank", "credit_icbc"]);
-    expect(card.lines.map((l) => l.amountSatang)).toEqual([30_000, 20_000]);
-    expect(card.totalSatang).toBe(50_000);
+    expect(card.lines.map((l) => l.categoryKey)).toEqual([
+      "credit_kbank",
+      "credit_icbc",
+      "deposit_credit",
+      "other_credit",
+      "bar_credit",
+    ]);
+    expect(card.lines.map((l) => l.amountSatang)).toEqual([30_000, 20_000, 4_000, 1_000, 6_000]);
+    expect(card.totalSatang).toBe(30_000 + 20_000 + 4_000 + 1_000 + 6_000);
     expect(card.totalLabel).toBe("รวมบัตรเครดิต");
 
     const web = grouped.groups[3]!;

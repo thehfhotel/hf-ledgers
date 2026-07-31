@@ -190,6 +190,8 @@ export function migrate(): void {
   addColumnIfMissing("sheet_days", "verified_by", "TEXT");
 
   for (const property of PROPERTIES) seedIfEmpty(property);
+
+  migrateTransferCreditSplit();
 }
 
 /**
@@ -292,11 +294,154 @@ function migrateCategoryKeyColumn(): void {
   tx();
 }
 
+// ── โอน/เครดิต split (Wave B, docs/plan-unify-exports-tender-split.md item 2) ──
+// The paper's three mixed-tender categories (มัดจำล่วงหน้า, รายการอื่นๆ
+// โอน/เครดิต, บาร์น้ำ โอน/เครดิต) combined โอน+เครดิต in one input cell.
+// `deposit`/`other_transfer`/`bar_transfer` KEEP their key strings — history
+// stays under them untouched, no retro-split — but become โอน-only going
+// forward, so their name_th gets โอน-only wording; a new เครดิต sibling
+// category is seeded right after each. Additive, same shape as
+// backfillCategoryKeys above: safe to run on every boot, and a no-op once
+// applied (or on a fresh DB, whose INCOME_SEED is already pre-split).
+
+interface TransferCreditSplit {
+  transferKey: "deposit" | "other_transfer" | "bar_transfer";
+  /** The pre-split seed default — renaming only fires when name_th still
+   * equals this (whitespace-tolerant), so a manager's hand-set name is
+   * never clobbered. */
+  oldNameTh: string;
+  newTransferNameTh: string;
+  creditKey: "deposit_credit" | "other_credit" | "bar_credit";
+  creditNameTh: string;
+}
+
+const TRANSFER_CREDIT_SPLITS: readonly TransferCreditSplit[] = [
+  {
+    transferKey: "deposit",
+    oldNameTh: "มัดจำล่วงหน้า",
+    newTransferNameTh: "มัดจำล่วงหน้า โอน",
+    creditKey: "deposit_credit",
+    creditNameTh: "มัดจำล่วงหน้า เครดิต",
+  },
+  {
+    transferKey: "other_transfer",
+    oldNameTh: "รายการอื่นๆ โอน/เครดิต",
+    newTransferNameTh: "รายการอื่นๆ โอน",
+    creditKey: "other_credit",
+    creditNameTh: "รายการอื่นๆ เครดิต",
+  },
+  {
+    transferKey: "bar_transfer",
+    oldNameTh: "บาร์น้ำ โอน/เครดิต",
+    newTransferNameTh: "บาร์น้ำ โอน",
+    creditKey: "bar_credit",
+    creditNameTh: "บาร์น้ำ เครดิต",
+  },
+];
+
+/**
+ * True when an ACTIVE (archived_at IS NULL) category already holds
+ * `nameTh` for this (property, kind='income') — mirrors exactly the scope
+ * of `idx_categories_active_name` (the partial unique index above), so this
+ * returning false is the precise condition under which the corresponding
+ * INSERT/UPDATE is guaranteed not to violate it. `excludeId` lets a rename
+ * check ignore the row being renamed itself (renaming a row to the name it
+ * already has, or would-be-has, is never a real collision).
+ */
+function activeNameCollision(property: Property, nameTh: string, excludeId?: number): boolean {
+  const row = db
+    .query<{ id: number }, [string, string]>(
+      "SELECT id FROM categories WHERE property = ? AND kind = 'income' AND archived_at IS NULL AND name_th = ?",
+    )
+    .get(property, nameTh);
+  return row !== null && row.id !== excludeId;
+}
+
+/**
+ * Per property: renames a still-default `transferKey` category to its
+ * โอน-only wording, then seeds its เครดิต sibling immediately after it
+ * (shifting every later sort by +1, same splice pattern
+ * splitOtherIncomeCategory uses above). The sibling is seeded exactly once
+ * — guarded by `category_key` already existing at all (active or
+ * archived) for this property, never by name, so re-running this is a
+ * no-op once applied. If `transferKey`'s category is missing entirely
+ * (should not happen: the seed always creates it), the pair is skipped —
+ * nothing to split against.
+ *
+ * Collision safety: `idx_categories_active_name` is a UNIQUE index on
+ * (property, kind, name_th) for active rows. A manager can independently
+ * create/rename an income category to any of our six target names before
+ * this migration ever runs it — a rename or insert that collided with one
+ * would throw inside `migrate()`, which runs at module top level (see the
+ * bottom of this file): the process would die before `Bun.serve` ever
+ * starts, and `restart:unless-stopped` would crash-loop the container
+ * forever (empirically reproduced in review). Both the rename and the
+ * insert below are therefore collision-checked first and SKIP (never
+ * throw) when the target name is already active on a different row —
+ * logged so the gap is visible, not silently swallowed.
+ */
+function splitTransferCreditCategory(property: Property, split: TransferCreditSplit): void {
+  const row = db
+    .query<{ id: number; sort: number; name_th: string }, [string, string]>(
+      "SELECT id, sort, name_th FROM categories WHERE property = ? AND kind = 'income' AND category_key = ?",
+    )
+    .get(property, split.transferKey);
+  if (!row) return;
+
+  if (stripSpaces(row.name_th) === stripSpaces(split.oldNameTh)) {
+    if (activeNameCollision(property, split.newTransferNameTh, row.id)) {
+      console.log(
+        `[db] migrateTransferCreditSplit: property=${property} key=${split.transferKey} — an active category is already named "${split.newTransferNameTh}"; skipped the rename, left "${row.name_th}" as-is.`,
+      );
+    } else {
+      db.prepare("UPDATE categories SET name_th = ? WHERE id = ?").run(split.newTransferNameTh, row.id);
+    }
+  }
+
+  const alreadySeeded = db
+    .query<{ n: number }, [string, string]>("SELECT 1 AS n FROM categories WHERE property = ? AND category_key = ?")
+    .get(property, split.creditKey);
+  if (alreadySeeded) return;
+
+  if (activeNameCollision(property, split.creditNameTh)) {
+    console.log(
+      `[db] migrateTransferCreditSplit: property=${property} key=${split.creditKey} — an active category is already named "${split.creditNameTh}"; skipped seeding the เครดิต sibling (will retry next boot).`,
+    );
+    return;
+  }
+
+  db.prepare("UPDATE categories SET sort = sort + 1 WHERE property = ? AND kind = 'income' AND sort > ?").run(
+    property,
+    row.sort,
+  );
+  db.prepare(
+    `INSERT INTO categories (property, kind, name_th, sort, is_cash, category_key)
+     VALUES (?, 'income', ?, ?, 0, ?)`,
+  ).run(property, split.creditNameTh, row.sort + 1, split.creditKey);
+}
+
+/** Same succeed-or-fail-together reasoning as migrateCategoryKeyColumn: one
+ * transaction per boot so a crash mid-way never leaves one property (or one
+ * of the three pairs) split while another isn't. */
+function migrateTransferCreditSplit(): void {
+  const tx = db.transaction(() => {
+    for (const property of PROPERTIES) {
+      for (const split of TRANSFER_CREDIT_SPLITS) splitTransferCreditCategory(property, split);
+    }
+  });
+  tx();
+}
+
 // Paper order; isCash flags per src/shared/api.md "Data model". รายการอื่นๆ
 // is seeded pre-split into its cash/transfer pair (see "รายการอื่นๆ —
-// RESOLVED") so a fresh database never needs the split migration to run.
+// RESOLVED") so a fresh database never needs that split migration to run.
+// มัดจำล่วงหน้า/รายการอื่นๆ โอน/บาร์น้ำ โอน are likewise seeded pre-split from
+// their เครดิต sibling (see "โอน/เครดิต split" below, item 2 of
+// docs/plan-unify-exports-tender-split.md) — a fresh database never needs
+// TRANSFER_CREDIT_SPLITS to run either.
 const INCOME_SEED: ReadonlyArray<{ nameTh: string; isCash: boolean; categoryKey: CategoryKey }> = [
-  { nameTh: "มัดจำล่วงหน้า", isCash: false, categoryKey: "deposit" },
+  { nameTh: "มัดจำล่วงหน้า โอน", isCash: false, categoryKey: "deposit" },
+  { nameTh: "มัดจำล่วงหน้า เครดิต", isCash: false, categoryKey: "deposit_credit" },
   { nameTh: "ค่าห้องเงินสด", isCash: true, categoryKey: "room_cash" },
   { nameTh: "บัตรเครดิต/กสิกร", isCash: false, categoryKey: "credit_kbank" },
   { nameTh: "บัตรเครดิต ICBC", isCash: false, categoryKey: "credit_icbc" },
@@ -304,9 +449,11 @@ const INCOME_SEED: ReadonlyArray<{ nameTh: string; isCash: boolean; categoryKey:
   { nameTh: "โอน ICBC", isCash: false, categoryKey: "transfer_icbc" },
   { nameTh: "เว็ปไซด์", isCash: false, categoryKey: "web" },
   { nameTh: "รายการอื่นๆ เงินสด", isCash: true, categoryKey: "other_cash" },
-  { nameTh: "รายการอื่นๆ โอน/เครดิต", isCash: false, categoryKey: "other_transfer" },
+  { nameTh: "รายการอื่นๆ โอน", isCash: false, categoryKey: "other_transfer" },
+  { nameTh: "รายการอื่นๆ เครดิต", isCash: false, categoryKey: "other_credit" },
   { nameTh: "บาร์น้ำ เงินสด", isCash: true, categoryKey: "bar_cash" },
-  { nameTh: "บาร์น้ำ โอน/เครดิต", isCash: false, categoryKey: "bar_transfer" },
+  { nameTh: "บาร์น้ำ โอน", isCash: false, categoryKey: "bar_transfer" },
+  { nameTh: "บาร์น้ำ เครดิต", isCash: false, categoryKey: "bar_credit" },
 ];
 
 // All is_cash = 1; manager-editable afterwards.

@@ -121,7 +121,7 @@ export function ReportSheetTitle({ property, date, demo = false }: ReportSheetTi
 //    รายการอื่นๆ) ─────────────────────────────────────────────────────────
 //
 // The ONE layout every export renders for a day's summary (see the module
-// comment above): the owner found the flat 11-category list confusing on
+// comment above): the owner found the flat 14-category list confusing on
 // paper, so this groups the same income cells by HOW the money arrived
 // (cash / transfer / card / web — see printDayIncomeGrouping.ts) and drops
 // the itemized-expense section entirely. Only the wording/figures below

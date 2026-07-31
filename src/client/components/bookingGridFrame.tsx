@@ -14,7 +14,7 @@ import { TENDERS, type BookingTotals } from "../../shared/types.ts";
 /**
  * Widths of the 18 data columns in printed order — seq, bookingNo,
  * guestName, roomNo, roomCount, nights, grossRoom, grossOther, discount,
- * the eight TENDERS, remark. Sums to 1432px at scale 1.
+ * the eight TENDERS, remark. Sums to 1468px at scale 1.
  *
  * guestName and roomNo are deliberately generous. On the printed sheet those
  * cells wrap, so any width reads; on the entry grid they are inputs, which
@@ -23,11 +23,12 @@ import { TENDERS, type BookingTotals } from "../../shared/types.ts";
  * to read like the workbook. Real values run long: company guests like
  * "บริษัท เอส แอนด์ ซันส์ เทรดดิ้ง จำกัด", and group-booking room lists up to
  * 125 chars. No width fits the worst case, so the entry cells also carry a
- * `title` for hover-to-read. Widths reclaimed from bookingNo (values are a
- * fixed 10-char "B2607-0447") and remark.
+ * `title` for hover-to-read. bookingNo is sized for its actual fixed-width
+ * PMS format ("CH26-001712", 11 chars) — a prior width here assumed a
+ * shorter 10-char legacy format ("B2607-0447") and clipped the real one.
  */
 export const BOOKING_GRID_DATA_WIDTHS: readonly number[] = [
-  40, 80, 200, 84, 42, 42, 84, 78, 74, 84, 80, 76, 76, 76, 76, 76, 76, 104,
+  40, 100, 200, 84, 42, 42, 84, 78, 74, 84, 80, 76, 76, 76, 76, 76, 76, 104,
 ];
 
 /** The row-edge delete column, present on the entry grid only. */

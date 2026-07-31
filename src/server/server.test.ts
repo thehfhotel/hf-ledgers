@@ -63,13 +63,27 @@ beforeAll(async () => {
 });
 
 describe("category seed and category_key", () => {
-  test("seeds eleven income categories, including the split รายการอื่นๆ pair", () => {
+  test("seeds fourteen income categories, including the split รายการอื่นๆ and โอน/เครดิต pairs", () => {
     const income = categories.filter((c) => c.kind === "income");
-    expect(income).toHaveLength(11);
+    expect(income).toHaveLength(14);
     expect(income.find((c) => c.categoryKey === "other_cash")?.nameTh).toBe("รายการอื่นๆ เงินสด");
-    expect(income.find((c) => c.categoryKey === "other_transfer")?.nameTh).toBe("รายการอื่นๆ โอน/เครดิต");
+    expect(income.find((c) => c.categoryKey === "other_transfer")?.nameTh).toBe("รายการอื่นๆ โอน");
     expect(income.find((c) => c.categoryKey === "other_cash")?.isCash).toBe(true);
     expect(income.find((c) => c.categoryKey === "other_transfer")?.isCash).toBe(false);
+  });
+
+  // Wave B (docs/plan-unify-exports-tender-split.md item 2): the three
+  // formerly-mixed โอน/เครดิต categories, split at entry time.
+  test("seeds the three เครดิต siblings with โอน-only wording on their existing partner", () => {
+    const income = categories.filter((c) => c.kind === "income");
+    expect(income.find((c) => c.categoryKey === "deposit")?.nameTh).toBe("มัดจำล่วงหน้า โอน");
+    expect(income.find((c) => c.categoryKey === "deposit_credit")?.nameTh).toBe("มัดจำล่วงหน้า เครดิต");
+    expect(income.find((c) => c.categoryKey === "bar_transfer")?.nameTh).toBe("บาร์น้ำ โอน");
+    expect(income.find((c) => c.categoryKey === "bar_credit")?.nameTh).toBe("บาร์น้ำ เครดิต");
+    expect(income.find((c) => c.categoryKey === "other_credit")?.nameTh).toBe("รายการอื่นๆ เครดิต");
+    for (const key of ["deposit_credit", "other_credit", "bar_credit"] as const) {
+      expect(income.find((c) => c.categoryKey === key)?.isCash).toBe(false);
+    }
   });
 
   test("refuses to archive a category with a non-null category_key", async () => {

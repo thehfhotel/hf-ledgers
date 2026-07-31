@@ -413,7 +413,18 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
         both on screen without scrolling the page — the rows scroll inside
         here instead. The floor keeps it usable on a short window. */}
     <div className="overflow-auto" style={{ maxHeight: "max(18rem, calc(100vh - 24rem))" }}>
-      <table className="w-full min-w-[1360px] border-separate border-spacing-0 bg-panel text-sm">
+      {/* table-layout: fixed makes the colgroup widths authoritative (same as
+          the printed sheet in ReportSheet.tsx) — without it, table-layout:
+          auto silently squeezes every column below its specified width to
+          fit w-full's 100%, which is what let CH26-style ใบกำกับภาษี values
+          clip even after widening their column. min-w-[1360px] + the
+          wrapper's overflow-auto still let the grid scroll horizontally on
+          narrow viewports; it just no longer shrinks columns to avoid that
+          scroll. */}
+      <table
+        className="w-full min-w-[1360px] border-separate border-spacing-0 bg-panel text-sm"
+        style={{ tableLayout: "fixed" }}
+      >
         <BookingGridColgroup withActions />
         <BookingGridHead withActions sticky />
 

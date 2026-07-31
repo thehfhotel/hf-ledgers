@@ -76,9 +76,17 @@ export const TENDER_LABELS_TH: Record<Tender, string> = {
  * logic that means "the cash room-income category" must key off this,
  * never match on `nameTh`. `null` = a manager-created category, never
  * derived from a tender.
+ *
+ * `deposit_credit`/`other_credit`/`bar_credit` (added 2026-07-31, see
+ * docs/plan-unify-exports-tender-split.md item 2) are the split-off เครดิต
+ * halves of `deposit`/`other_transfer`/`bar_transfer` — those three paper
+ * categories used to combine โอน+เครดิต in one input cell; going forward
+ * they are โอน-only and their เครดิต money enters through the new sibling
+ * key instead. Existing key strings/history are untouched (no retro-split).
  */
 export type CategoryKey =
   | "deposit"
+  | "deposit_credit"
   | "room_cash"
   | "credit_kbank"
   | "credit_icbc"
@@ -87,8 +95,10 @@ export type CategoryKey =
   | "web"
   | "other_cash"
   | "other_transfer"
+  | "other_credit"
   | "bar_cash"
-  | "bar_transfer";
+  | "bar_transfer"
+  | "bar_credit";
 
 /**
  * The seven tenders that map straight onto a seeded income-category cell —

@@ -62,6 +62,23 @@ describe("computeIncomeLedgerRollup", () => {
     expect(rollup.totalSatang).toBe(15_000);
   });
 
+  test("a nonzero deposit_credit amount (Wave B โอน/เครดิต split) sums into amounts and foots into totalSatang", () => {
+    const categories = [category(1, "deposit"), category(2, "deposit_credit"), category(3, "room_cash")];
+    const income: Record<number, IncomeCell> = {
+      1: incomeCell(1, 4_000), // deposit (โอน half)
+      2: incomeCell(2, 6_500), // deposit_credit (เครดิต half)
+      3: incomeCell(3, 10_000),
+    };
+    const rollup = computeIncomeLedgerRollup(PROPERTY, DATE, categories, income, [], false, "app");
+
+    expect(rollup.amounts.deposit_credit).toBe(6_500);
+    expect(rollup.amounts).toEqual({ deposit: 4_000, deposit_credit: 6_500, room_cash: 10_000 });
+    expect(rollup.uncategorizedSatang).toBe(0);
+    const sumOfAmounts = Object.values(rollup.amounts).reduce((a, b) => a + b, 0);
+    expect(rollup.totalSatang).toBe(sumOfAmounts);
+    expect(rollup.totalSatang).toBe(20_500);
+  });
+
   test("routes manager-created (categoryKey null) cells into uncategorizedSatang", () => {
     const categories = [category(1, "room_cash"), category(2, null)];
     const income: Record<number, IncomeCell> = {

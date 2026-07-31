@@ -52,7 +52,8 @@ const OTHER_INCOME_CATEGORY_KEYS = new Set(["other_cash", "other_transfer"]);
 // seed list — needed because a diff row's categoryId is null when the
 // property has no active category seeded with that key yet.
 const CATEGORY_KEY_LABELS_TH: Record<CategoryKey, string> = {
-  deposit: "มัดจำล่วงหน้า",
+  deposit: "มัดจำล่วงหน้า โอน",
+  deposit_credit: "มัดจำล่วงหน้า เครดิต",
   room_cash: "ค่าห้องเงินสด",
   credit_kbank: "บัตรเครดิต/กสิกร",
   credit_icbc: "บัตรเครดิต ICBC",
@@ -60,9 +61,11 @@ const CATEGORY_KEY_LABELS_TH: Record<CategoryKey, string> = {
   transfer_icbc: "โอน ICBC",
   web: "เว็ปไซด์",
   other_cash: "รายการอื่นๆ เงินสด",
-  other_transfer: "รายการอื่นๆ โอน/เครดิต",
+  other_transfer: "รายการอื่นๆ โอน",
+  other_credit: "รายการอื่นๆ เครดิต",
   bar_cash: "บาร์น้ำ เงินสด",
-  bar_transfer: "บาร์น้ำ โอน/เครดิต",
+  bar_transfer: "บาร์น้ำ โอน",
+  bar_credit: "บาร์น้ำ เครดิต",
 };
 
 /** The seven income categories a booking row can derive (see
@@ -217,8 +220,8 @@ export function DaySheetPage({ property, date }: Props) {
   // summary away from its own booking rows on 83% of HF days and 51% of
   // Ville days. That is a habit, not an error: this strip only makes it
   // visible and lets the reason be recorded. It never blocks, never nags,
-  // and never writes a figure — อัพเดทจากระบบจอง remains the only path that
-  // changes a number.
+  // and never writes a figure — อัพเดทจากรายละเอียดรายรับ remains the only path
+  // that changes a number.
   //
   // Computed from the booking lines through the shared
   // deriveIncomeFromBookings(), deliberately NOT from the
@@ -537,7 +540,7 @@ export function DaySheetPage({ property, date }: Props) {
     }
   }
 
-  // ── อัพเดทจากระบบจอง (fill-from-bookings, explicit + confirm-gated) ───
+  // ── อัพเดทจากรายละเอียดรายรับ (fill-from-bookings, explicit + confirm-gated) ─
   // Deliberately never a standing auto-fill (see api.md endpoint 20 and the
   // BookingDayPage variance strip): the office's typed figure and the
   // booking rows disagree on roughly a third of historical days, so this
@@ -578,7 +581,7 @@ export function DaySheetPage({ property, date }: Props) {
       setDay(fresh);
       setDiffState({ status: "closed" });
     } catch (err) {
-      setDiffState({ status: "error", message: err instanceof Error ? err.message : "อัพเดทจากระบบจองไม่สำเร็จ" });
+      setDiffState({ status: "error", message: err instanceof Error ? err.message : "อัพเดทจากรายละเอียดรายรับไม่สำเร็จ" });
     }
   }
 
@@ -680,7 +683,7 @@ export function DaySheetPage({ property, date }: Props) {
               disabled={day.monthClosed}
               className="rounded-md bg-brand-500 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
             >
-              อัพเดทจากระบบจอง
+              อัพเดทจากรายละเอียดรายรับ
             </button>
           </div>
         </section>
@@ -798,6 +801,24 @@ export function DaySheetPage({ property, date }: Props) {
                       <button type="button" onClick={goToBookings} className="font-medium text-brand-500 hover:underline">
                         ไปแก้ไขรายการย่อย
                       </button>
+                    </p>
+                  )}
+                  {/* Double-entry guards (Opus money-review F3/F4): the whole
+                      merged มัดจำ tender lands in "deposit" via
+                      อัพเดทจากรายละเอียดรายรับ, and every itemized (non-cash)
+                      รายการอื่นๆ entry lands in "other_transfer" — both
+                      unconditional, so a reception typist who ALSO keys the
+                      credit-card portion here double-books it. */}
+                  {category.categoryKey === "deposit_credit" && (
+                    <p className="text-xs text-warn">
+                      มัดจำจากรายการจองจะลงในช่อง &quot;{categoryKeyLabel(day.categories, "deposit")}&quot; ทั้งก้อน —
+                      อย่ากรอกซ้ำในช่องนี้
+                    </p>
+                  )}
+                  {category.categoryKey === "other_credit" && (
+                    <p className="text-xs text-warn">
+                      รายการอื่นๆ ที่ลงเป็นรายการย่อยจะลงในช่อง &quot;{categoryKeyLabel(day.categories, "other_transfer")}
+                      &quot; ทั้งก้อน — กรอกช่องนี้เฉพาะยอดบัตรเครดิตที่ไม่ได้ลงเป็นรายการย่อย
                     </p>
                   )}
                 </div>
@@ -1069,7 +1090,7 @@ export function DaySheetPage({ property, date }: Props) {
   );
 }
 
-// ── อัพเดทจากระบบจอง — diff dialog ────────────────────────────────────
+// ── อัพเดทจากรายละเอียดรายรับ — diff dialog ───────────────────────────
 // Always preview-then-confirm (api.md endpoint 20): shows a per-category
 // before/after so the office can see exactly what would change, and clearly
 // marks cells the human already owns (manual: true) as skipped rather than
@@ -1111,9 +1132,17 @@ function FillFromBookingsDialog({ state, categories, onConfirm, onClose }: FillF
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/40 p-4">
       <div className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-lg bg-panel shadow-lg">
         <div className="border-b border-line px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink">อัพเดทจากระบบจอง</h2>
+          <h2 className="text-sm font-semibold text-ink">อัพเดทจากรายละเอียดรายรับ</h2>
           <p className="mt-0.5 text-xs text-ink-muted">
             เปรียบเทียบยอดที่กรอกไว้กับยอดที่คำนวณจากรายการจอง ก่อนบันทึกจริง
+          </p>
+          {/* Double-entry guard (Opus money-review F3): the whole merged
+              มัดจำ tender writes into "deposit" here — never split by tender
+              — so a credit-card portion already keyed into deposit_credit
+              would double-count if also left in a booking line's มัดจำ. */}
+          <p className="mt-1 text-xs text-warn">
+            มัดจำจากรายการจองจะลงในช่อง &quot;{categoryKeyLabel(categories, "deposit")}&quot; ทั้งก้อน — อย่ากรอกซ้ำในช่อง
+            &quot;{categoryKeyLabel(categories, "deposit_credit")}&quot;
           </p>
         </div>
 

@@ -751,7 +751,12 @@ export function BookingDayPage({ property, date }: Props) {
                         (!item.isCash ? "bg-brand-500 text-white" : "bg-panel text-ink-muted hover:bg-tint")
                       }
                     >
-                      โอน/เครดิต
+                      {/* Wording matches where this money actually lands
+                          (Opus money-review F4): every non-cash item is
+                          computed into the "other_transfer" cell, now
+                          labelled โอน-only — never "เครดิต", so the toggle
+                          must not say เครดิต either. */}
+                      โอน
                     </button>
                   </div>
                   <AmountInput
@@ -810,7 +815,7 @@ export function BookingDayPage({ property, date }: Props) {
                   (!newOtherIsCash ? "bg-brand-500 text-white" : "bg-panel text-ink-muted hover:bg-tint")
                 }
               >
-                โอน/เครดิต
+                โอน
               </button>
             </div>
             <input

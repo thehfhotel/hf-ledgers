@@ -35,13 +35,14 @@ including admin — there is no `name_en` field anywhere in this contract.
   entry forms but still render on historical days that reference them.
 
 Income seed (paper order; `*` = `is_cash`), now also carrying its stable
-`category_key` (see `CategoryKey` below): มัดจำล่วงหน้า (`deposit`),
-ค่าห้องเงินสด* (`room_cash`), บัตรเครดิต/กสิกร (`credit_kbank`), บัตรเครดิต
-ICBC (`credit_icbc`), โอน/กสิกร (`transfer_kbank`), โอน ICBC
-(`transfer_icbc`), เว็ปไซด์ (`web`), รายการอื่นๆ* (see note below),
-บาร์น้ำ เงินสด* (`bar_cash`), บาร์น้ำ โอน/เครดิต (`bar_transfer`).
-Expense seed (all `is_cash = 1`, manager-editable): ซื้อของ/วัตถุดิบ,
-ค่าแรงรายวัน, ค่าซ่อมแซม, ค่าสาธารณูปโภค, อื่นๆ.
+`category_key` (see `CategoryKey` below): มัดจำล่วงหน้า โอน (`deposit`),
+มัดจำล่วงหน้า เครดิต (`deposit_credit`), ค่าห้องเงินสด* (`room_cash`),
+บัตรเครดิต/กสิกร (`credit_kbank`), บัตรเครดิต ICBC (`credit_icbc`), โอน/กสิกร
+(`transfer_kbank`), โอน ICBC (`transfer_icbc`), เว็ปไซด์ (`web`), รายการอื่นๆ*
+(see note below), บาร์น้ำ เงินสด* (`bar_cash`), บาร์น้ำ โอน (`bar_transfer`),
+บาร์น้ำ เครดิต (`bar_credit`) — fourteen categories total. Expense seed (all
+`is_cash = 1`, manager-editable): ซื้อของ/วัตถุดิบ, ค่าแรงรายวัน, ค่าซ่อมแซม,
+ค่าสาธารณูปโภค, อื่นๆ.
 
 > **Accounting rule — an advance deposit IS income on the day it is taken**
 > (owner decision, 2026-07-30). `มัดจำล่วงหน้า` (`deposit`) counts toward the day's
@@ -62,12 +63,18 @@ Expense seed (all `is_cash = 1`, manager-editable): ซื้อของ/วั
 >
 > 1. The seed **splits into two categories** — `รายการอื่นๆ เงินสด`
 >    (`other_cash`, `is_cash = 1`) and `รายการอื่นๆ โอน/เครดิต`
->    (`other_transfer`, `is_cash = 0`). Their sum is the paper's one อื่นๆ
+>    (`other_transfer`, `is_cash = 0`, later renamed `รายการอื่นๆ โอน` — see
+>    "โอน/เครดิต split" below). Their sum is the paper's one อื่นๆ
 >    line; `other_cash` alone is the paper's `รายการอื่นๆเงินสด` note line.
 > 2. **`other_income_items` is the itemized detail behind them** — this
 >    revenue is non-booking (breakfast, late checkout, parking, fines), runs
 >    2-4 entries a day with free text, and has no booking row to derive from.
->    Each item's `isCash` decides which of the two cells it feeds.
+>    Each item's `isCash` decides which of the two cells it feeds — there is
+>    no itemized โอน/เครดิต distinction, so a non-cash item's amount always
+>    computes into `other_transfer` (โอน) even when the actual receipt was a
+>    credit card; `other_credit` is a separate, always-directly-editable
+>    category for hand-keying credit-card receipts that are NOT itemized
+>    here (the day sheet warns against double-entry — see below).
 > 3. **When a day has at least one item, the two cells are computed from the
 >    items and are read-only.** With no items, both cells are directly
 >    editable — that is how summary-only historical days import.
@@ -78,6 +85,32 @@ Expense seed (all `is_cash = 1`, manager-editable): ซื้อของ/วั
 > one source, entered by one person on one screen, so a live sum surprises
 > nobody. Prod currently holds zero income rows, so the split is a seed
 > change with no data migration.
+
+> **โอน/เครดิต split (Wave B, 2026-07-31, see
+> docs/plan-unify-exports-tender-split.md item 2) — build to this.** The
+> paper's three mixed-tender categories (มัดจำล่วงหน้า, รายการอื่นๆ
+> โอน/เครดิต, บาร์น้ำ โอน/เครดิต) combined โอน+เครดิต in one input cell.
+> `deposit`/`other_transfer`/`bar_transfer` **keep their key strings**
+> (history stays under them untouched — no retro-split, mixed-tender data
+> already on the books is exactly what the print's mixed-tender footnote
+> covers) but their `name_th` becomes โอน-only wording going forward; three
+> new sibling keys — `deposit_credit`, `other_credit`, `bar_credit` — carry
+> เครดิต money instead, seeded immediately after their โอน partner. An
+> additive, idempotent boot migration (`migrateTransferCreditSplit()` in
+> `db.ts`, same shape as the `category_key` backfill below): renames the
+> still-default transfer category and seeds its เครดิต sibling, but SKIPS
+> (never throws) either step when the target `name_th` is already held by a
+> different active category — `idx_categories_active_name` is a UNIQUE
+> index, and a manager-created category can independently collide with one
+> of the six target names; a throwing migration would crash the boot
+> (`migrate()` runs at module top level, before `Bun.serve`) and
+> crash-loop the container under `restart:unless-stopped`. A skip is logged
+> (`console.log`, `[db] migrateTransferCreditSplit: ...`) and retried on
+> every subsequent boot until the conflicting name is resolved. `deposit`'s
+> booking-derived amount (`fill-from-bookings`, endpoint 20) still writes
+> the WHOLE merged `t_deposit` tender into `deposit` — the `Tender` union
+> itself is unchanged by this split — so the UI carries an explicit warning
+> against also hand-keying the credit portion into `deposit_credit`.
 
 ### Data model additions (Wave 2 — AS BUILT in `src/server/db.ts`)
 
@@ -98,10 +131,11 @@ rows) twice in a row.
   `รายการอื่นๆ เงินสด` + insert `รายการอื่นๆ โอน/เครดิต` immediately after,
   shifting every later category's `sort` by +1) runs as part of this same
   migration, wrapped in one `db.transaction()` together with the backfill.
-  A fresh database's seed now inserts all eleven income categories
-  pre-split, with their keys, directly — the split migration is a no-op on
-  a fresh DB. Never match category identity by `name_th` — managers can
-  rename categories, `category_key` cannot change out from under a rename.
+  A fresh database's seed now inserts all fourteen income categories
+  pre-split (see "โอน/เครดิต split" above for the three added 2026-07-31),
+  with their keys, directly — both split migrations are a no-op on a fresh
+  DB. Never match category identity by `name_th` — managers can rename
+  categories, `category_key` cannot change out from under a rename.
 - **`income_amounts.source`** (TEXT, default `manual`) and
   **`income_amounts.manual`** (INTEGER boolean, default 1) — mirror
   `IncomeCell.source`/`.manual`. Every `income_amounts` insert/update/delete

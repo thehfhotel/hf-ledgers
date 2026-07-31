@@ -35,7 +35,27 @@ Rails for the implementing agent:
 - RESEARCH FIRST: whether hf-analytics' ingest tolerates new keys in the rollup payload or
   needs a coordinated change (income_daily_tenders is an eleven-way split today). If the
   receiving side needs work, ship the ledger side dark-compatible and flag.
+- RESEARCH DONE (2026-07-31): NOT dark-compatible — worse, it's a stall bug. hf-analytics'
+  ingest schema silently STRIPS unknown amount keys (Elysia Value.Clean, no 4xx), then its
+  strict footing check (sum(amounts)+uncategorized === totalSatang) throws → 500; the ledger's
+  outbox marks-and-breaks on the failing row every 30s tick, head-of-line-blocking ALL
+  analytics pushes for every property/day. income_daily_tenders is a wide table (one column
+  per key); no downstream dashboard consumer exists yet.
+- SEQUENCING (binding): hf-analytics ships FIRST — additive migration 014 (three
+  *_satang NOT NULL DEFAULT 0 columns) + categoryKeys/amountsSchema/INSERT/ON CONFLICT lists
+  in src/server/sources/income-ledger.ts (footing check self-corrects; it iterates
+  categoryKeys). Verify live, THEN implement the ledger-side split. Never the reverse.
 - Opus money-review before ship (same bar as the print rework).
+- Status: implemented (14 keys, additive rename-only migration, both seed paths proven
+  byte-identical) + reviewed. VERDICT: SHIP-WITH-FIXES — F1 prod collision query ran CLEAN;
+  F2 migration collision guard (skip-and-log, never throw — a colliding manager-created name
+  must not crash-loop the container); F3 deposit double-entry warning (fill-from-bookings
+  writes the whole merged t_deposit into the โอน cell; per-category manual-skip does not
+  protect it); F4 other-income double-entry guard (itemized non-cash items land in the
+  computed โอน cell while other_credit is free-typed — same receipt bookable twice);
+  F5 api.md contract update to 14 keys; F6 migration-test gaps (amounts survive, legacy
+  pre-assert, collision test). t_deposit split filed as income-ledger issue #1. Reviewer
+  also asked: eyeball one day print/JPEG post-deploy (14 income lines shrink the fit scale).
 
 ## 3. DEPOSIT > INCOME MISMATCH — NO WORK (owner accepted)
 

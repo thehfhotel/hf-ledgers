@@ -1,7 +1,7 @@
 import type { Category, CategoryKey, DaySheet, IncomeCell } from "../../shared/types.ts";
 
 // Pure grouping logic for the DAY-SUMMARY PRINT ONLY (PrintableDaySummary.tsx
-// / .print-stage). The owner finds the flat 11-category list confusing on
+// / .print-stage). The owner finds the flat 14-category list confusing on
 // paper — this regroups the same cells by HOW the money arrived (cash /
 // transfer / card / web), which the screen and the JPEG export do NOT do
 // (they keep the flat list) — see PrintableDaySummary.tsx and
@@ -89,10 +89,14 @@ const KEY_TO_GROUP = {
   room_cash: "cash",
   other_cash: "cash",
   bar_cash: "cash",
-  // The two bank-named transfer columns first, then the three MIXED
-  // โอน/เครดิต categories the paper never split by tender (see the task's
-  // instruction not to invent one) — PrintableDaySummary.tsx marks the
+  // The two bank-named transfer columns first, then the three
+  // historically-MIXED โอน/เครดิต categories the paper never split by
+  // tender for data already on the books (see the task's instruction not
+  // to invent one) — reportSheetBlocks.tsx's DayTenderSummary marks the
   // group total with an asterisk + footnote so that honesty stays visible.
+  // Going forward (2026-07-31) these three are โอน-only at entry; their
+  // split-off เครดิต siblings (deposit_credit/other_credit/bar_credit,
+  // below) carry new money into the card group instead.
   transfer_kbank: "transfer",
   transfer_icbc: "transfer",
   deposit: "transfer",
@@ -100,6 +104,9 @@ const KEY_TO_GROUP = {
   bar_transfer: "transfer",
   credit_kbank: "card",
   credit_icbc: "card",
+  deposit_credit: "card",
+  other_credit: "card",
+  bar_credit: "card",
   web: "web",
 } satisfies Record<CategoryKey, PrintIncomeGroupId>;
 
@@ -108,7 +115,8 @@ const KEY_TO_GROUP = {
  * so a standard line stays visible even with nothing to show (matching how
  * the flat print lists every category today). */
 const FALLBACK_LABEL_TH: Record<CategoryKey, string> = {
-  deposit: "มัดจำล่วงหน้า",
+  deposit: "มัดจำล่วงหน้า โอน",
+  deposit_credit: "มัดจำล่วงหน้า เครดิต",
   room_cash: "ค่าห้องเงินสด",
   credit_kbank: "บัตรเครดิต/กสิกร",
   credit_icbc: "บัตรเครดิต ICBC",
@@ -116,9 +124,11 @@ const FALLBACK_LABEL_TH: Record<CategoryKey, string> = {
   transfer_icbc: "โอน ICBC",
   web: "เว็ปไซด์",
   other_cash: "รายการอื่นๆ เงินสด",
-  other_transfer: "รายการอื่นๆ โอน/เครดิต",
+  other_transfer: "รายการอื่นๆ โอน",
+  other_credit: "รายการอื่นๆ เครดิต",
   bar_cash: "บาร์น้ำ เงินสด",
-  bar_transfer: "บาร์น้ำ โอน/เครดิต",
+  bar_transfer: "บาร์น้ำ โอน",
+  bar_credit: "บาร์น้ำ เครดิต",
 };
 
 const GROUP_LABELS: Record<PrintIncomeGroupId, { label: string; totalLabel: string }> = {

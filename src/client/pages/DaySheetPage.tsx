@@ -8,13 +8,14 @@ import {
   NOTE_MAX_LEN,
   TENDER_TO_CATEGORY_KEY,
   type BookingLine,
+  type CashBlockAmounts,
   type Category,
   type CategoryKey,
   type DaySheet,
   type ExpenseItem,
   type Property,
 } from "../../shared/types.ts";
-import { PROVENANCE_LABELS_TH } from "../labels.ts";
+import { CASH_BLOCK_FIELDS, PROVENANCE_LABELS_TH } from "../labels.ts";
 import {
   createExpense,
   deleteExpense,
@@ -23,6 +24,7 @@ import {
   getMe,
   listBookingLines,
   listDays,
+  putCashBlock,
   putDayNote,
   putIncomeCell,
   putVerify,
@@ -306,6 +308,43 @@ export function DaySheetPage({ property, date }: Props) {
     } catch (err) {
       applyLocal((prev) => ({ ...prev, income: prevIncome, totals: prevTotals }));
       throw err;
+    }
+  }
+
+  // ── Cash-block override (roomCashSatang/otherCashSatang/barCashSatang) ─
+  // Same PUT .../cash-block endpoint and merge semantics BookingDayPage.tsx
+  // already uses for its "**หมายเหตุ (สรุปเงินสด)" panel — surfaced here too
+  // so a manager reviewing the day summary can see AND correct a till
+  // count without detouring to the bookings page. bankedSatang is
+  // deliberately left out of this editor: it stays BookingDayPage's own
+  // field, and this page's own gross/deduction/net lines (day.totals,
+  // per api.md "Report labeling") are computed independently and must not
+  // be re-derived from cashBlock here.
+  async function commitCashOverrideField(field: keyof CashBlockAmounts, satang: number | null) {
+    if (!day) return;
+    const prevCashBlock = day.cashBlock;
+    const baseline = day.cashBlock.entered ?? day.cashBlock.derived;
+    const nextEntered: CashBlockAmounts = { ...baseline, [field]: satang ?? 0 };
+    applyLocal((prev) => ({ ...prev, cashBlock: { ...prev.cashBlock, entered: nextEntered } }));
+    try {
+      const res = await putCashBlock(property, date, nextEntered);
+      applyLocal((prev) => ({ ...prev, cashBlock: res, ...touchAudit(prev) }));
+    } catch (err) {
+      applyLocal((prev) => ({ ...prev, cashBlock: prevCashBlock }));
+      throw err;
+    }
+  }
+
+  async function clearCashOverride() {
+    if (!day) return;
+    const prevCashBlock = day.cashBlock;
+    applyLocal((prev) => ({ ...prev, cashBlock: { ...prev.cashBlock, entered: null } }));
+    try {
+      const res = await putCashBlock(property, date, null);
+      applyLocal((prev) => ({ ...prev, cashBlock: res, ...touchAudit(prev) }));
+    } catch (err) {
+      applyLocal((prev) => ({ ...prev, cashBlock: prevCashBlock }));
+      window.alert(err instanceof Error ? err.message : "ล้างการปรับยอดไม่สำเร็จ");
     }
   }
 
@@ -618,6 +657,11 @@ export function DaySheetPage({ property, date }: Props) {
 
   const hasOtherIncomeItems = day.otherIncome.length > 0;
 
+  // bankedSatang is BookingDayPage.tsx's own field (see the
+  // commitCashOverrideField comment above) — this page edits only the
+  // three components that roll up into it.
+  const cashOverrideFields = CASH_BLOCK_FIELDS.filter((field) => field.key !== "bankedSatang");
+
   return (
     <div className="flex flex-col gap-4 pb-10">
       <div className="flex items-center gap-2">
@@ -853,6 +897,55 @@ export function DaySheetPage({ property, date }: Props) {
               ))}
             </div>
           )}
+
+          {/* **หมายเหตุ (สรุปเงินสด) — a manager's till-count correction to
+              any of the three cash components above (see
+              commitCashOverrideField). Always rendered, never gated behind
+              cashIncomeRows/hasOtherIncomeItems: the override can exist
+              (and needs to stay visible/editable, including a deliberate
+              0.00) even on a day with no other cash rows showing. Same
+              fields/wording as BookingDayPage.tsx's identical panel and
+              the printed sheet's overriddenCashComponents, so the figure
+              never reads two different ways across screens. */}
+          <div className="mt-2 flex flex-col gap-2 border-t border-line-strong pt-2 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xs font-semibold text-ink-muted">**หมายเหตุ (สรุปเงินสด)</h3>
+              {day.cashBlock.entered && (
+                <button
+                  type="button"
+                  onClick={clearCashOverride}
+                  className="rounded-md text-xs font-medium text-brand-500 hover:underline focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                >
+                  ล้างการปรับยอด
+                </button>
+              )}
+            </div>
+            {cashOverrideFields.map(({ key, label }) => {
+              const derivedValue = day.cashBlock.derived[key];
+              const enteredValue = day.cashBlock.entered?.[key];
+              const shown = enteredValue ?? derivedValue;
+              return (
+                <div key={key} className="flex items-center justify-between gap-3">
+                  <span className="text-ink">
+                    {label}
+                    {enteredValue != null && enteredValue !== derivedValue && (
+                      <span className="ml-1.5 text-xs font-normal text-ink-muted">
+                        (ปรับจาก {formatSatang(derivedValue)})
+                      </span>
+                    )}
+                  </span>
+                  <AmountInput
+                    value={shown}
+                    onCommit={(satang) => commitCashOverrideField(key, satang)}
+                    ariaLabel={label}
+                    disabled={day.monthClosed}
+                    zeroIsMeaningful
+                  />
+                </div>
+              );
+            })}
+          </div>
+
           <div className="mt-2 flex items-center justify-between gap-3 border-t border-line-strong pt-2 text-base font-bold text-brand-500">
             <span>สรุปเงินสดฝากเข้าบัญชี (ยอดฝากจริง)</span>
             <span className="tabular-nums">{formatSatang(day.totals.cashIncomeSatang)}</span>

@@ -16,6 +16,18 @@ interface Props {
   ariaLabel?: string;
   placeholder?: string;
   disabled?: boolean;
+  /**
+   * Income cells and expense lines treat a committed 0 as "empty" (the
+   * caller deletes the cell/row rather than storing a literal 0), so the
+   * default blanks the field to the placeholder for `value === 0` too.
+   * Cash-block override fields (src/shared/types.ts CashBlockAmounts) are
+   * different: an explicit override of exactly 0 is a real, distinct value
+   * from "no override" (null), and MUST render as "0.00", not fall back to
+   * the placeholder ghost text — a manager who zeroed out a component
+   * needs to see that it stuck, not something indistinguishable from an
+   * empty/untouched field. Set true for those callers only.
+   */
+  zeroIsMeaningful?: boolean;
 }
 
 /**
@@ -31,16 +43,25 @@ interface Props {
  * fires onCommit; if the caller doesn't update `value` (rejected or failed),
  * the field simply reverts to the last-committed value on the next render.
  */
-export function AmountInput({ value, onCommit, ariaLabel, placeholder = "0.00", disabled }: Props) {
+export function AmountInput({
+  value,
+  onCommit,
+  ariaLabel,
+  placeholder = "0.00",
+  disabled,
+  zeroIsMeaningful,
+}: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [state, setState] = useState<SaveState>("idle");
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const shown = editing ? draft : value != null && value !== 0 ? formatSatang(value) : "";
+  const zeroIsVisible = (v: number) => zeroIsMeaningful || v !== 0;
+
+  const shown = editing ? draft : value != null && zeroIsVisible(value) ? formatSatang(value) : "";
 
   function startEdit() {
-    setDraft(value != null && value !== 0 ? (value / 100).toFixed(2) : "");
+    setDraft(value != null && zeroIsVisible(value) ? (value / 100).toFixed(2) : "");
     setEditing(true);
   }
 

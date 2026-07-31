@@ -51,6 +51,28 @@ export const BOX_HEAD = "border-b border-line bg-tint px-3 py-1.5 text-xs font-s
 export const ROW_LABEL = "px-3 py-1 text-sm";
 export const ROW_AMOUNT = "px-3 py-1 text-right text-sm tabular-nums whitespace-nowrap";
 
+/** The หมายเหตุ (สรุปเงินสด) box only — the ONE box on the sheet meant to
+ * visually jump out (it carries the bank-deposit figure the office actually
+ * needs), never the ordinary section boxes above (สรุปยอดรายรับ, the weekly
+ * chart, รายการอื่นๆ — those stay on BOX/BOX_HEAD's tint, unchanged). Per
+ * design/HF-ONE.md (the estate-wide contract): `--hf-panel-tint` (this app's
+ * `--color-tint`, what BOX_HEAD uses) is documented for "table headers,
+ * wells" — a background for ORDINARY structure, not emphasis — while gold is
+ * documented as "jewellery... one highlight per screen", exactly this box's
+ * job. Using the panel-tint for both made every box read as equally (un)
+ * emphasized: --color-tint (#f4f1ed) sits only ~11-18 RGB units off white
+ * (contrast ratio ~1.06:1) and the box's own border (border-line, #e8e4df)
+ * sits only ~12-14 units off ITS fill — a delta small enough to read fine in
+ * a lossless on-screen screenshot (as reported) but that further compression
+ * (a JPEG re-encode, print rasterisation, a phone screen) can wash out
+ * entirely, which is exactly the "screenshot looks right, the real export
+ * doesn't" gap that was reported. Gold-100/gold-300 keep the same warm,
+ * on-brand neutral family (never grayscale) but widen both deltas
+ * substantially (RGB delta to white ~9-52, fill-to-border delta ~15-76),
+ * so the emphasis survives every capture path, not just a raw screenshot. */
+const HIGHLIGHT_BOX = "rounded-lg border border-gold-300 bg-gold-100";
+const HIGHLIGHT_BOX_HEAD = "border-b border-gold-300 bg-gold-100 px-3 py-1.5 text-xs font-semibold text-ink";
+
 /** "29/7/2569 14:35" — Bangkok wall-clock, Buddhist Era, matching the
  * D/M/YYYY shape of shared date.ts's isoToBuddhist(). Kept local to the
  * report blocks (not shared date.ts): it stamps a moment in time, not a
@@ -317,8 +339,8 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
         </p>
       </div>
 
-      <div className={BOX + " bg-tint"}>
-        <h2 className={BOX_HEAD}>**หมายเหตุ (สรุปเงินสด)</h2>
+      <div className={HIGHLIGHT_BOX}>
+        <h2 className={HIGHLIGHT_BOX_HEAD}>**หมายเหตุ (สรุปเงินสด)</h2>
         <div className="px-3 py-2">
           {/* Manager cash overrides MUST show: when the till was counted
               short/over and a component (room/other/bar cash) was

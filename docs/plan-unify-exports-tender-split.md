@@ -126,6 +126,25 @@ Only the first name imports today. Include นาย/น.ส./Mr etc. and the la
   last ?? name2)` shipped; GRANTs applied AND fence-verified in both DBs (name columns readable
   as ledger_ro, `cust_idcard` still permission-denied).
 
+## 6. DEPOSIT RECONCILIATION ROWS — Wave C (owner request 2026-07-31, after the two bug fixes land)
+
+Small change (coins/small notes) cannot always go into the deposit machine, so ยอดฝากจริง
+legitimately differs from the day's cash. OWNER: add an adjusting section to
+สรุปเงินสดฝากเข้าบัญชี with two rows:
+1. เงินสดยังไม่ฝาก (เข้าตู้ไม่ได้) — today's cash held back (SUBTRACTS)
+2. เงินสดจากรอบก่อนที่เข้าตู้ไม่ได้ — prior rounds' held-back cash deposited today (ADDS)
+
+Planned semantics (assumption stated to owner, pending confirmation):
+ยอดฝากจริง = รวมเงินสดวันนี้ − row1 + row2.
+
+Rails: two satang fields on the day's cash block (setCashBlockOverride/mergeCashBlockOverride
+territory in db.ts, same persistence/audit/month-close as existing overrides); kiosk-editable
+(NO role gating — app-wide rule); rows render on the day-page panel, the printed **หมายเหตุ
+box, and all three exports when nonzero; ปรับจาก overrides stay available on top; api.md
+contract update; analytics rollup unaffected (income cells only — verify). Opus money-review
+before ship. SEQUENCING: starts only after the hidden-row fix and the export-background fix
+land (same components — avoid a three-way tree collision).
+
 ## Shipping discipline
 
 Multiple agent sessions share this repo. Every ship stages ONLY the files this plan owns,

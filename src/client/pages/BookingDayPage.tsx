@@ -875,6 +875,7 @@ export function BookingDayPage({ property, date }: Props) {
                     onCommit={(satang) => commitCashOverrideField(key, satang)}
                     ariaLabel={label}
                     disabled={monthClosed}
+                    zeroIsMeaningful
                   />
                 </div>
               );

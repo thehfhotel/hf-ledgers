@@ -8,14 +8,44 @@ import { DayTenderSummary, ReportFooter, ReportSheetTitle } from "./reportSheetB
 // per-booking grid (that's ReportSheet.tsx's "bookingsOnly" variant,
 // BookingDayPage's print/PDF target instead).
 //
-// Deliberately a NARROW, single-column, portrait-shaped composition rather
-// than ReportSheet's landscape sheet with its grid section stripped out:
-// scaling a wide/short natural layout to fill a tall/narrow A4 portrait
-// page would either leave most of the page blank or overflow one axis (see
-// printGeometry.ts's computeFitScale — it fits BOTH axes, so a poor aspect
-// match between content and page wastes exactly the space the owner wants
-// used). A natural width close to A4 portrait's own printable width keeps
-// the fit-to-page scale close to 1 in the common case.
+// LANDSCAPE, two-column composition (owner decision, 2026-07-31, superseding
+// the single-column portrait shape this sheet used before): a single
+// stacked column is HEIGHT-bound — the portrait sheet's natural size (720 x
+// ~1450px) needed a ~0.72 fit-to-page scale, ~8.7pt body text, to stay on
+// one A4 page. reportSheetBlocks.tsx's DayTenderSummary now renders its own
+// two-column grid internally (income data left, summary + charts right —
+// see its module comment), which roughly halves the stacked height for the
+// same content; pairing that with a landscape page (width-generous instead
+// of height-bound, same orientation ReportSheet.tsx/BookingDayPage's
+// bookingsOnly print already uses — see usePrintExport.ts's `orientation`)
+// is what actually buys back the fit scale, not a wider single column
+// (printGeometry.ts's computeFitScale fits BOTH axes; a wide/short natural
+// layout on a tall/narrow page wastes the opposite axis instead). This
+// file stays the print/PDF-only wrapper: sheet width/padding, the inline
+// title, and the footer sit around DayTenderSummary's two-column region,
+// each spanning the full sheet width above/below it.
+//
+// DAY_SUMMARY_SHEET_WIDTH is sized so DayTenderSummary's two internal
+// columns land in its own ~480-540px target range (gap-6 = 24px gap, minus
+// SHEET_PADDING on each side: (1040 - 40 - 24) / 2 = 488px) while landing
+// just under the landscape A4 printable width at 10mm margins (~1047px, see
+// printGeometry.ts's a4PrintableAreaPx). Row/section padding inside
+// DayTenderSummary/ReportFooter (reportSheetBlocks.tsx) and this file's own
+// wrapper padding were ALSO tightened (owner decision, 2026-07-31, same
+// change) — pure whitespace, no label/figure/conditional touched — so a
+// realistic full day's natural height clears the printable HEIGHT (~718px)
+// too, without needing the fit-to-page scale to shrink below 1 at all (see
+// usePrintExport.ts's computeFitScale: scale can land >=1, using the page
+// fully rather than shrinking to it). This matters beyond just legibility:
+// Chromium's print/print-to-PDF pagination fragments a page based on an
+// element's PRE-transform (natural) box height, not its post-transform
+// visual size — an element whose NATURAL height exceeds the printable area
+// silently spills onto a second page even though the applied CSS transform
+// visually shrinks it to fit (confirmed against this app's pre-existing
+// single-column portrait layout too, via a real print-dialog capture — see
+// the two-column rework's verification notes). Keeping natural height
+// under the printable height sidesteps that entirely, rather than merely
+// buying a better-looking (but still occasionally 2-page) scale number.
 //
 // The income section here is reportSheetBlocks.tsx's DayTenderSummary — the
 // ONE tender-grouped day-summary layout every export renders (owner
@@ -23,7 +53,7 @@ import { DayTenderSummary, ReportFooter, ReportSheetTitle } from "./reportSheetB
 // JPEG export all show the same groups-by-tender summary now, no expense
 // section anywhere). This file stays the print/PDF-only wrapper: sheet
 // width/padding, the inline title, and the footer around DayTenderSummary.
-export const DAY_SUMMARY_SHEET_WIDTH = 720;
+export const DAY_SUMMARY_SHEET_WIDTH = 1040;
 const SHEET_PADDING = 20;
 
 interface PrintableDaySummaryProps {
@@ -51,7 +81,7 @@ export const PrintableDaySummary = forwardRef<HTMLDivElement, PrintableDaySummar
         <div className="h-0.5 bg-gold-500" />
 
         <div
-          className="flex flex-col gap-4 py-6"
+          className="flex flex-col gap-2 py-3"
           style={{ paddingLeft: SHEET_PADDING, paddingRight: SHEET_PADDING }}
         >
           {/* ReportSheetTitle now has only the one-line form — see

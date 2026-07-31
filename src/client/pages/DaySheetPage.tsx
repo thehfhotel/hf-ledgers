@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { RECONCILE_TOLERANCE_SATANG, deriveIncomeFromBookings } from "../../shared/bookings.ts";
 import { shiftDays } from "../../shared/date.ts";
-import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
+import { formatSatang } from "../../shared/money.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import { computeDayTotals } from "../../shared/totals.ts";
 import {
@@ -19,7 +19,6 @@ import {
 import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../cashBlockPatches.ts";
 import { CASH_ADJUSTMENT_FIELDS, CASH_BLOCK_FIELDS, PROVENANCE_LABELS_TH } from "../labels.ts";
 import {
-  createExpense,
   deleteExpense,
   fillFromBookings,
   getDay,
@@ -129,10 +128,15 @@ export function DaySheetPage({ property, date }: Props) {
   // pure week-window/zero-fill math.
   const [weekDays, setWeekDays] = useState<WeekDayIncome[] | null>(null);
 
-  // ── พิมพ์ / PDF — the day summary only (no booking grid), portrait ─────
-  // Read-only actions: never gated on monthClosed — see usePrintExport.ts /
-  // PrintableDaySummary.tsx.
-  const printExport = usePrintExport({ orientation: "portrait", property, date });
+  // ── พิมพ์ / PDF — the day summary only (no booking grid), landscape ────
+  // Landscape (owner decision, 2026-07-31, switched from portrait): pairs
+  // with DayTenderSummary's own two-column layout (reportSheetBlocks.tsx)
+  // to keep the day summary on one A4 page at a readable scale — see
+  // PrintableDaySummary.tsx's module comment for the full reasoning. Same
+  // orientation ReportSheet.tsx/BookingDayPage's bookingsOnly print already
+  // uses. Read-only actions: never gated on monthClosed — see
+  // usePrintExport.ts / PrintableDaySummary.tsx.
+  const printExport = usePrintExport({ orientation: "landscape", property, date });
 
   useEffect(() => {
     getMe()
@@ -545,53 +549,6 @@ export function DaySheetPage({ property, date }: Props) {
     });
   }
 
-  const [newCategoryId, setNewCategoryId] = useState<number | "">("");
-  const [newNote, setNewNote] = useState("");
-  const [newAmountText, setNewAmountText] = useState("");
-  const [newExpenseError, setNewExpenseError] = useState<string | null>(null);
-  const [addingExpense, setAddingExpense] = useState(false);
-
-  useEffect(() => {
-    if (activeExpenseCategories.length > 0 && newCategoryId === "") {
-      setNewCategoryId(activeExpenseCategories[0]!.id);
-    }
-  }, [activeExpenseCategories, newCategoryId]);
-
-  async function submitNewExpense(e: FormEvent) {
-    e.preventDefault();
-    if (!day) return;
-    setNewExpenseError(null);
-    if (newCategoryId === "") {
-      setNewExpenseError("เลือกหมวดหมู่ก่อนเพิ่มรายการ");
-      return;
-    }
-    const amountSatang = parseAmountToSatang(newAmountText);
-    if (amountSatang === null || amountSatang <= 0) {
-      setNewExpenseError("กรอกจำนวนเงินให้ถูกต้อง (มากกว่า 0)");
-      return;
-    }
-    setAddingExpense(true);
-    try {
-      const note = newNote.trim() === "" ? null : newNote.trim().slice(0, NOTE_MAX_LEN);
-      const created = await createExpense(property, date, { categoryId: newCategoryId, amountSatang, note });
-      applyLocal((prev) => {
-        const expenses = [...prev.expenses, created];
-        return {
-          ...prev,
-          expenses,
-          totals: computeDayTotals(prev.categories, prev.income, expenses),
-          ...touchAudit(prev),
-        };
-      });
-      setNewNote("");
-      setNewAmountText("");
-    } catch (err) {
-      setNewExpenseError(err instanceof Error ? err.message : "เพิ่มรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
-    } finally {
-      setAddingExpense(false);
-    }
-  }
-
   // ── Day note ─────────────────────────────────────────────────────────
   // Editable even on a closed month, per api.md's Wave 2 note on endpoint 9:
   // the note is commentary, not a figure, and after a close it is exactly
@@ -735,6 +692,16 @@ export function DaySheetPage({ property, date }: Props) {
     .filter((row): row is { category: Category; cell: NonNullable<typeof row.cell> } => Boolean(row.cell) && row.cell!.amountSatang > 0);
 
   const hasOtherIncomeItems = day.otherIncome.length > 0;
+
+  // The รายจ่าย panel is LEGACY VISIBILITY ONLY (owner request 2026-07-31,
+  // docs/plan-unify-exports-tender-split.md item 1: expenses now live in the
+  // separate Expense Ledger app; this page's entry surface is retired). A
+  // day with rows already recorded still shows them — editable/deletable so
+  // a mistake can be corrected — but there is no add-new-row affordance,
+  // and the panel disappears entirely once the last row is gone. The grid
+  // below drops to two columns in that (now-normal) case rather than
+  // leaving a dangling empty third slot.
+  const hasExpenseRows = day.expenses.length > 0;
 
   // bankedSatang itself is BookingDayPage.tsx's own field to type an
   // override INTO (see the commitCashOverrideField comment above) — this
@@ -901,10 +868,11 @@ export function DaySheetPage({ property, date }: Props) {
         />
       )}
 
-      {/* Three panels side by side, the way the summary, its **หมายเหตุ
-          block and the expense list sit together on the paper: รายรับ |
-          เงินสด + ยอดรวม | รายจ่าย. One column on a narrow screen. */}
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
+      {/* Panels side by side, the way the summary and its **หมายเหตุ block
+          sit together on the paper: รายรับ | เงินสด + ยอดรวม, plus a third
+          legacy-only รายจ่าย panel when this day still has expense rows
+          (see hasExpenseRows above). One column on a narrow screen. */}
+      <div className={"grid grid-cols-1 items-start gap-4 " + (hasExpenseRows ? "lg:grid-cols-3" : "lg:grid-cols-2")}>
       {/* Panel รายรับ */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
         <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">รายรับ</h2>
@@ -1096,14 +1064,25 @@ export function DaySheetPage({ property, date }: Props) {
             </span>
             <span className="tabular-nums">{formatSatang(bankedShown)}</span>
           </div>
-          <div className="mt-2 flex items-center justify-between gap-3 border-t border-dotted border-line-strong pt-2 text-xs text-ink-muted">
-            <span>หัก รายจ่ายเงินสดวันนี้ (ไม่ได้หักออกจากยอดฝากข้างต้น)</span>
-            <span className="tabular-nums">-{formatSatang(day.totals.cashExpenseSatang)}</span>
-          </div>
-          <div className="mt-0.5 flex items-center justify-between gap-3 text-xs font-medium text-ink-muted">
-            <span>คงเหลือสุทธิหลังหักรายจ่ายเงินสด (ข้อมูลอ้างอิง)</span>
-            <span className="tabular-nums">{formatSatang(bankedNetOfCashExpenseSatang)}</span>
-          </div>
+          {/* Both reference lines below are noise on the new normal
+              (day.totals.cashExpenseSatang === 0 — expenses are entered in
+              the separate Expense Ledger app now): a "-0.00" deduction and
+              a "net" figure identical to the bold line above it say
+              nothing. They only earn their keep on a day that still has
+              legacy cash expense rows (see hasExpenseRows/the รายจ่าย panel
+              below), where the math is worth spelling out. */}
+          {day.totals.cashExpenseSatang !== 0 && (
+            <>
+              <div className="mt-2 flex items-center justify-between gap-3 border-t border-dotted border-line-strong pt-2 text-xs text-ink-muted">
+                <span>หัก รายจ่ายเงินสดวันนี้ (ไม่ได้หักออกจากยอดฝากข้างต้น)</span>
+                <span className="tabular-nums">-{formatSatang(day.totals.cashExpenseSatang)}</span>
+              </div>
+              <div className="mt-0.5 flex items-center justify-between gap-3 text-xs font-medium text-ink-muted">
+                <span>คงเหลือสุทธิหลังหักรายจ่ายเงินสด (ข้อมูลอ้างอิง)</span>
+                <span className="tabular-nums">{formatSatang(bankedNetOfCashExpenseSatang)}</span>
+              </div>
+            </>
+          )}
         </section>
 
         {/* Panel ยอดรวมประจำวัน */}
@@ -1129,12 +1108,15 @@ export function DaySheetPage({ property, date }: Props) {
         </section>
       </div>
 
-      {/* Panel รายจ่าย */}
-      <section className="overflow-hidden rounded-lg border border-line bg-panel">
-        <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">รายจ่าย</h2>
-        {day.expenses.length === 0 ? (
-          <p className="px-4 py-3 text-sm text-ink-muted">ยังไม่มีรายจ่ายวันนี้</p>
-        ) : (
+      {/* Panel รายจ่าย — LEGACY VISIBILITY ONLY (see hasExpenseRows above):
+          rendered only when this day already has expense rows from before
+          the entry surface was retired. Rows stay editable/deletable so a
+          mistake can still be corrected, but there is deliberately no
+          add-new-row form and no "ยังไม่มีรายจ่ายวันนี้" placeholder — a
+          clean day shows nothing here at all, not even the header. */}
+      {hasExpenseRows && (
+        <section className="overflow-hidden rounded-lg border border-line bg-panel">
+          <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">รายจ่าย</h2>
           <div className="divide-y divide-line">
             {day.expenses.map((item) => {
               const category = day.categories.find((c) => c.id === item.categoryId);
@@ -1195,64 +1177,15 @@ export function DaySheetPage({ property, date }: Props) {
               );
             })}
           </div>
-        )}
 
-        <form
-          onSubmit={submitNewExpense}
-          className="flex flex-wrap items-center gap-2 border-t border-line bg-tint px-4 py-3"
-        >
-          <select
-            value={newCategoryId}
-            onChange={(e) => setNewCategoryId(e.target.value === "" ? "" : Number(e.target.value))}
-            disabled={activeExpenseCategories.length === 0 || day.monthClosed}
-            aria-label="หมวดหมู่รายจ่ายใหม่"
-            className="min-w-[9rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
-          >
-            {activeExpenseCategories.length === 0 && <option value="">ยังไม่มีหมวดหมู่รายจ่าย</option>}
-            {activeExpenseCategories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.nameTh}
-              </option>
-            ))}
-          </select>
-          <input
-            type="text"
-            value={newNote}
-            onChange={(e) => setNewNote(e.target.value)}
-            placeholder="หมายเหตุ"
-            aria-label="หมายเหตุรายจ่ายใหม่"
-            disabled={day.monthClosed}
-            maxLength={NOTE_MAX_LEN}
-            className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
-          />
-          <input
-            type="text"
-            inputMode="decimal"
-            value={newAmountText}
-            onChange={(e) => setNewAmountText(e.target.value)}
-            placeholder="0.00"
-            aria-label="จำนวนเงินรายจ่ายใหม่"
-            disabled={day.monthClosed}
-            className="w-28 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-right tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
-          />
-          <button
-            type="submit"
-            disabled={addingExpense || activeExpenseCategories.length === 0 || day.monthClosed}
-            className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
-          >
-            เพิ่มรายการ
-          </button>
-          <AmountInTextHint text={newNote} className="w-full" />
-          {newExpenseError && <p className="w-full text-xs text-bad">{newExpenseError}</p>}
-        </form>
-
-        <div className="flex items-center justify-between border-t border-line-strong px-4 py-3 text-sm font-semibold text-ink">
-          <span>รวมรายจ่าย</span>
-          <span className="tabular-nums">{formatSatang(day.totals.expenseSatang)}</span>
-        </div>
-      </section>
+          <div className="flex items-center justify-between border-t border-line-strong px-4 py-3 text-sm font-semibold text-ink">
+            <span>รวมรายจ่าย</span>
+            <span className="tabular-nums">{formatSatang(day.totals.expenseSatang)}</span>
+          </div>
+        </section>
+      )}
       </div>
-      {/* end of the รายรับ | เงินสด+ยอดรวม | รายจ่าย row */}
+      {/* end of the รายรับ | เงินสด+ยอดรวม | รายจ่าย (legacy) row */}
 
       {/* Day note beside the audit footer + export, so nothing but these two
           ever sits below the three panels. */}

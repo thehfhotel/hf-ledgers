@@ -176,9 +176,14 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
             "bookingsOnly" print/PDF stops at the grid above. */}
         {variant === "full" && (
           <>
-            <div className="flex flex-col gap-4">
-              <DayTenderSummary date={date} sheet={sheet} weekDays={weekDays} />
-            </div>
+            {/* DayTenderSummary renders its own two-column grid (income
+                data left, summary + charts right — owner decision,
+                2026-07-31, see reportSheetBlocks.tsx's module comment).
+                Stretches to this sheet's full content width (~1218px, grid-
+                driven by the booking table above), wider than
+                PrintableDaySummary's own landscape sheet — see the "stretch
+                sensibly" note in DayTenderSummary's own comment. */}
+            <DayTenderSummary date={date} sheet={sheet} weekDays={weekDays} />
 
             <ReportFooter provenance={provenance} verifiedAt={verifiedAt} verifiedBy={verifiedBy} updatedBy={updatedBy} />
           </>

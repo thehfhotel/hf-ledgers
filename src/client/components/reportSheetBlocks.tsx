@@ -45,11 +45,33 @@ import {
 // รายจ่าย section) is retired; ReportSheet's "bookingsOnly" variant never
 // rendered either card, so it is unaffected. ReportFooter, ReportSheetTitle,
 // and the BOX/ROW_* primitives stay genuinely shared across every rendering.
+//
+// TWO COLUMNS (owner decision, 2026-07-31): DayTenderSummary itself renders
+// a two-column grid — LEFT (income data): the tender-grouped category rows
+// plus รายการอื่นๆ; RIGHT (summary + charts): the tender totals, the gold
+// **หมายเหตุ box, then the weekly chart. Motivation: the day summary is
+// HEIGHT-bound on a single-column portrait page (natural 720x1446 -> a
+// ~0.72 fit scale, ~8.7pt body text) — splitting the same content into two
+// side-by-side columns on a landscape page roughly halves the stacked
+// height, trading it for width the landscape page has to spare
+// (PrintableDaySummary.tsx switched DaySheetPage's พิมพ์/PDF to landscape
+// for exactly this). Since DayTenderSummary is the ONE component every
+// export renders, the two-column split applies identically to print, PDF,
+// and the JPEG (ReportSheet.tsx's "full" variant renders it directly below
+// the booking grid) — nothing about the money/labels/conditionals below
+// changed, only which of the two divs each block landed in.
 
 export const BOX = "rounded-lg border border-line";
-export const BOX_HEAD = "border-b border-line bg-tint px-3 py-1.5 text-xs font-semibold text-ink";
-export const ROW_LABEL = "px-3 py-1 text-sm";
-export const ROW_AMOUNT = "px-3 py-1 text-right text-sm tabular-nums whitespace-nowrap";
+export const BOX_HEAD = "border-b border-line bg-tint px-3 py-0.5 text-xs font-semibold text-ink";
+// py-0.5 (not the more roomy py-1 this used to be): pure height budget —
+// the two-column landscape rework (owner decision, 2026-07-31, see the
+// module comment above) needs every row row tightened to keep the fit-to-
+// page scale up (a smaller scale-DOWN leaves MORE of the print-stage font
+// bump's actual point size on paper — see style.css's .print-stage text
+// sizes — so this buys legibility, it doesn't cost it). Applies to every
+// consumer of ROW_LABEL/ROW_AMOUNT (both DayTenderSummary columns) alike.
+export const ROW_LABEL = "px-3 py-0 text-sm";
+export const ROW_AMOUNT = "px-3 py-0 text-right text-sm tabular-nums whitespace-nowrap";
 
 /** The หมายเหตุ (สรุปเงินสด) box only — the ONE box on the sheet meant to
  * visually jump out (it carries the bank-deposit figure the office actually
@@ -131,7 +153,7 @@ export interface ReportSheetTitleProps {
 export function ReportSheetTitle({ property, date, demo = false }: ReportSheetTitleProps) {
   const short = shortPropertyLabel(property);
   return (
-    <header className="mb-4 text-center">
+    <header className="mb-3 text-center">
       <h1 className="text-lg font-bold text-brand-800">
         {`รายงานรายรับของโรงแรม ${short}${demo ? " (ตัวอย่าง)" : ""} ประจำวันที่ ${isoToThaiLong(date)}`}
       </h1>
@@ -150,6 +172,13 @@ export function ReportSheetTitle({ property, date, demo = false }: ReportSheetTi
 // that come from elsewhere (the bank line and any manager-overridden cash
 // component line beneath it, the day note, the itemised รายการอื่นๆ list)
 // are reused via CASH_BLOCK_FIELDS/BOX/ROW_* — never re-typed.
+//
+// Rendered as TWO COLUMNS (owner decision, 2026-07-31): left = income data
+// (the category rows above, plus รายการอื่นๆ), right = summary + charts
+// (the tender totals, the gold **หมายเหตุ box, the weekly chart) — see the
+// module comment's "TWO COLUMNS" note above for the motivation. Nothing
+// about the money/labels/conditionals changed, only which column each
+// block renders in.
 
 /** Sub-line indent under a bold group heading — inline style (not a
  * Tailwind pl-* utility) so it reliably wins over ROW_LABEL's own px-3,
@@ -247,265 +276,291 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
   const printedWeekDays = weekDays ? overrideDayIncome(weekDays, date, totals.incomeSatang) : undefined;
 
   return (
-    <>
-      <div className={BOX}>
-        <h2 className={BOX_HEAD}>สรุปยอดรายรับโรงแรม (แยกตามวิธีรับเงิน)</h2>
-        <table className="w-full border-separate border-spacing-0">
-          <tbody>
-            {grouped.groups.map((group) => (
-              <Fragment key={group.id}>
-                <tr>
-                  <td colSpan={2} className={ROW_LABEL + " pt-2 pb-0.5 font-bold text-ink"}>
-                    {group.label}
-                  </td>
-                </tr>
-                {group.lines.map((line) => (
-                  <tr key={line.categoryKey} className="align-baseline">
-                    <td className={ROW_LABEL + " border-b border-line"} style={{ paddingLeft: SUB_LINE_INDENT_PX }}>
-                      {line.label}
-                      {line.archived && <span className="ml-1 text-xs text-ink-muted">(เลิกใช้)</span>}
-                    </td>
-                    <td className={ROW_AMOUNT + " border-b border-line"}>
-                      {line.amountSatang != null ? formatSatang(line.amountSatang) : "-"}
-                    </td>
-                  </tr>
-                ))}
-              </Fragment>
-            ))}
-
-            {/* Manager-created income categories with no CategoryKey —
-                never dropped, but honestly excluded from every tender
-                total below since the paper never recorded how they
-                arrived. */}
-            {grouped.unclassified.length > 0 && (
-              <Fragment>
-                <tr>
-                  <td colSpan={2} className={ROW_LABEL + " pt-2 pb-0.5 font-bold text-ink"}>
-                    {UNCLASSIFIED_GROUP_LABEL_TH}
-                  </td>
-                </tr>
-                {grouped.unclassified.map((line) => (
-                  <tr key={line.categoryId} className="align-baseline">
-                    <td className={ROW_LABEL + " border-b border-line"} style={{ paddingLeft: SUB_LINE_INDENT_PX }}>
-                      {line.label}
-                      {line.archived && <span className="ml-1 text-xs text-ink-muted">(เลิกใช้)</span>}
-                    </td>
-                    <td className={ROW_AMOUNT + " border-b border-line"}>{formatSatang(line.amountSatang)}</td>
-                  </tr>
-                ))}
-              </Fragment>
-            )}
-
-            {/* Totals — visually distinct (shaded + bold) from the
-                sub-lines above, so a shorter total row can never be
-                mistaken for one more category. The four group subtotals
-                plus (when non-empty) the unclassified subtotal are the
-                ONLY shaded rows, and always sum to the bold grand total
-                below. */}
-            {grouped.groups.map((group) => (
-              <tr key={`${group.id}-total`} className="bg-tint">
-                <td className={ROW_LABEL + " border-t border-line font-semibold"}>
-                  {group.totalLabel}
-                  {group.id === "transfer" && "*"}
-                </td>
-                <td className={ROW_AMOUNT + " border-t border-line font-semibold"}>
-                  {formatSatang(group.totalSatang)}
-                </td>
-              </tr>
-            ))}
-            {grouped.unclassified.length > 0 && (
-              <tr className="bg-tint">
-                <td className={ROW_LABEL + " border-t border-line font-semibold"}>{UNCLASSIFIED_TOTAL_LABEL_TH}</td>
-                <td className={ROW_AMOUNT + " border-t border-line font-semibold"}>
-                  {formatSatang(grouped.unclassifiedTotalSatang)}
-                </td>
-              </tr>
-            )}
-
-            <tr>
-              <td className={ROW_LABEL + " border-t-2 border-line-strong pt-1.5 text-base font-bold text-brand-500"}>
-                {GRAND_TOTAL_LABEL_TH}
-              </td>
-              <td
-                className={
-                  ROW_AMOUNT + " border-t-2 border-line-strong pt-1.5 text-base font-bold text-brand-500"
-                }
-              >
-                {formatSatang(totals.incomeSatang)}
-              </td>
-            </tr>
-            {/* Real-time cross-check, never suppressed: if the tender
-                grouping's own independently-summed total ever disagrees
-                with the server-computed รวมรายรับทั้งวัน, that has to be
-                visible, not silently swallowed. */}
-            {incomeMismatch && (
-              <tr>
-                <td colSpan={2} className={ROW_LABEL + " pt-1 pb-1 text-xs font-semibold text-bad"}>
-                  ตรวจสอบ: ผลรวมตามวิธีรับเงินไม่ตรงกับรวมรายรับ (ต่าง{" "}
-                  {formatSatang(Math.abs(totals.incomeSatang - grouped.grandTotalSatang))})
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        <p className="px-3 pt-1 pb-2 text-[11px] leading-snug text-ink-muted">
-          * รายการ โอน/เครดิต ที่แยกประเภทไม่ได้ นับรวมในเงินโอน
-        </p>
-      </div>
-
-      <div className={HIGHLIGHT_BOX}>
-        <h2 className={HIGHLIGHT_BOX_HEAD}>**หมายเหตุ (สรุปเงินสด)</h2>
-        <div className="px-3 py-2">
-          {/* Manager cash overrides MUST show: when the till was counted
-              short/over and a component (room/other/bar cash) was
-              adjusted, that adjustment has to be visible, not just folded
-              into the bank total below — same rule BookingDayPage's
-              cash-block panel already enforces on screen. Silent in the
-              common (no override) case. */}
-          {overriddenCashComponents.length > 0 && (
-            <div className="mb-1.5 flex flex-col gap-0.5 border-b border-line pb-1.5">
-              {overriddenCashComponents.map((row) => (
-                <div key={row.key} className="flex items-baseline justify-between gap-3">
-                  <span className="text-sm text-ink">
-                    {row.label}
-                    <span className="ml-1.5 text-xs font-normal text-ink-muted">
-                      (ปรับจาก {formatSatang(row.derived)})
-                    </span>
-                  </span>
-                  <span className="text-sm tabular-nums whitespace-nowrap text-ink">
-                    {formatSatang(row.entered)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          {/* Deposit-machine reconciliation rows — same visibility rule as
-              overriddenCashComponents above: silent when both are
-              zero/unset, printed with an obvious sign otherwise so the
-              arithmetic into ยอดฝากจริง below reads top-to-bottom. */}
-          {cashAdjustmentRows.length > 0 && (
-            <div className="mb-1.5 flex flex-col gap-0.5 border-b border-line pb-1.5">
-              {cashAdjustmentRows.map((row) => (
-                <div key={row.key} className="flex items-baseline justify-between gap-3">
-                  <span className="text-sm text-ink">{row.label}</span>
-                  <span className="text-sm tabular-nums whitespace-nowrap text-ink">
-                    {row.sign} {formatSatang(row.amountSatang)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="text-sm font-bold text-brand-500">
-              {bankLabel} (ยอดฝากจริง)
-              {bankedOverridden && (
-                <span className="ml-1.5 text-xs font-normal text-ink-muted">
-                  (ปรับจาก {formatSatang(bankedDerived)})
-                </span>
-              )}
-            </span>
-            <span className="text-base font-bold tabular-nums whitespace-nowrap text-brand-500">
-              {formatSatang(bankedShown)}
-            </span>
-          </div>
-          {note && (
-            <p className="mt-2 border-t border-line pt-1.5 text-xs leading-snug text-ink">
-              <span className="font-semibold">หมายเหตุประจำวัน: </span>
-              {note}
-            </p>
-          )}
-        </div>
-      </div>
-
-      {/* Weekly income bar chart — decorative trend context, deliberately
-          placed after the cash/**หมายเหตุ box (which carries the actual
-          banking figure the office needs) and before รายการอื่นๆ, which
-          stays the last section here (the footer is the caller's own,
-          rendered after this component). Absent entirely when weekDays
-          hasn't loaded yet or failed to load (DaySheetPage.tsx never
-          throws on that failure). */}
-      {printedWeekDays && printedWeekDays.length === 7 && (
+    // grid-cols-2 splits the PARENT's full content width evenly (Tailwind's
+    // default `repeat(2, minmax(0, 1fr))`), not a fixed pixel pair — so this
+    // stretches sensibly to whichever sheet hosts it: ~508px columns inside
+    // PrintableDaySummary's landscape sheet (sized for that target range,
+    // see its module comment), wider inside ReportSheet.tsx's "full" variant
+    // (that sheet's width is grid-driven by the booking table above it, not
+    // by this component) rather than looking orphaned/narrow beneath a much
+    // wider grid.
+    <div className="grid grid-cols-2 gap-6">
+      {/* LEFT column — income data: the tender-grouped category rows
+          (owner decision, 2026-07-31, see the module comment above), plus
+          the itemized รายการอื่นๆ box. No totals of any kind here — those
+          are the right column's job — so this column is purely "how much
+          landed in each category". */}
+      <div className="flex flex-col gap-4">
         <div className={BOX}>
-          <h2 className={BOX_HEAD}>
-            {WEEK_CHART_TITLE_TH}{" "}
-            <span className="font-normal text-ink-muted">
-              ({isoToBuddhist(printedWeekDays[0]!.date)}–{isoToBuddhist(printedWeekDays[6]!.date)})
-            </span>
-          </h2>
-          <div
-            className="flex items-end justify-between gap-1.5 px-3 pt-3 pb-2"
-            style={{ height: WEEK_CHART_PLOT_HEIGHT_PX }}
-          >
-            {printedWeekDays.every((d) => d.incomeSatang === 0) ? (
-              <div className="flex w-full items-center justify-center text-sm text-ink-muted">-</div>
-            ) : (
-              scaleWeekBars(printedWeekDays, WEEK_CHART_BAR_MAX_PX).map((bar, i) => {
-                const isPrintedDate = bar.date === date;
-                // Days AFTER the printed date haven't happened yet —
-                // muted, barless, and blank rather than reading as zero
-                // income (so a Monday printout doesn't look like a week
-                // of six empty days). Past/today zero days keep the
-                // normal (unmuted) zero-bar look.
-                const isFuture = isFutureDay(bar.date, date);
-                const dayOfMonth = Number(bar.date.slice(8, 10));
-                const mutedStyle = { color: "#999" };
-                return (
-                  <div key={bar.date} className="flex flex-1 flex-col items-center gap-1">
-                    <span className="text-[10px] tabular-nums whitespace-nowrap text-ink-muted">
-                      {!isFuture && bar.incomeSatang > 0 ? formatSatang(bar.incomeSatang) : ""}
-                    </span>
-                    <div
-                      className="w-full max-w-[24px]"
-                      style={{
-                        height: !isFuture && bar.incomeSatang > 0 ? Math.max(bar.heightPx, 2) : 0,
-                        backgroundColor: isFuture ? "transparent" : isPrintedDate ? "#000" : "#666",
-                      }}
-                    />
-                    <span
-                      className={
-                        "text-[10px] " +
-                        (isPrintedDate ? "font-bold text-ink" : isFuture ? "" : "font-medium text-ink-muted")
-                      }
-                      style={isFuture ? mutedStyle : undefined}
-                    >
-                      {WEEKDAY_LABELS_TH[i]}
-                    </span>
-                    <span
-                      className={
-                        "text-[10px] tabular-nums " +
-                        (isPrintedDate ? "font-bold text-ink" : isFuture ? "" : "text-ink-muted")
-                      }
-                      style={isFuture ? mutedStyle : undefined}
-                    >
-                      {dayOfMonth}
-                    </span>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      )}
-
-      {otherIncome.length > 0 && (
-        <div className={BOX}>
-          <h2 className={BOX_HEAD}>รายการอื่นๆ</h2>
+          <h2 className={BOX_HEAD}>สรุปยอดรายรับโรงแรม (แยกตามวิธีรับเงิน)</h2>
           <table className="w-full border-separate border-spacing-0">
             <tbody>
-              {otherIncome.map((item) => (
-                <tr key={item.id} className="align-baseline">
-                  <td className={ROW_LABEL + " border-b border-line"}>{item.description ?? "-"}</td>
-                  <td className="border-b border-line px-2 py-1 text-xs text-ink-muted whitespace-nowrap">
-                    {item.isCash ? "เงินสด" : "โอน/เครดิต"}
-                  </td>
-                  <td className={ROW_AMOUNT + " border-b border-line"}>{formatSatang(item.amountSatang)}</td>
-                </tr>
+              {grouped.groups.map((group) => (
+                <Fragment key={group.id}>
+                  <tr>
+                    <td colSpan={2} className={ROW_LABEL + " pt-1 font-bold text-ink"}>
+                      {group.label}
+                    </td>
+                  </tr>
+                  {group.lines.map((line) => (
+                    <tr key={line.categoryKey} className="align-baseline">
+                      <td className={ROW_LABEL + " border-b border-line"} style={{ paddingLeft: SUB_LINE_INDENT_PX }}>
+                        {line.label}
+                        {line.archived && <span className="ml-1 text-xs text-ink-muted">(เลิกใช้)</span>}
+                      </td>
+                      <td className={ROW_AMOUNT + " border-b border-line"}>
+                        {line.amountSatang != null ? formatSatang(line.amountSatang) : "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </Fragment>
               ))}
+
+              {/* Manager-created income categories with no CategoryKey —
+                  never dropped, but honestly excluded from every tender
+                  total on the right since the paper never recorded how
+                  they arrived. */}
+              {grouped.unclassified.length > 0 && (
+                <Fragment>
+                  <tr>
+                    <td colSpan={2} className={ROW_LABEL + " pt-1 font-bold text-ink"}>
+                      {UNCLASSIFIED_GROUP_LABEL_TH}
+                    </td>
+                  </tr>
+                  {grouped.unclassified.map((line) => (
+                    <tr key={line.categoryId} className="align-baseline">
+                      <td className={ROW_LABEL + " border-b border-line"} style={{ paddingLeft: SUB_LINE_INDENT_PX }}>
+                        {line.label}
+                        {line.archived && <span className="ml-1 text-xs text-ink-muted">(เลิกใช้)</span>}
+                      </td>
+                      <td className={ROW_AMOUNT + " border-b border-line"}>{formatSatang(line.amountSatang)}</td>
+                    </tr>
+                  ))}
+                </Fragment>
+              )}
             </tbody>
           </table>
         </div>
-      )}
-    </>
+
+        {otherIncome.length > 0 && (
+          <div className={BOX}>
+            <h2 className={BOX_HEAD}>รายการอื่นๆ</h2>
+            <table className="w-full border-separate border-spacing-0">
+              <tbody>
+                {otherIncome.map((item) => (
+                  <tr key={item.id} className="align-baseline">
+                    <td className={ROW_LABEL + " border-b border-line"}>{item.description ?? "-"}</td>
+                    <td className="border-b border-line px-2 py-0.5 text-xs text-ink-muted whitespace-nowrap">
+                      {item.isCash ? "เงินสด" : "โอน/เครดิต"}
+                    </td>
+                    <td className={ROW_AMOUNT + " border-b border-line"}>{formatSatang(item.amountSatang)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* RIGHT column — summary + charts: the tender totals (its own box,
+          split out of the left column's table — owner decision,
+          2026-07-31), then the gold **หมายเหตุ box (the figure the office
+          actually needs), then the weekly trend chart. */}
+      <div className="flex flex-col gap-4">
+        <div className={BOX}>
+          <h2 className={BOX_HEAD}>ยอดรวมตามวิธีรับเงิน</h2>
+          <table className="w-full border-separate border-spacing-0">
+            <tbody>
+              {/* Totals — visually distinct (shaded + bold) from the
+                  left column's category rows, so a shorter total row can
+                  never be mistaken for one more category. The four group
+                  subtotals plus (when non-empty) the unclassified subtotal
+                  are the ONLY shaded rows, and always sum to the bold
+                  grand total below. */}
+              {grouped.groups.map((group) => (
+                <tr key={`${group.id}-total`} className="bg-tint">
+                  <td className={ROW_LABEL + " border-t border-line font-semibold"}>
+                    {group.totalLabel}
+                    {group.id === "transfer" && "*"}
+                  </td>
+                  <td className={ROW_AMOUNT + " border-t border-line font-semibold"}>
+                    {formatSatang(group.totalSatang)}
+                  </td>
+                </tr>
+              ))}
+              {grouped.unclassified.length > 0 && (
+                <tr className="bg-tint">
+                  <td className={ROW_LABEL + " border-t border-line font-semibold"}>{UNCLASSIFIED_TOTAL_LABEL_TH}</td>
+                  <td className={ROW_AMOUNT + " border-t border-line font-semibold"}>
+                    {formatSatang(grouped.unclassifiedTotalSatang)}
+                  </td>
+                </tr>
+              )}
+
+              <tr>
+                <td className={ROW_LABEL + " border-t-2 border-line-strong pt-1.5 text-base font-bold text-brand-500"}>
+                  {GRAND_TOTAL_LABEL_TH}
+                </td>
+                <td
+                  className={
+                    ROW_AMOUNT + " border-t-2 border-line-strong pt-1.5 text-base font-bold text-brand-500"
+                  }
+                >
+                  {formatSatang(totals.incomeSatang)}
+                </td>
+              </tr>
+              {/* Real-time cross-check, never suppressed: if the tender
+                  grouping's own independently-summed total ever disagrees
+                  with the server-computed รวมรายรับทั้งวัน, that has to be
+                  visible, not silently swallowed. */}
+              {incomeMismatch && (
+                <tr>
+                  <td colSpan={2} className={ROW_LABEL + " pt-1 pb-1 text-xs font-semibold text-bad"}>
+                    ตรวจสอบ: ผลรวมตามวิธีรับเงินไม่ตรงกับรวมรายรับ (ต่าง{" "}
+                    {formatSatang(Math.abs(totals.incomeSatang - grouped.grandTotalSatang))})
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+          <p className="px-3 pt-1 pb-2 text-[11px] leading-snug text-ink-muted">
+            * รายการ โอน/เครดิต ที่แยกประเภทไม่ได้ นับรวมในเงินโอน
+          </p>
+        </div>
+
+        <div className={HIGHLIGHT_BOX}>
+          <h2 className={HIGHLIGHT_BOX_HEAD}>**หมายเหตุ (สรุปเงินสด)</h2>
+          <div className="px-3 py-1.5">
+            {/* Manager cash overrides MUST show: when the till was counted
+                short/over and a component (room/other/bar cash) was
+                adjusted, that adjustment has to be visible, not just folded
+                into the bank total below — same rule BookingDayPage's
+                cash-block panel already enforces on screen. Silent in the
+                common (no override) case. */}
+            {overriddenCashComponents.length > 0 && (
+              <div className="mb-1 flex flex-col gap-0.5 border-b border-line pb-1">
+                {overriddenCashComponents.map((row) => (
+                  <div key={row.key} className="flex items-baseline justify-between gap-3">
+                    <span className="text-sm text-ink">
+                      {row.label}
+                      <span className="ml-1.5 text-xs font-normal text-ink-muted">
+                        (ปรับจาก {formatSatang(row.derived)})
+                      </span>
+                    </span>
+                    <span className="text-sm tabular-nums whitespace-nowrap text-ink">
+                      {formatSatang(row.entered)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Deposit-machine reconciliation rows — same visibility rule as
+                overriddenCashComponents above: silent when both are
+                zero/unset, printed with an obvious sign otherwise so the
+                arithmetic into ยอดฝากจริง below reads top-to-bottom. */}
+            {cashAdjustmentRows.length > 0 && (
+              <div className="mb-1 flex flex-col gap-0.5 border-b border-line pb-1">
+                {cashAdjustmentRows.map((row) => (
+                  <div key={row.key} className="flex items-baseline justify-between gap-3">
+                    <span className="text-sm text-ink">{row.label}</span>
+                    <span className="text-sm tabular-nums whitespace-nowrap text-ink">
+                      {row.sign} {formatSatang(row.amountSatang)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-sm font-bold text-brand-500">
+                {bankLabel} (ยอดฝากจริง)
+                {bankedOverridden && (
+                  <span className="ml-1.5 text-xs font-normal text-ink-muted">
+                    (ปรับจาก {formatSatang(bankedDerived)})
+                  </span>
+                )}
+              </span>
+              <span className="text-base font-bold tabular-nums whitespace-nowrap text-brand-500">
+                {formatSatang(bankedShown)}
+              </span>
+            </div>
+            {note && (
+              <p className="mt-1.5 border-t border-line pt-1 text-xs leading-snug text-ink">
+                <span className="font-semibold">หมายเหตุประจำวัน: </span>
+                {note}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Weekly income bar chart — decorative trend context, deliberately
+            placed after the cash/**หมายเหตุ box (which carries the actual
+            banking figure the office needs). Absent entirely when weekDays
+            hasn't loaded yet or failed to load (DaySheetPage.tsx never
+            throws on that failure). */}
+        {printedWeekDays && printedWeekDays.length === 7 && (
+          <div className={BOX}>
+            <h2 className={BOX_HEAD}>
+              {WEEK_CHART_TITLE_TH}{" "}
+              <span className="font-normal text-ink-muted">
+                ({isoToBuddhist(printedWeekDays[0]!.date)}–{isoToBuddhist(printedWeekDays[6]!.date)})
+              </span>
+            </h2>
+            <div
+              className="flex items-end justify-between gap-1.5 px-3 pt-3 pb-2"
+              style={{ height: WEEK_CHART_PLOT_HEIGHT_PX }}
+            >
+              {printedWeekDays.every((d) => d.incomeSatang === 0) ? (
+                <div className="flex w-full items-center justify-center text-sm text-ink-muted">-</div>
+              ) : (
+                scaleWeekBars(printedWeekDays, WEEK_CHART_BAR_MAX_PX).map((bar, i) => {
+                  const isPrintedDate = bar.date === date;
+                  // Days AFTER the printed date haven't happened yet —
+                  // muted, barless, and blank rather than reading as zero
+                  // income (so a Monday printout doesn't look like a week
+                  // of six empty days). Past/today zero days keep the
+                  // normal (unmuted) zero-bar look.
+                  const isFuture = isFutureDay(bar.date, date);
+                  const dayOfMonth = Number(bar.date.slice(8, 10));
+                  const mutedStyle = { color: "#999" };
+                  return (
+                    <div key={bar.date} className="flex flex-1 flex-col items-center gap-1">
+                      <span className="text-[10px] tabular-nums whitespace-nowrap text-ink-muted">
+                        {!isFuture && bar.incomeSatang > 0 ? formatSatang(bar.incomeSatang) : ""}
+                      </span>
+                      <div
+                        className="w-full max-w-[24px]"
+                        style={{
+                          height: !isFuture && bar.incomeSatang > 0 ? Math.max(bar.heightPx, 2) : 0,
+                          backgroundColor: isFuture ? "transparent" : isPrintedDate ? "#000" : "#666",
+                        }}
+                      />
+                      <span
+                        className={
+                          "text-[10px] " +
+                          (isPrintedDate ? "font-bold text-ink" : isFuture ? "" : "font-medium text-ink-muted")
+                        }
+                        style={isFuture ? mutedStyle : undefined}
+                      >
+                        {WEEKDAY_LABELS_TH[i]}
+                      </span>
+                      <span
+                        className={
+                          "text-[10px] tabular-nums " +
+                          (isPrintedDate ? "font-bold text-ink" : isFuture ? "" : "text-ink-muted")
+                        }
+                        style={isFuture ? mutedStyle : undefined}
+                      >
+                        {dayOfMonth}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -520,7 +575,7 @@ export interface ReportFooterProps {
 
 export function ReportFooter({ provenance, verifiedAt, verifiedBy, updatedBy }: ReportFooterProps) {
   return (
-    <footer className="mt-5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-t border-line pt-2 text-[11px] text-ink-muted">
+    <footer className="mt-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-t border-line pt-1.5 text-[11px] text-ink-muted">
       <span>ที่มาของข้อมูล: {PROVENANCE_LABELS_TH[provenance]}</span>
       <span>
         {verifiedAt

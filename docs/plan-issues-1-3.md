@@ -128,3 +128,16 @@ upstream), and notes have to persist somewhere — which rules out a stateless h
 A deposit register in this app, a separate reception deposit app, first-class deposit capture in
 new-hotel, a booking-line deposit column split, and any expiry/forfeiture rule — each ruled out
 during the interview for reasons recorded in `docs/adr/0001`.
+
+## FINAL STATUS (2026-07-31, all waves shipped)
+
+- Wave A (print clamp) + Wave B (derived cash): shipped 758bb72, verified live.
+- Wave C (accrual deposits): analytics 015 shipped d5f77d9 + 75552ae (422 footing), ledger
+  shipped 473f492 after Opus review (ship-with-fixes, all applied), hf-mcp shipped 99cadd7.
+  Cutover 2026-07-31 both properties. Three-way split demo verified: print/screen/JPEG agree
+  exactly (revenue 6,300 / held 1,200 / banked 5,660 on the seeded day).
+- Wave D (deposit register + re-pull corrections): shipped d6e3284 after Opus review
+  (ship-with-fixes, all applied). 601 tests green.
+- Deferred, tracked: per-field accept and a pms-baseline column for handEdited (comment in
+  db.ts); gold-box "รวมตามรายการ" line; hidden-slot print footnote; issue #1 (t_deposit split)
+  now MOOT under accrual — closed by this work; issue #2 (typed other-cash) closed by Wave B.

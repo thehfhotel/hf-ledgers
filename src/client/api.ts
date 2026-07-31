@@ -11,6 +11,7 @@ import type {
   DaySummary,
   DepositEvent,
   DepositEventKind,
+  DepositNote,
   DepositTender,
   ExpenseItem,
   Me,
@@ -22,6 +23,22 @@ import type {
 // contract of record). One function per endpoint, in the same order as
 // that document. Non-2xx responses throw with the server's `{error}`
 // message when present.
+
+/** Thrown by `request()` on any non-2xx response — carries the HTTP
+ * `status` alongside the message so a caller that genuinely needs to
+ * distinguish e.g. 503 ("not configured") from any other failure can (the
+ * deposit register page's "PMS not connected" empty state is the first
+ * caller that needs this — every earlier page only ever showed the message
+ * text). Still an `Error` subclass, so every existing
+ * `err instanceof Error ? err.message : ...` call site is unaffected. */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -36,7 +53,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* body wasn't JSON — keep the statusText fallback */
     }
-    throw new Error(message);
+    throw new ApiError(res.status, message);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -342,13 +359,38 @@ export interface PmsAnomaly {
   detail: string;
 }
 
+/** One field where a fresh PMS re-pull now disagrees with what is
+ * currently stored on an existing booking line (Wave D, D5) — mirrors
+ * db.ts's `BookingLineFieldDiff`. `before`/`after` are whatever that
+ * field's own type is (string, number, or null) — rendered generically as
+ * text by `PmsPullResultDialog`. */
+export interface PmsBookingLineFieldDiff {
+  field: string;
+  before: string | number | null;
+  after: string | number | null;
+}
+
+/** One existing PMS-sourced booking line a fresh pull found differing from
+ * what is currently stored (Wave D, D5) — mirrors db.ts's
+ * `PmsBookingLineChange`. `handEdited` drives the "เคยแก้ไขด้วยมือ" chip in
+ * `PmsPullResultDialog`. */
+export interface PmsBookingLineChange {
+  id: number;
+  pmsRef: string;
+  bookingNo: string | null;
+  handEdited: boolean;
+  fields: PmsBookingLineFieldDiff[];
+}
+
 // POST /api/:property/day/:date/pull-from-pms
 // Inserts booking lines AND deposit events from the PMS payment ledger for
 // that property+date (Wave C, docs/adr/0001) — button-triggered only
 // (BookingDayPage.tsx), never automatic. Insert-only and idempotent: a
 // payment whose pms_ref already exists that day is skipped server-side, and
 // an existing row is never updated. Refunds are filtered out server-side
-// and counted in `skippedRefunds`, never inserted.
+// and counted in `skippedRefunds`, never inserted. `changed` (Wave D, D5,
+// additive) lists existing rows the fresh pull found differing from what's
+// currently stored — surfaced by `PmsPullResultDialog` for a per-row accept.
 export function pullFromPms(
   property: Property,
   date: string,
@@ -361,8 +403,18 @@ export function pullFromPms(
   depositsInserted: number;
   depositsSkipped: number;
   anomalies: PmsAnomaly[];
+  changed: PmsBookingLineChange[];
 }> {
   return request(`/${property}/day/${date}/pull-from-pms`, { method: "POST" });
+}
+
+// POST /api/:property/bookings/:id/accept-pms-update (Wave D, D5) — no
+// body. Re-fetches the day fresh and re-applies the fields the PMS writes
+// onto the EXISTING row (merged into its current tenders — hand-keyed
+// credit_icbc/transfer_icbc/other survive). 404 non-pms row, 409 closed
+// month, 409 if the candidate has vanished or become a refund.
+export function acceptPmsUpdate(property: Property, id: number): Promise<BookingLine> {
+  return request(`/${property}/bookings/${id}/accept-pms-update`, { method: "POST" });
 }
 
 // ── Wave C: deposit_events hand-entry CRUD (docs/adr/0001) ────────────────
@@ -401,4 +453,107 @@ export function updateDepositEvent(property: Property, id: number, body: Deposit
 // 29. DELETE /api/:property/deposits/:id
 export function deleteDepositEvent(property: Property, id: number): Promise<void> {
   return request(`/${property}/deposits/${id}`, { method: "DELETE" });
+}
+
+// ── Wave D: the office deposit register (issue #5) ────────────────────────
+// A SEPARATE, direct-to-PMS code path (src/server/deposit-register.ts) —
+// full deposit-lifecycle history, independent of Wave C's importer/cutover.
+
+/** Note fields merged onto every aging/exception row — `null` note/
+ * resolvedAt/resolvedBy when no `DepositNote` thread exists yet for that
+ * R-number. */
+interface DepositNoteFields {
+  note: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+}
+
+export interface DepositMonthlyReconciliation {
+  /** Bangkok "YYYY-MM". Returned CHRONOLOGICAL (ascending) — reversing for
+   * "newest first" display (สรุปรายเดือน) is this page's own job. */
+  month: string;
+  openingSatang: number;
+  receivedSatang: number;
+  appliedSatang: number;
+  refundedSatang: number;
+  closingSatang: number;
+}
+
+export type DepositAgingRow = DepositNoteFields & {
+  rNumber: string;
+  receivedSatang: number;
+  appliedSatang: number;
+  refundedSatang: number;
+  outstandingSatang: number;
+  firstEventDate: string | null;
+};
+
+export type DepositMismatchedException = DepositNoteFields & {
+  rNumber: string;
+  receivedSatang: number;
+  appliedSatang: number;
+  diffSatang: number;
+};
+
+export type DepositOrphanAppliedException = DepositNoteFields & {
+  rNumber: string;
+  appliedSatang: number;
+};
+
+/** `rNumber` is nullable (review fix): a voided row can itself carry an
+ * unparseable/blank R-number, which never joins any aging/exceptions row —
+ * the footnote must still be able to show it. */
+export interface DepositVoidedEvent {
+  rNumber: string | null;
+  kind: "received" | "applied" | "refunded";
+  amountSatang: number;
+  dateBangkok: string | null;
+}
+
+export interface DepositRegisterResponse {
+  property: Property;
+  generatedAt: string;
+  monthly: DepositMonthlyReconciliation[];
+  aging: DepositAgingRow[];
+  exceptions: {
+    mismatched: DepositMismatchedException[];
+    orphanApplied: DepositOrphanAppliedException[];
+  };
+  unparsedAppliedRows: number;
+  /** Review fix: three more tripwire counters, none of which invent or drop
+   * money. `zeroTenderRows` — a received/refunded row whose tender columns
+   * summed to zero despite a nonzero ledger_amount. `blankBookingNoRows` —
+   * a received/refunded row with no R-number at all (never joins a thread).
+   * `undatedRows` — a row whose payment date failed to parse (dropped from
+   * `monthly`, still counted in its thread). See deposit-register.ts's
+   * `DepositRegisterData` doc comment for the full reasoning. */
+  zeroTenderRows: number;
+  blankBookingNoRows: number;
+  undatedRows: number;
+  voided: DepositVoidedEvent[];
+}
+
+// 30. GET /api/:property/deposits/register — 503 when this property's PMS
+// env URL is unset (see `ApiError`, `err.status === 503`, for the page's
+// "PMS not connected" empty state), 502 on a live query failure.
+export function getDepositRegister(property: Property): Promise<DepositRegisterResponse> {
+  return request(`/${property}/deposits/register`);
+}
+
+// 31. PUT /api/:property/deposits/:rNumber/note — NOT month-close gated
+// (commentary rule). `:rNumber` must match iHOTEL's fixed `R\d{6}` shape.
+export function putDepositNote(
+  property: Property,
+  rNumber: string,
+  body: { note: string | null; resolved: boolean },
+): Promise<DepositNote> {
+  return request(`/${property}/deposits/${encodeURIComponent(rNumber)}/note`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+// 32. DELETE /api/:property/deposits/:rNumber/note
+export function deleteDepositNote(property: Property, rNumber: string): Promise<void> {
+  return request(`/${property}/deposits/${encodeURIComponent(rNumber)}/note`, { method: "DELETE" });
 }

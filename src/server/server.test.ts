@@ -11,14 +11,18 @@ process.env.PORT = "0"; // let the OS pick a free port — avoids clashing with 
 
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../client/cashBlockPatches.ts";
-import { REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
+import { DEPOSIT_NOTE_MAX_LEN, REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
 import type { CashBlock, Category, CategoryKey, Property, Tender } from "../shared/types.ts";
 import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
+import type { DepositRegisterData, DepositThread, MonthlyDepositReconciliation } from "./deposit-register.ts";
 
 const { api } = await import("./server.ts");
 // server.ts already imported pms-prefill.ts above, so this re-import just
 // reads the cached module — same _internal pattern as analytics-push.test.ts.
 const { _internal: pmsPrefillInternal } = await import("./pms-prefill.ts");
+// Same pattern again for deposit-register.ts (Wave D) — server.ts already
+// imported it above, so this just reads the cached module.
+const { _internal: depositRegisterInternal } = await import("./deposit-register.ts");
 
 const BASE = "http://localhost";
 
@@ -1435,6 +1439,112 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     expect(configured.body.pmsPull).toBe(true);
   });
 
+  // ── Wave D, D5: re-pull change detection (the office deposit register's
+  // sibling fix, issue #5) — a re-pull of an ALREADY-imported day must
+  // still skip the existing row (hand edits are sacred — insert-only NEVER
+  // changes), but now ALSO reports a `changed` diff when the fresh PMS
+  // candidate disagrees with what is currently stored, so the office can
+  // see it and decide (see `PmsPullResultDialog.tsx` on the client, and the
+  // accept-pms-update tests below for the "apply the diff" half).
+  describe("re-pull change detection (Wave D, D5)", () => {
+    test("an unchanged existing row: skipped, changed is empty, the stored row is untouched", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      const DATE = "2026-09-20";
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult([pmsCandidate({ pmsRef: "R2609-9001", bookingNo: "CH26-900001", cashSatang: 100_000 })]),
+      );
+      await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+
+      const second = await call<{ inserted: number; skipped: number; changed: unknown[] }>(
+        "POST",
+        `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+      );
+      expect(second.body.inserted).toBe(0);
+      expect(second.body.skipped).toBe(1);
+      expect(second.body.changed).toEqual([]);
+    });
+
+    test("a fresh candidate differing on gross room + tenders: reported in `changed`, never written — the stored row is provably untouched", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      const DATE = "2026-09-21";
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult([
+          pmsCandidate({ pmsRef: "R2609-9002", bookingNo: "CH26-900002", grossRoomSatang: 100_000, cashSatang: 100_000 }),
+        ]),
+      );
+      await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+      const before = await call<{ lines: Array<{ id: number; grossRoomSatang: number; tenders: Record<Tender, number>; updatedAt: string } > }>(
+        "GET",
+        `/${PROPERTY}/day/${DATE}/bookings`,
+      );
+      const storedId = before.body.lines[0]!.id;
+
+      // The PMS now says 1,200 (was 1,000) — reception amended the folio.
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult([
+          pmsCandidate({ pmsRef: "R2609-9002", bookingNo: "CH26-900002", grossRoomSatang: 120_000, cashSatang: 120_000 }),
+        ]),
+      );
+      const pulled = await call<{
+        inserted: number;
+        skipped: number;
+        changed: Array<{ id: number; pmsRef: string; bookingNo: string | null; handEdited: boolean; fields: Array<{ field: string; before: unknown; after: unknown }> }>;
+      }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+
+      expect(pulled.body.inserted).toBe(0);
+      expect(pulled.body.skipped).toBe(1);
+      expect(pulled.body.changed).toHaveLength(1);
+      const change = pulled.body.changed[0]!;
+      expect(change.id).toBe(storedId);
+      expect(change.pmsRef).toBe("R2609-9002");
+      expect(change.handEdited).toBe(false);
+      expect(change.fields).toEqual(
+        expect.arrayContaining([
+          { field: "grossRoomSatang", before: 100_000, after: 120_000 },
+          { field: "cash", before: 100_000, after: 120_000 },
+        ]),
+      );
+
+      // The stored row is PROVABLY untouched — insert-only never writes on skip.
+      const after = await call<{ lines: Array<{ id: number; grossRoomSatang: number; updatedAt: string }> }>(
+        "GET",
+        `/${PROPERTY}/day/${DATE}/bookings`,
+      );
+      expect(after.body.lines[0]!.grossRoomSatang).toBe(100_000);
+      expect(after.body.lines[0]!.updatedAt).toBe(before.body.lines[0]!.updatedAt);
+    });
+
+    test("handEdited is true once a hand edit bumped updatedAt past createdAt", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      const DATE = "2026-09-22";
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult([pmsCandidate({ pmsRef: "R2609-9003", bookingNo: "CH26-900003", cashSatang: 50_000 })]),
+      );
+      await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+      const before = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+      const id = before.body.lines[0]!.id;
+
+      // `handEdited` compares SQLite `datetime('now')` strings, which are
+      // only SECOND-resolution — without a real gap here, a fast test run
+      // could insert-then-patch inside the same wall-clock second and
+      // updatedAt would equal createdAt even though a hand edit happened.
+      await Bun.sleep(1100);
+
+      // A hand edit — the office corrected the guest name.
+      await call("PATCH", `/${PROPERTY}/bookings/${id}`, { guestName: "แก้ไขด้วยมือ" });
+
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult([pmsCandidate({ pmsRef: "R2609-9003", bookingNo: "CH26-900003", cashSatang: 55_000 })]),
+      );
+      const pulled = await call<{ changed: Array<{ handEdited: boolean }> }>(
+        "POST",
+        `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+      );
+      expect(pulled.body.changed).toHaveLength(1);
+      expect(pulled.body.changed[0]!.handEdited).toBe(true);
+    });
+  });
+
   // ── Wave C: deposit events ride along the same pull ────────────────────
   describe("deposit events (Wave C, docs/adr/0001)", () => {
     test("inserts received + refunded deposit candidates as deposit_events, idempotently", async () => {
@@ -1715,5 +1825,456 @@ describe("Wave C: deposit_events hand-entry CRUD (docs/adr/0001)", () => {
     );
     expect(day.body.cashBlock.depositCashInSatang).toBe(0);
     expect(day.body.cashBlock.derived.bankedSatang).toBe(0);
+  });
+});
+
+describe("Wave D, D5: accept-pms-update (POST /:property/bookings/:id/accept-pms-update)", () => {
+  function acceptCandidate(overrides: Partial<PrefillCandidate> = {}): PrefillCandidate {
+    return {
+      pmsRef: "R2610-0001",
+      bookingNo: "CH26-950001",
+      guestName: "ทดสอบ ยอมรับ",
+      roomNo: "301",
+      roomCount: 1,
+      nights: 1,
+      grossRoomSatang: 100_000,
+      grossOtherSatang: 0,
+      cashSatang: 100_000,
+      webSatang: 0,
+      unplacedCreditSatang: 0,
+      unplacedTranSatang: 0,
+      appliedDepositSatang: 0,
+      appliedDepositBookingNos: [],
+      isRefund: false,
+      ...overrides,
+    };
+  }
+
+  function acceptResult(bookingCandidates: PrefillCandidate[]) {
+    return { bookingCandidates, depositCandidates: [] as DepositCandidate[], anomalies: [] as PrefillAnomaly[] };
+  }
+
+  afterEach(() => {
+    pmsPrefillInternal.setFetchDayPaymentsForTests(null);
+    delete process.env.PMS_DB_URL_HF;
+    delete process.env.PMS_DB_URL_HFVILLE;
+  });
+
+  test("happy path: applies the fresh candidate's PMS-written fields onto the existing row, merging into current tenders — hand-keyed fields survive", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-09-25";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1001", bookingNo: "CH26-951001" })]),
+    );
+    await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    const inserted = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    const id = inserted.body.lines[0]!.id;
+
+    // Hand-keyed fields the PMS importer never writes — must survive the accept.
+    await call("PATCH", `/${PROPERTY}/bookings/${id}`, {
+      remark: "บันทึกเพิ่มเติมด้วยมือ",
+      tenders: { ...zeroTenders(), cash: 100_000, credit_icbc: 5_000 },
+    });
+
+    // The PMS now says 1,200 (was 1,000) — reception amended the folio.
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1001", bookingNo: "CH26-951001", grossRoomSatang: 120_000, cashSatang: 120_000 })]),
+    );
+
+    const accepted = await call<{
+      id: number;
+      grossRoomSatang: number;
+      remark: string | null;
+      tenders: Record<Tender, number>;
+    }>("POST", `/${PROPERTY}/bookings/${id}/accept-pms-update`);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.grossRoomSatang).toBe(120_000);
+    expect(accepted.body.tenders.cash).toBe(120_000);
+    // Never touched — not a PMS-written field.
+    expect(accepted.body.tenders.credit_icbc).toBe(5_000);
+    expect(accepted.body.remark).toBe("บันทึกเพิ่มเติมด้วยมือ");
+  });
+
+  test("idempotent: calling accept again with the same fresh candidate still succeeds and yields the same result", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-09-26";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1002", bookingNo: "CH26-951002" })]),
+    );
+    await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    const inserted = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    const id = inserted.body.lines[0]!.id;
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1002", bookingNo: "CH26-951002", grossRoomSatang: 150_000, cashSatang: 150_000 })]),
+    );
+
+    const first = await call<{ grossRoomSatang: number }>("POST", `/${PROPERTY}/bookings/${id}/accept-pms-update`);
+    expect(first.status).toBe(200);
+    expect(first.body.grossRoomSatang).toBe(150_000);
+
+    const second = await call<{ grossRoomSatang: number }>("POST", `/${PROPERTY}/bookings/${id}/accept-pms-update`);
+    expect(second.status).toBe(200);
+    expect(second.body.grossRoomSatang).toBe(150_000);
+  });
+
+  test("404: a manually-created (non-pms) booking line", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-09-27";
+    const created = await call<{ id: number }>("POST", `/${PROPERTY}/day/${DATE}/bookings`, {
+      guestName: "จองด้วยมือ",
+      tenders: zeroTenders(),
+    });
+    const res = await call("POST", `/${PROPERTY}/bookings/${created.body.id}/accept-pms-update`);
+    expect(res.status).toBe(404);
+  });
+
+  test("404: an unknown booking line id", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const res = await call("POST", `/${PROPERTY}/bookings/999999/accept-pms-update`);
+    expect(res.status).toBe(404);
+  });
+
+  test("503 when the property's PMS env URL is unset", async () => {
+    delete process.env.PMS_DB_URL_HF;
+    const res = await call("POST", `/${PROPERTY}/bookings/1/accept-pms-update`);
+    expect(res.status).toBe(503);
+  });
+
+  test("409 closed month, then succeeds after reopening", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const MONTH = "2026-09";
+    const DATE = "2026-09-28";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1003", bookingNo: "CH26-951003" })]),
+    );
+    await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    const inserted = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    const id = inserted.body.lines[0]!.id;
+
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1003", bookingNo: "CH26-951003", grossRoomSatang: 200_000, cashSatang: 200_000 })]),
+    );
+    const blocked = await call("POST", `/${PROPERTY}/bookings/${id}/accept-pms-update`);
+    expect(blocked.status).toBe(409);
+
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+    const succeeded = await call<{ grossRoomSatang: number }>("POST", `/${PROPERTY}/bookings/${id}/accept-pms-update`);
+    expect(succeeded.status).toBe(200);
+    expect(succeeded.body.grossRoomSatang).toBe(200_000);
+  });
+
+  test("409: the candidate has vanished from the ledger entirely", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-09-29";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1004", bookingNo: "CH26-951004" })]),
+    );
+    await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    const inserted = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    const id = inserted.body.lines[0]!.id;
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => acceptResult([])); // gone
+    const res = await call("POST", `/${PROPERTY}/bookings/${id}/accept-pms-update`);
+    expect(res.status).toBe(409);
+  });
+
+  test("409: the candidate became a refund", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-09-30";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1005", bookingNo: "CH26-951005" })]),
+    );
+    await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    const inserted = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
+    const id = inserted.body.lines[0]!.id;
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1005", bookingNo: "CH26-951005", isRefund: true, cashSatang: -50_000 })]),
+    );
+    const res = await call("POST", `/${PROPERTY}/bookings/${id}/accept-pms-update`);
+    expect(res.status).toBe(409);
+  });
+
+  // F1 mirror (Opus money-review pattern, endpoint 26): a pre-cutover row
+  // must never have an applied-deposit amount (re-)written, even if the PMS
+  // now shows one on that same folio — it was already booked as income
+  // under the OLD rule (docs/adr/0001), so writing it again would double it.
+  test("pre-cutover date: never applies a newly-appeared appliedDepositSatang onto the row", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const PRE_CUTOVER_DATE = "2026-07-15";
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([acceptCandidate({ pmsRef: "R2610-1006", bookingNo: "CH26-951006", appliedDepositSatang: 0 })]),
+    );
+    await call("POST", `/${PROPERTY}/day/${PRE_CUTOVER_DATE}/pull-from-pms`);
+    const inserted = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${PRE_CUTOVER_DATE}/bookings`);
+    const id = inserted.body.lines[0]!.id;
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      acceptResult([
+        acceptCandidate({
+          pmsRef: "R2610-1006",
+          bookingNo: "CH26-951006",
+          appliedDepositSatang: 20_000,
+          appliedDepositBookingNos: ["R099999"],
+        }),
+      ]),
+    );
+    const accepted = await call<{ tenders: Record<Tender, number> }>(
+      "POST",
+      `/${PROPERTY}/bookings/${id}/accept-pms-update`,
+    );
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.tenders.deposit_applied).toBe(0);
+  });
+});
+
+describe("Wave D: the office deposit register (GET /:property/deposits/register)", () => {
+  function thread(overrides: Partial<DepositThread> = {}): DepositThread {
+    return {
+      rNumber: "R014843",
+      receivedSatang: 89_000,
+      appliedSatang: 0,
+      refundedSatang: 0,
+      outstandingSatang: 89_000,
+      firstEventDate: "2026-08-01",
+      events: [],
+      ...overrides,
+    };
+  }
+
+  afterEach(() => {
+    depositRegisterInternal.setFetchDepositRegisterForTests(null);
+    delete process.env.PMS_DB_URL_HF;
+    delete process.env.PMS_DB_URL_HFVILLE;
+  });
+
+  test("503 when the property's PMS env URL is unset", async () => {
+    delete process.env.PMS_DB_URL_HF;
+    const res = await call("GET", `/${PROPERTY}/deposits/register`);
+    expect(res.status).toBe(503);
+    expect((res.body as { error: string }).error).toBe("pms prefill not configured");
+  });
+
+  test("502 when the PMS query fails", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    depositRegisterInternal.setFetchDepositRegisterForTests(async () => {
+      throw new Error("connection refused");
+    });
+    const res = await call("GET", `/${PROPERTY}/deposits/register`);
+    expect(res.status).toBe(502);
+  });
+
+  test("200: aging is outstanding>0 oldest-first, exceptions carry diffSatang/orphan amounts, unparsedAppliedRows + monthly pass through", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const monthly: MonthlyDepositReconciliation[] = [
+      { month: "2026-07", openingSatang: 0, receivedSatang: 100_000, appliedSatang: 0, refundedSatang: 0, closingSatang: 100_000 },
+    ];
+    const register: DepositRegisterData = {
+      threads: [
+        thread({ rNumber: "R090001", firstEventDate: "2026-08-05", outstandingSatang: 50_000 }),
+        thread({ rNumber: "R090002", firstEventDate: "2026-07-01", outstandingSatang: 20_000 }),
+        // R015834: the proven mismatch case — outstanding goes negative, never aging.
+        thread({
+          rNumber: "R015834",
+          receivedSatang: 39_500,
+          appliedSatang: 79_000,
+          outstandingSatang: -39_500,
+          firstEventDate: "2026-07-31",
+        }),
+        thread({
+          rNumber: "R090003",
+          receivedSatang: 0,
+          appliedSatang: 30_000,
+          outstandingSatang: -30_000,
+          firstEventDate: null,
+        }),
+      ],
+      monthly,
+      unparsedAppliedRows: 2,
+      // Review fix: three more tripwire counters, distinct values so the
+      // test can prove each one passes through independently (not just
+      // "some number").
+      zeroTenderRows: 3,
+      blankBookingNoRows: 1,
+      undatedRows: 4,
+      voided: [{ rNumber: null, kind: "applied" as const, amountSatang: 70_000, dateBangkok: "2026-06-01" }],
+    };
+    depositRegisterInternal.setFetchDepositRegisterForTests(async () => register);
+
+    const res = await call<{
+      property: string;
+      generatedAt: string;
+      monthly: unknown[];
+      aging: Array<{ rNumber: string }>;
+      exceptions: {
+        mismatched: Array<{
+          rNumber: string;
+          receivedSatang: number;
+          appliedSatang: number;
+          diffSatang: number;
+          note: string | null;
+          resolvedAt: string | null;
+          resolvedBy: string | null;
+        }>;
+        orphanApplied: Array<{
+          rNumber: string;
+          appliedSatang: number;
+          note: string | null;
+          resolvedAt: string | null;
+          resolvedBy: string | null;
+        }>;
+      };
+      unparsedAppliedRows: number;
+      zeroTenderRows: number;
+      blankBookingNoRows: number;
+      undatedRows: number;
+      voided: Array<{ rNumber: string | null; kind: string; amountSatang: number; dateBangkok: string | null }>;
+    }>("GET", `/${PROPERTY}/deposits/register`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.property).toBe(PROPERTY);
+    expect(typeof res.body.generatedAt).toBe("string");
+    expect(res.body.monthly).toEqual(monthly);
+    expect(res.body.aging.map((r) => r.rNumber)).toEqual(["R090002", "R090001"]); // oldest first
+    expect(res.body.exceptions.mismatched).toEqual([
+      {
+        rNumber: "R015834",
+        receivedSatang: 39_500,
+        appliedSatang: 79_000,
+        diffSatang: 39_500,
+        note: null,
+        resolvedAt: null,
+        resolvedBy: null,
+      },
+    ]);
+    expect(res.body.exceptions.orphanApplied).toEqual([
+      { rNumber: "R090003", appliedSatang: 30_000, note: null, resolvedAt: null, resolvedBy: null },
+    ]);
+    expect(res.body.unparsedAppliedRows).toBe(2);
+    // Review fix: each tripwire counter passes through independently.
+    expect(res.body.zeroTenderRows).toBe(3);
+    expect(res.body.blankBookingNoRows).toBe(1);
+    expect(res.body.undatedRows).toBe(4);
+    expect(res.body.voided).toEqual([{ rNumber: null, kind: "applied", amountSatang: 70_000, dateBangkok: "2026-06-01" }]);
+  });
+
+  test("notes merge onto both aging rows and exception rows sharing the same rNumber", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    depositRegisterInternal.setFetchDepositRegisterForTests(async () => ({
+      threads: [
+        thread({ rNumber: "R090010", firstEventDate: "2026-08-01", outstandingSatang: 10_000 }),
+        thread({
+          rNumber: "R090011",
+          receivedSatang: 39_500,
+          appliedSatang: 79_000,
+          outstandingSatang: -39_500,
+          firstEventDate: "2026-07-31",
+        }),
+      ],
+      monthly: [],
+      unparsedAppliedRows: 0,
+      zeroTenderRows: 0,
+      blankBookingNoRows: 0,
+      undatedRows: 0,
+      voided: [],
+    }));
+
+    await call("PUT", `/${PROPERTY}/deposits/R090010/note`, { note: "รอตรวจสอบ", resolved: false });
+    await call("PUT", `/${PROPERTY}/deposits/R090011/note`, { note: "ให้เหตุผลจากรีเซปชั่น", resolved: true });
+
+    const res = await call<{
+      aging: Array<{ rNumber: string; note: string | null; resolvedAt: string | null }>;
+      exceptions: { mismatched: Array<{ rNumber: string; note: string | null; resolvedAt: string | null }> };
+    }>("GET", `/${PROPERTY}/deposits/register`);
+
+    const agingRow = res.body.aging.find((r) => r.rNumber === "R090010")!;
+    expect(agingRow.note).toBe("รอตรวจสอบ");
+    expect(agingRow.resolvedAt).toBeNull();
+
+    const mismatchedRow = res.body.exceptions.mismatched.find((r) => r.rNumber === "R090011")!;
+    expect(mismatchedRow.note).toBe("ให้เหตุผลจากรีเซปชั่น");
+    expect(mismatchedRow.resolvedAt).not.toBeNull();
+  });
+});
+
+describe("Wave D, D3: deposit notes CRUD (PUT/DELETE /:property/deposits/:rNumber/note)", () => {
+  test("PUT creates a note thread; round-trips note + resolved state", async () => {
+    const created = await call<{
+      property: string;
+      rNumber: string;
+      note: string | null;
+      resolvedAt: string | null;
+      resolvedBy: string | null;
+    }>("PUT", `/${PROPERTY}/deposits/R070001/note`, { note: "รอเอกสารจากรีเซปชั่น", resolved: false });
+    expect(created.status).toBe(200);
+    expect(created.body.rNumber).toBe("R070001");
+    expect(created.body.note).toBe("รอเอกสารจากรีเซปชั่น");
+    expect(created.body.resolvedAt).toBeNull();
+    expect(created.body.resolvedBy).toBeNull();
+  });
+
+  test("resolved: true stamps resolvedAt/resolvedBy; resolved: false clears both", async () => {
+    const resolved = await call<{ resolvedAt: string | null; resolvedBy: string | null }>(
+      "PUT",
+      `/${PROPERTY}/deposits/R070002/note`,
+      { note: "ตรวจสอบแล้ว", resolved: true },
+    );
+    expect(resolved.body.resolvedAt).not.toBeNull();
+    expect(resolved.body.resolvedBy).toBe("tester@thehfhotel.org");
+
+    const reopened = await call<{ resolvedAt: string | null; resolvedBy: string | null }>(
+      "PUT",
+      `/${PROPERTY}/deposits/R070002/note`,
+      { note: "ตรวจสอบแล้ว", resolved: false },
+    );
+    expect(reopened.body.resolvedAt).toBeNull();
+    expect(reopened.body.resolvedBy).toBeNull();
+  });
+
+  test("400 on an invalid rNumber shape", async () => {
+    const res = await call("PUT", `/${PROPERTY}/deposits/not-an-r-number/note`, { note: "x", resolved: false });
+    expect(res.status).toBe(400);
+  });
+
+  test("400 on a note exceeding DEPOSIT_NOTE_MAX_LEN", async () => {
+    const res = await call("PUT", `/${PROPERTY}/deposits/R070003/note`, {
+      note: "x".repeat(DEPOSIT_NOTE_MAX_LEN + 1),
+      resolved: false,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("DELETE removes the note; deleting a non-existent note is still 204 (idempotent)", async () => {
+    await call("PUT", `/${PROPERTY}/deposits/R070004/note`, { note: "ลบทิ้ง", resolved: false });
+    const deleted = await call("DELETE", `/${PROPERTY}/deposits/R070004/note`);
+    expect(deleted.status).toBe(204);
+
+    const deletedAgain = await call("DELETE", `/${PROPERTY}/deposits/R070004/note`);
+    expect(deletedAgain.status).toBe(204);
+  });
+
+  test("400 on an invalid rNumber shape for DELETE too", async () => {
+    const res = await call("DELETE", `/${PROPERTY}/deposits/not-an-r-number/note`);
+    expect(res.status).toBe(400);
+  });
+
+  // deposit_notes carries no `date` at all (keyed by property + R-number
+  // only), so month-close structurally cannot apply — this is a regression
+  // guard against ever wiring a closedMonthResponse-style gate onto these
+  // endpoints (the plan's explicit "commentary rule": a note is NOT gated,
+  // same as the day note/endpoint 9 and the cash-block adjustment/endpoint 21).
+  test("succeeds even while some month is closed — NOT month-close gated (commentary rule)", async () => {
+    const MONTH = "2026-11";
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+
+    const put = await call("PUT", `/${PROPERTY}/deposits/R070005/note`, { note: "บันทึกได้แม้ปิดบัญชี", resolved: false });
+    expect(put.status).toBe(200);
+
+    const del = await call("DELETE", `/${PROPERTY}/deposits/R070005/note`);
+    expect(del.status).toBe(204);
+
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
   });
 });

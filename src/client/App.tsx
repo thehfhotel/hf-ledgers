@@ -6,6 +6,7 @@ import { HistoryPage } from "./pages/HistoryPage.tsx";
 import { CategoriesPage } from "./pages/CategoriesPage.tsx";
 import { ReportPage } from "./pages/ReportPage.tsx";
 import { BookingDayPage } from "./pages/BookingDayPage.tsx";
+import { DepositRegisterPage } from "./pages/DepositRegisterPage.tsx";
 
 // pushState micro-router (RDR App.tsx pattern). This file is the router +
 // chip-rail shell ONLY — page components own their own screens. Every page
@@ -40,6 +41,7 @@ type Route =
   | { kind: "bookings"; property: Property | "demo"; date: string }
   | { kind: "history"; property: Property }
   | { kind: "categories"; property: Property }
+  | { kind: "deposits"; property: Property }
   | { kind: "report"; property: Property | "demo"; date: string };
 
 function homeRoute(): Extract<Route, { kind: "day" }> {
@@ -68,6 +70,7 @@ function parseRoute(pathname: string): Route {
   if (parts[1] === "bookings" && parts[2]) return { kind: "bookings", property, date: parts[2] };
   if (parts[1] === "history") return { kind: "history", property };
   if (parts[1] === "categories") return { kind: "categories", property };
+  if (parts[1] === "deposits") return { kind: "deposits", property };
   if (parts[1] === "report" && parts[2]) return { kind: "report", property, date: parts[2] };
 
   return homeRoute();
@@ -95,6 +98,7 @@ const SCREEN_LABEL_TH: Record<Route["kind"], string> = {
   bookings: "รายละเอียดรายรับ",
   history: "ประวัติ",
   categories: "หมวดหมู่",
+  deposits: "มัดจำ",
   report: "รายงาน",
 };
 
@@ -112,6 +116,8 @@ function routeForProperty(route: Route, property: Property): string {
       return `/${property}/history`;
     case "categories":
       return `/${property}/categories`;
+    case "deposits":
+      return `/${property}/deposits`;
   }
 }
 
@@ -198,6 +204,12 @@ export function App() {
       active: route.kind === "categories",
       path: `/${displayProperty}/categories`,
     },
+    {
+      key: "deposits",
+      label: "มัดจำ",
+      active: route.kind === "deposits",
+      path: `/${displayProperty}/deposits`,
+    },
   ];
 
   return (
@@ -259,6 +271,7 @@ export function App() {
         {route.kind === "bookings" && <BookingDayPage property={route.property} date={route.date} />}
         {route.kind === "history" && <HistoryPage property={route.property} />}
         {route.kind === "categories" && <CategoriesPage property={route.property} />}
+        {route.kind === "deposits" && <DepositRegisterPage property={route.property} />}
         {route.kind === "report" && <ReportPage property={route.property} date={route.date} />}
       </main>
     </div>

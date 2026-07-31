@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { identify } from "./auth.ts";
 import {
+  applyPmsCandidateToBookingLine,
   categoriesForDay,
   countBookingLinesForDay,
   createBookingLine,
@@ -12,9 +13,11 @@ import {
   createOtherIncomeItem,
   deleteBookingLine,
   deleteDepositEvent,
+  deleteDepositNote,
   deleteExpenseItem,
   deleteOtherIncomeItem,
   getBookingLineById,
+  getBookingLinePmsRef,
   getBookingLinesForDay,
   getCategoryById,
   getDepositEventById,
@@ -32,6 +35,7 @@ import {
   isMonthClosed,
   listCategories,
   listDaysWithData,
+  listDepositNotes,
   mergeCashBlockOverride,
   monthIsClosed,
   moveBookingDay,
@@ -47,11 +51,13 @@ import {
   updateDepositEvent,
   updateExpenseItem,
   updateOtherIncomeItem,
+  upsertDepositNote,
 } from "./db.ts";
 import type { BookingLineInput, DepositEventInput, SheetDay } from "./db.ts";
 import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
 import { fetchDayPayments, pmsConfigured } from "./pms-prefill.ts";
 import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
+import { buildDepositExceptions, fetchDepositRegister, DEPOSIT_R_NUMBER_RE } from "./deposit-register.ts";
 import { computeDayTotals } from "../shared/totals.ts";
 import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings, depositCashTotals } from "../shared/bookings.ts";
 import { isAccrualDay } from "../shared/accrual.ts";
@@ -61,6 +67,7 @@ import {
   AMOUNT_SATANG_MIN,
   BOOKING_NO_MAX_LEN,
   COUNT_MAX,
+  DEPOSIT_NOTE_MAX_LEN,
   DEPOSIT_TENDERS,
   DESCRIPTION_MAX_LEN,
   GUEST_NAME_MAX_LEN,
@@ -1117,7 +1124,7 @@ export const api = new Elysia({ prefix: "/api" })
     }
 
     const by = identity!.email;
-    const { inserted, skipped } = insertPmsBookingLines(property, date, nonRefunds, by);
+    const { inserted, skipped, changed } = insertPmsBookingLines(property, date, nonRefunds, by);
 
     let depositsInserted = 0;
     let depositsSkipped = 0;
@@ -1174,6 +1181,9 @@ export const api = new Elysia({ prefix: "/api" })
       depositsInserted,
       depositsSkipped,
       anomalies: allAnomalies,
+      // Wave D, D5: existing PMS-sourced rows a fresh pull found differing
+      // from what is currently stored — additive, like autoPlaced.
+      changed,
     };
   })
 
@@ -1267,6 +1277,177 @@ export const api = new Elysia({ prefix: "/api" })
     touchSheetDay(property, existing.date, identity!.email);
     enqueueAnalyticsPush(property, existing.date);
     return status(204);
+  })
+
+  // 30. GET /api/:property/deposits/register — the office deposit register
+  // (Wave D, issue #5 / the R015834-style reconciliation requirement). A
+  // SEPARATE, direct-to-PMS code path — queries the property's FULL
+  // deposit-lifecycle history (src/server/deposit-register.ts), independent
+  // of Wave C's importer or the accrual cutover (a pre-cutover deposit can
+  // still show up here; there is nothing to gate — this endpoint never
+  // writes). Same dark-by-default gate as endpoint 26: 503 when this
+  // property's PMS env URL is unset, 502 on a live query failure, nothing
+  // returned on either. Notes (deposit_notes) are merged onto BOTH the
+  // aging rows and the exceptions rows — a thread can be aging (still
+  // outstanding) and flagged mismatched at once, and the office's note is
+  // the same conversation either way.
+  .get("/:property/deposits/register", async ({ params, status }) => {
+    const { property } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (!pmsConfigured(property)) return status(503, { error: "pms prefill not configured" });
+
+    let register: Awaited<ReturnType<typeof fetchDepositRegister>>;
+    try {
+      register = await fetchDepositRegister(property);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return status(502, { error: message });
+    }
+
+    const notes = listDepositNotes(property);
+    const noteByR = new Map(notes.map((n) => [n.rNumber, n]));
+    const noteFields = (rNumber: string) => {
+      const note = noteByR.get(rNumber);
+      return { note: note?.note ?? null, resolvedAt: note?.resolvedAt ?? null, resolvedBy: note?.resolvedBy ?? null };
+    };
+
+    const aging = register.threads
+      .filter((t) => t.outstandingSatang > 0)
+      .sort((a, b) => (a.firstEventDate ?? "").localeCompare(b.firstEventDate ?? ""))
+      .map((t) => ({
+        rNumber: t.rNumber,
+        receivedSatang: t.receivedSatang,
+        appliedSatang: t.appliedSatang,
+        refundedSatang: t.refundedSatang,
+        outstandingSatang: t.outstandingSatang,
+        firstEventDate: t.firstEventDate,
+        ...noteFields(t.rNumber),
+      }));
+
+    const { mismatched, orphanApplied } = buildDepositExceptions(register.threads);
+    const exceptions = {
+      mismatched: mismatched.map((m) => ({ ...m, ...noteFields(m.rNumber) })),
+      orphanApplied: orphanApplied.map((o) => ({ ...o, ...noteFields(o.rNumber) })),
+    };
+
+    return {
+      property,
+      generatedAt: new Date().toISOString(),
+      monthly: register.monthly,
+      aging,
+      exceptions,
+      unparsedAppliedRows: register.unparsedAppliedRows,
+      // Review fix: three more tripwire counters alongside
+      // unparsedAppliedRows, none of which invent or drop money — see
+      // DepositRegisterData's doc comment (deposit-register.ts) for what
+      // each one means. `voided` is now computed inside
+      // buildDepositRegisterData itself (walking the flat event list, not
+      // threads — see collectVoidedEvents' doc comment for why that fixes a
+      // real gap), so this route just passes it through.
+      zeroTenderRows: register.zeroTenderRows,
+      blankBookingNoRows: register.blankBookingNoRows,
+      undatedRows: register.undatedRows,
+      voided: register.voided,
+    };
+  })
+
+  // 31. PUT /api/:property/deposits/:rNumber/note — Wave D, D3. NOT
+  // month-close gated (commentary rule, same as day notes/endpoint 9 and
+  // the cash-block adjustment/endpoint 21) — a note against an R-number is
+  // not a booking-day write, and the deposit itself may span several
+  // months. The path param must match iHOTEL's fixed R-number shape; the
+  // office reads it straight off this same page's rows, so a mismatch here
+  // means a typo, not a legitimate different format.
+  //
+  // Elysia's route param is named `:id` here, NOT `:rNumber` — memoirist
+  // (the underlying router) rejects two different parameter NAMES at the
+  // same tree position (`/:property/deposits/:X`), and endpoints 28/29
+  // already registered `:id` there for deposit_events. The URL text itself
+  // is unaffected (the R-number still goes in that exact position); this
+  // is purely an internal capture-group label.
+  .put(
+    "/:property/deposits/:id/note",
+    ({ params, body, identity, status }) => {
+      const { property } = params;
+      const rNumber = params.id;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (!DEPOSIT_R_NUMBER_RE.test(rNumber)) return status(400, { error: "invalid rNumber" });
+      if (body.note != null && !isValidBoundedString(body.note, DEPOSIT_NOTE_MAX_LEN)) {
+        return status(400, { error: "invalid note" });
+      }
+
+      const saved = upsertDepositNote(property, rNumber, body.note ?? null, body.resolved, identity!.email);
+      return saved;
+    },
+    { body: t.Object({ note: t.Union([t.String(), t.Null()]), resolved: t.Boolean() }) },
+  )
+
+  // 32. DELETE /api/:property/deposits/:rNumber/note (see the routing note above)
+  .delete("/:property/deposits/:id/note", ({ params, status }) => {
+    const { property } = params;
+    const rNumber = params.id;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (!DEPOSIT_R_NUMBER_RE.test(rNumber)) return status(400, { error: "invalid rNumber" });
+
+    deleteDepositNote(property, rNumber);
+    return status(204);
+  })
+
+  // 33. POST /api/:property/bookings/:id/accept-pms-update — Wave D, D5's
+  // re-pull "accept" flow. No body. Re-fetches the day FRESH via
+  // fetchDayPayments (never trusts a client-cached diff — the client only
+  // ever showed a snapshot from the last pull-from-pms response). 404 for
+  // a non-pms row (nothing to reconcile against); 409 if the month is
+  // closed (reopen via the existing endpoint 24 first); 502 on a live PMS
+  // query failure; 409 if the candidate has vanished from the ledger
+  // entirely or has become a refund (the diff this row was accepting no
+  // longer exists in the shape it was shown in). Applies via
+  // applyPmsCandidateToBookingLine (db.ts) — merges only the PMS-written
+  // tender fields into the row's CURRENT tenders, so hand-keyed
+  // credit_icbc/transfer_icbc/other survive. Idempotent: calling this again
+  // once nothing differs re-applies the same values and still succeeds.
+  .post("/:property/bookings/:id/accept-pms-update", async ({ params, identity, status }) => {
+    const { property } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (!pmsConfigured(property)) return status(503, { error: "pms prefill not configured" });
+    const id = Number(params.id);
+    if (!Number.isInteger(id)) return status(404, { error: "booking line not found" });
+    const existing = getBookingLineById(property, id);
+    if (!existing || existing.source !== "pms") return status(404, { error: "booking line not found" });
+    const pmsRef = getBookingLinePmsRef(property, id);
+    if (pmsRef === null) return status(404, { error: "booking line not found" });
+
+    const blocked = closedMonthResponse(property, existing.date, status);
+    if (blocked) return blocked;
+
+    let bookingCandidates: PrefillCandidate[];
+    try {
+      ({ bookingCandidates } = await fetchDayPayments(property, existing.date));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return status(502, { error: message });
+    }
+
+    const candidate = bookingCandidates.find((c) => c.pmsRef === pmsRef);
+    if (!candidate || candidate.isRefund) {
+      return status(409, { error: "pms candidate no longer available (vanished or became a refund)" });
+    }
+
+    // Same F1 pre-cutover guard as endpoint 26 — a ตัดยอดล่วงหน้า applied
+    // amount must never be (re-)written for a date before this property's
+    // accrual cutover, or it would double-count against the OLD rule's
+    // already-booked income (docs/adr/0001).
+    const accrual = isAccrualDay(property, existing.date);
+    const effectiveCandidate: PrefillCandidate = accrual
+      ? candidate
+      : { ...candidate, appliedDepositSatang: 0, appliedDepositBookingNos: [] };
+
+    const updated = applyPmsCandidateToBookingLine(property, id, effectiveCandidate, identity!.email);
+    if (!updated) return status(404, { error: "booking line not found" });
+
+    touchSheetDay(property, existing.date, identity!.email);
+    enqueueAnalyticsPush(property, existing.date);
+    return updated;
   });
 
 const apiFetch = (req: Request) => api.handle(req);
@@ -1353,6 +1534,7 @@ if (isProd) {
       "/:property/bookings/:date": indexHtml,
       "/:property/history": indexHtml,
       "/:property/categories": indexHtml,
+      "/:property/deposits": indexHtml,
       "/:property/report/:date": indexHtml,
       "/healthz": healthz,
       "/api/*": (req) => apiFetch(req),

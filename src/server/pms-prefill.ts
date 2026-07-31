@@ -281,8 +281,12 @@ export function bangkokDayWindow(date: string): { fromIso: string; toIso: string
  * magnitude through the shared parser (so scale/format rules stay in ONE
  * place), and reapplies the sign. Null, empty, or unparseable input is 0
  * satang — the null-safe rule the plan calls for.
+ *
+ * Exported (Wave D) so `deposit-register.ts` reuses this exact parser
+ * rather than a second copy — both modules read raw `ht_payment_ledger`
+ * NUMERIC columns the same way.
  */
-function parseLedgerSatang(raw: string | null | undefined): number {
+export function parseLedgerSatang(raw: string | null | undefined): number {
   if (raw == null) return 0;
   const trimmed = raw.trim();
   if (trimmed === "") return 0;
@@ -369,10 +373,14 @@ function paymentKey(row: RawLedgerRow): string {
 // "เงินจอง" marker the pre-Wave-C importer matched 0 of 5,714 rows with) ──
 
 const DS_NAME_ROOM_CHARGE = "ค่าห้อง";
-const DS_NAME_DEPOSIT_RECEIVED = "จ่ายล่วงหน้า";
+// Exported (Wave D): deposit-register.ts's DEPOSIT_LEDGER_QUERY filters on
+// these same two exact labels (plus DEPOSIT_APPLIED_PREFIX below) — reusing
+// the literal strings here means the two modules can never drift apart on
+// the Thai vocabulary itself.
+export const DS_NAME_DEPOSIT_RECEIVED = "จ่ายล่วงหน้า";
 const DS_NAME_ROOM_CANCEL = "ยกเลิกห้อง";
 const DS_NAME_EXCESS_REFUND = "คืนเงินส่วนเกิน";
-const DS_NAME_DEPOSIT_REFUND = "คืนเงินจองห้อง";
+export const DS_NAME_DEPOSIT_REFUND = "คืนเงินจองห้อง";
 const DS_NAME_PENALTY = "ค่าปรับ";
 
 /** The six exact `ds_name` labels this importer recognizes outside the
@@ -405,8 +413,13 @@ const APPLIED_R_NUMBER_RE = /^R\d{6}$/;
  * (see `DepositCandidate`'s doc comment on why the R-number is
  * label-sourced, not column-sourced). `null` when the suffix doesn't match
  * the expected `R\d{6}` shape — surfaced as an anomaly by the caller,
- * never silently dropped. */
-function parseAppliedBookingNo(dsName: string): string | null {
+ * never silently dropped.
+ *
+ * Exported (Wave D): deposit-register.ts's `classifyDepositRow` parses the
+ * SAME applied-line label the SAME way — one parser, so the day-scoped
+ * importer and the full-history register can never disagree on what an
+ * applied deposit's R-number is. */
+export function parseAppliedBookingNo(dsName: string): string | null {
   const suffix = dsName.slice(DEPOSIT_APPLIED_PREFIX.length).trim();
   return APPLIED_R_NUMBER_RE.test(suffix) ? suffix : null;
 }
@@ -704,6 +717,20 @@ function getClient(property: Property): SQL {
   const client = new SQL(url);
   clients.set(property, client);
   return client;
+}
+
+/**
+ * Exported (Wave D, deposit-register.ts's open item, resolved this way):
+ * the deposit register queries the SAME per-property PMS Postgres
+ * database as this module, over a DIFFERENT query (full deposit-lifecycle
+ * history, no date window) — reusing this cache avoids opening a second
+ * connection pool per property for what is, underneath, the same database
+ * connection. Throws the same "env var not set" error `getClient` does
+ * when the property's PMS URL is unset; callers gate on `pmsConfigured()`
+ * first, same as every other caller of this cache.
+ */
+export function getPmsClient(property: Property): SQL {
+  return getClient(property);
 }
 
 let fetchOverride: typeof fetchDayPayments | null = null;

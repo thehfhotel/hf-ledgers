@@ -13,6 +13,7 @@ import type {
   DayProvenance,
   DepositEvent,
   DepositEventKind,
+  DepositNote,
   DepositTender,
   ExpenseItem,
   IncomeCell,
@@ -215,6 +216,26 @@ export function migrate(): void {
     -- carry a pms_ref and are exempt.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_deposit_events_pms_ref
       ON deposit_events (property, date, pms_ref, tender) WHERE pms_ref IS NOT NULL;
+
+    -- Wave D (the office deposit register — issue #5 / the R015834-style
+    -- reconciliation requirement): ONE note thread per (property, R-number),
+    -- never per exception kind — an R-number pairs with its deposit for
+    -- life (docs/adr/0001: the booking is moved, never replaced), so a
+    -- thread's whole history (aging today, mismatched next month) shares
+    -- one conversation. "Explained" = resolved_at IS NOT NULL explicitly
+    -- (mirrors sheet_days.verified_at's convention) — a note saying
+    -- "waiting on reception" must keep shouting until someone deliberately
+    -- marks it resolved.
+    CREATE TABLE IF NOT EXISTS deposit_notes (
+      property TEXT NOT NULL CHECK (property IN ('hf', 'hfville')),
+      r_number TEXT NOT NULL,
+      note TEXT,
+      resolved_at TEXT,
+      resolved_by TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_by TEXT NOT NULL,
+      PRIMARY KEY (property, r_number)
+    );
   `);
 
   migrateCategoryKeyColumn();
@@ -1566,24 +1587,148 @@ export function deleteBookingLine(property: Property, id: number): boolean {
  * Refund filtering happens in the caller (server.ts) before this is
  * invoked — every candidate reaching here is assumed insertable.
  */
+
+/**
+ * The tender placement for ONE `PrefillCandidate` — extracted (Wave D,
+ * D5) from `insertPmsBookingLines`'s inline object so there is exactly ONE
+ * place that decides where PMS money lands on the 9-tender record. Reused
+ * by `insertPmsBookingLines` (new row), `diffCandidateAgainstBookingLine`
+ * (re-pull comparison), and `applyPmsCandidateToBookingLine` (accepting a
+ * re-pull diff) — all three must agree on this or a "changed" row and the
+ * row a fresh pull would insert could silently diverge. See the
+ * AUTO-PLACEMENT POLICY note above: `cash`/`web` always straight from the
+ * candidate; `transfer_kbank` always carries `unplacedTranSatang`;
+ * `credit_kbank` only on hfville; `deposit_applied` carries
+ * `appliedDepositSatang` (Wave C) — this now explicitly includes that ninth
+ * tender, unlike the pre-Wave-C `t_deposit` placement it replaced.
+ */
+export function candidateTenderPatch(property: Property, candidate: PrefillCandidate): Record<Tender, number> {
+  return {
+    ...zeroTenders(),
+    deposit_applied: candidate.appliedDepositSatang,
+    cash: candidate.cashSatang,
+    web: candidate.webSatang,
+    transfer_kbank: candidate.unplacedTranSatang,
+    credit_kbank: property === "hfville" ? candidate.unplacedCreditSatang : 0,
+  };
+}
+
+/** The tender columns `candidateTenderPatch` actually writes for a given
+ * property — everything else (`deposit`, `credit_icbc`, `transfer_icbc`,
+ * `other`) is hand-keyed and must never be touched by a re-pull merge (see
+ * `applyPmsCandidateToBookingLine`). */
+function pmsWrittenTenders(property: Property): Tender[] {
+  return property === "hfville"
+    ? ["cash", "web", "deposit_applied", "transfer_kbank", "credit_kbank"]
+    : ["cash", "web", "deposit_applied", "transfer_kbank"];
+}
+
+/** One field where a fresh PMS candidate now disagrees with the CURRENTLY
+ * STORED booking-line value (Wave D, D5's re-pull diff flow) — the diff is
+ * against the current stored value, not the original import, so a
+ * hand-edited row shows as "changed" too (flagged separately via
+ * `handEdited` on the caller's `PmsBookingLineChange`, never suppressed —
+ * "a human always decides" is the named tradeoff here). */
+export interface BookingLineFieldDiff {
+  field: string;
+  before: string | number | null;
+  after: string | number | null;
+}
+
+/**
+ * Compares a fresh `PrefillCandidate` against an EXISTING `BookingLine`,
+ * fields the PMS actually writes ONLY:
+ * `bookingNo`/`guestName`/`roomNo`/`roomCount`/`nights`/`grossRoomSatang`/
+ * `grossOtherSatang`, plus the tenders `candidateTenderPatch` places
+ * (`cash`/`web`/`deposit_applied`/`transfer_kbank`, `credit_kbank` on
+ * hfville only). Deliberately NEVER `remark` (hand-keyed context an office
+ * worker may have added, not something the PMS reconciles), NEVER
+ * `credit_icbc`/`transfer_icbc`/`other`/`deposit` (hand-keyed by design —
+ * the PMS importer never writes these). PURE — no I/O, fixture-testable.
+ */
+export function diffCandidateAgainstBookingLine(
+  property: Property,
+  candidate: PrefillCandidate,
+  existing: BookingLine,
+): BookingLineFieldDiff[] {
+  const diffs: BookingLineFieldDiff[] = [];
+  const compare = (field: string, before: string | number | null, after: string | number | null) => {
+    if (before !== after) diffs.push({ field, before, after });
+  };
+
+  compare("bookingNo", existing.bookingNo, candidate.bookingNo);
+  compare("guestName", existing.guestName, candidate.guestName);
+  compare("roomNo", existing.roomNo, candidate.roomNo);
+  compare("roomCount", existing.roomCount, candidate.roomCount);
+  compare("nights", existing.nights, candidate.nights);
+  compare("grossRoomSatang", existing.grossRoomSatang, candidate.grossRoomSatang);
+  compare("grossOtherSatang", existing.grossOtherSatang, candidate.grossOtherSatang);
+
+  const patch = candidateTenderPatch(property, candidate);
+  for (const tender of pmsWrittenTenders(property)) {
+    compare(tender, existing.tenders[tender], patch[tender]);
+  }
+
+  return diffs;
+}
+
+/** One existing PMS-sourced row a fresh pull found differing from what is
+ * currently stored (Wave D, D5, additive on `insertPmsBookingLines`'s
+ * return — see `POST .../pull-from-pms`, src/shared/api.md). `handEdited =
+ * updatedAt !== createdAt` — a row nobody has touched since the original
+ * import has both timestamps identical. */
+export interface PmsBookingLineChange {
+  id: number;
+  pmsRef: string;
+  bookingNo: string | null;
+  handEdited: boolean;
+  fields: BookingLineFieldDiff[];
+}
+
 export function insertPmsBookingLines(
   property: Property,
   date: string,
   candidates: PrefillCandidate[],
   actor: string,
-): { inserted: number; skipped: number } {
+): { inserted: number; skipped: number; changed: PmsBookingLineChange[] } {
   let inserted = 0;
   let skipped = 0;
+  const changed: PmsBookingLineChange[] = [];
 
   const tx = db.transaction(() => {
     for (const candidate of candidates) {
-      const existing = db
-        .query<{ n: number }, [string, string, string]>(
-          "SELECT 1 AS n FROM booking_lines WHERE property = ? AND date = ? AND pms_ref = ?",
+      const existingRow = db
+        .query<BookingLineRow, [string, string, string]>(
+          "SELECT * FROM booking_lines WHERE property = ? AND date = ? AND pms_ref = ?",
         )
         .get(property, date, candidate.pmsRef);
-      if (existing) {
+      if (existingRow) {
         skipped += 1;
+        const existing = toBookingLine(existingRow);
+        const fields = diffCandidateAgainstBookingLine(property, candidate, existing);
+        if (fields.length > 0) {
+          changed.push({
+            id: existing.id,
+            pmsRef: candidate.pmsRef,
+            bookingNo: candidate.bookingNo,
+            // KNOWN LIMITATION (review, deferred — fails safe): this reads
+            // as "has ANY write ever touched this row since import", not
+            // "was this row hand-edited by a human" — applyPmsCandidateToBookingLine
+            // (the accept endpoint) calls updateBookingLine too, so accepting
+            // a diff itself bumps updated_at, and every SUBSEQUENT pull's
+            // `changed` detection then reports handEdited: true forever
+            // after, even on a row nobody has ever hand-typed into. This
+            // fails safe (worst case: an unnecessary "เคยแก้ไขด้วยมือ" chip on
+            // a PMS-only row, never the reverse — a genuine hand edit is
+            // never reported as false), so it ships as-is. Future fix: a
+            // dedicated column (e.g. a `pms_baseline` snapshot, or a
+            // separate `hand_edited_at` stamp set ONLY by the manual PATCH
+            // path, never by applyPmsCandidateToBookingLine) would
+            // distinguish "PMS touched this" from "a human touched this".
+            handEdited: existing.updatedAt !== existing.createdAt,
+            fields,
+          });
+        }
         continue;
       }
 
@@ -1603,15 +1748,7 @@ export function insertPmsBookingLines(
           nights: candidate.nights,
           grossRoomSatang: candidate.grossRoomSatang,
           grossOtherSatang: candidate.grossOtherSatang,
-          tenders: {
-            ...zeroTenders(),
-            deposit_applied: candidate.appliedDepositSatang,
-            cash: candidate.cashSatang,
-            web: candidate.webSatang,
-            // See the AUTO-PLACEMENT POLICY note above the function.
-            transfer_kbank: candidate.unplacedTranSatang,
-            credit_kbank: property === "hfville" ? candidate.unplacedCreditSatang : 0,
-          },
+          tenders: candidateTenderPatch(property, candidate),
           remark,
           source: "pms",
           draft: false,
@@ -1624,7 +1761,66 @@ export function insertPmsBookingLines(
   });
   tx();
 
-  return { inserted, skipped };
+  return { inserted, skipped, changed };
+}
+
+/** Returns a PMS-sourced booking line's own `pms_ref` — deliberately NOT
+ * exposed on the public `BookingLine` DTO (it's purely an idempotence/
+ * lookup key, see `idx_booking_lines_pms_ref`), but `POST
+ * .../bookings/:id/accept-pms-update` (Wave D, D5) needs it to re-locate
+ * the row's still-live PMS candidate in a fresh `fetchDayPayments()` pull.
+ * `null` for a manual/import row, or an id that doesn't exist for this
+ * property. */
+export function getBookingLinePmsRef(property: Property, id: number): string | null {
+  const row = db
+    .query<{ pms_ref: string | null }, [number, string]>(
+      "SELECT pms_ref FROM booking_lines WHERE id = ? AND property = ?",
+    )
+    .get(id, property);
+  return row?.pms_ref ?? null;
+}
+
+/**
+ * Applies a freshly re-fetched `PrefillCandidate` onto an EXISTING
+ * booking-line row (Wave D, D5's re-pull "accept" flow — `POST
+ * .../bookings/:id/accept-pms-update`). Merges `candidateTenderPatch`'s
+ * fields into the row's CURRENT tenders — never a wholesale tender
+ * replacement — so hand-keyed `credit_icbc`/`transfer_icbc`/`other`/
+ * `deposit` survive untouched exactly like `diffCandidateAgainstBookingLine`
+ * never diffs them. Deliberately never touches `remark` either (same
+ * "hand-keyed context" reasoning — not one of the PMS-written fields).
+ * Reuses `updateBookingLine()` — the write path, audit stamping, and
+ * `booking_lines` shape stay in exactly one place. `null` if `id` doesn't
+ * belong to `property`.
+ */
+export function applyPmsCandidateToBookingLine(
+  property: Property,
+  id: number,
+  candidate: PrefillCandidate,
+  by: string,
+): BookingLine | null {
+  const existing = getBookingLineById(property, id);
+  if (!existing) return null;
+
+  const patch = candidateTenderPatch(property, candidate);
+  const mergedTenders: Record<Tender, number> = { ...existing.tenders };
+  for (const tender of pmsWrittenTenders(property)) mergedTenders[tender] = patch[tender];
+
+  return updateBookingLine(
+    property,
+    id,
+    {
+      bookingNo: candidate.bookingNo,
+      guestName: candidate.guestName,
+      roomNo: candidate.roomNo,
+      roomCount: candidate.roomCount,
+      nights: candidate.nights,
+      grossRoomSatang: candidate.grossRoomSatang,
+      grossOtherSatang: candidate.grossOtherSatang,
+      tenders: mergedTenders,
+    },
+    by,
+  );
 }
 
 /**
@@ -1919,6 +2115,87 @@ export function updateDepositEvent(
 
 export function deleteDepositEvent(property: Property, id: number): boolean {
   const info = db.prepare("DELETE FROM deposit_events WHERE id = ? AND property = ?").run(id, property);
+  return info.changes > 0;
+}
+
+// ── deposit_notes (Wave D, the office deposit register) ────────────────
+// ONE note thread per (property, r_number) — see the `deposit_notes` DDL
+// comment above and `DepositNote` (shared/types.ts) for the full
+// reasoning. Deliberately NOT month-close gated at this layer (server.ts's
+// route handlers never call closedMonthResponse for these) — a note is
+// commentary against a PMS-sourced R-number, not a booking-day write, and
+// an R-number's deposit can span months anyway.
+
+interface DepositNoteRow {
+  property: string;
+  r_number: string;
+  note: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  updated_at: string;
+  updated_by: string;
+}
+
+function toDepositNote(r: DepositNoteRow): DepositNote {
+  return {
+    property: r.property as Property,
+    rNumber: r.r_number,
+    note: r.note,
+    resolvedAt: r.resolved_at,
+    resolvedBy: r.resolved_by,
+    updatedAt: r.updated_at,
+    updatedBy: r.updated_by,
+  };
+}
+
+export function getDepositNote(property: Property, rNumber: string): DepositNote | null {
+  const row = db
+    .query<DepositNoteRow, [string, string]>("SELECT * FROM deposit_notes WHERE property = ? AND r_number = ?")
+    .get(property, rNumber);
+  return row ? toDepositNote(row) : null;
+}
+
+/** Every note thread for a property — the register endpoint fetches this
+ * ONCE per request and merges by `rNumber` onto the aging/exceptions rows,
+ * rather than querying per-row. */
+export function listDepositNotes(property: Property): DepositNote[] {
+  return db
+    .query<DepositNoteRow, [string]>("SELECT * FROM deposit_notes WHERE property = ?")
+    .all(property)
+    .map(toDepositNote);
+}
+
+/**
+ * Upserts a note thread's text AND resolved state together (see `PUT
+ * .../deposits/:rNumber/note`, src/shared/api.md) — mirrors
+ * `setDayVerified()`'s resolved/verified-flag SQL shape exactly:
+ * `resolved: true` stamps `resolved_at`/`resolved_by`; `resolved: false`
+ * clears both back to NULL (never a stale timestamp from a PAST
+ * resolution surviving a re-open).
+ */
+export function upsertDepositNote(
+  property: Property,
+  rNumber: string,
+  note: string | null,
+  resolved: boolean,
+  by: string,
+): DepositNote {
+  const resolvedAtExpr = resolved ? "datetime('now')" : "NULL";
+  db.prepare(
+    `INSERT INTO deposit_notes (property, r_number, note, resolved_at, resolved_by, updated_at, updated_by)
+     VALUES (?, ?, ?, ${resolvedAtExpr}, ?, datetime('now'), ?)
+     ON CONFLICT (property, r_number) DO UPDATE SET
+       note = excluded.note,
+       resolved_at = ${resolvedAtExpr},
+       resolved_by = excluded.resolved_by,
+       updated_at = excluded.updated_at,
+       updated_by = excluded.updated_by`,
+  ).run(property, rNumber, note, resolved ? by : null, by);
+  return getDepositNote(property, rNumber)!;
+}
+
+export function deleteDepositNote(property: Property, rNumber: string): boolean {
+  const info = db.prepare("DELETE FROM deposit_notes WHERE property = ? AND r_number = ?").run(property, rNumber);
   return info.changes > 0;
 }
 

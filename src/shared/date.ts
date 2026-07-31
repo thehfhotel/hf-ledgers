@@ -102,3 +102,12 @@ export function shiftMonths(month: string, delta: number): string {
   const d = new Date(y!, m! - 1 + delta, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
+
+/** Whole days between two Bangkok calendar date strings (`b` minus `a`) —
+ * used for the deposit register's "days outstanding" aging column (Wave D).
+ * Both inputs are plain calendar dates (no time-of-day), so this is exact
+ * integer day arithmetic via `parseIso`, never wall-clock subtraction. */
+export function daysBetween(a: string, b: string): number {
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.round((parseIso(b).getTime() - parseIso(a).getTime()) / msPerDay);
+}

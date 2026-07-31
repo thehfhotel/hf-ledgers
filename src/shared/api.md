@@ -310,6 +310,13 @@ Wave 2 additions:
   `REMARK_MAX_LEN`; neither re-declares the number locally.
 - `description` (OtherIncomeItem): ≤ 200 chars (`DESCRIPTION_MAX_LEN`)
 
+Wave D addition:
+
+- `note` (`DepositNote`): ≤ 1000 chars (`DEPOSIT_NOTE_MAX_LEN`) — deliberately
+  more generous than `NOTE_MAX_LEN`: this is the office's only durable record
+  of *why* a deposit exception exists (e.g. the R015834-style 395->790 gap),
+  so it needs room for a real explanation.
+
 ## Endpoints (`/api`, Typebox; auth = any verified identity — no roles)
 
 1. **`GET /api/me`** → `{ email }` (`Me`)
@@ -773,6 +780,218 @@ at the write boundary — `insertPmsBookingLines` no longer writes
 `appliedDepositBookingNos` (the R-number(s) an applied line's label
 carries, folded into the inserted row's `remark`).
 
+## Wave D: the office deposit register + re-pull corrections (issue #5)
+
+Two independent features sharing one wave: a read-mostly office reconciliation
+view over the PMS's full deposit-lifecycle history (`src/server/deposit-register.ts`,
+a SEPARATE direct-to-PMS code path — does NOT depend on Wave C's importer or
+the accrual cutover), and a re-pull "diff and accept" flow so an already-
+imported booking line can be reconciled against the PMS without silently
+auto-overwriting a hand edit. **Numbering note:** the plan's draft numbered
+the register endpoint 27 — by the time this wave was built, 27/28/29 were
+already the shipped Wave C deposit_events hand-entry CRUD above, so the new
+endpoints below continue sequentially from 30.
+
+30. **`GET /api/:property/deposits/register`** → `{ property: Property,
+    generatedAt: string, monthly: MonthlyDepositReconciliation[], aging:
+    DepositAgingRow[], exceptions: { mismatched: MismatchedDepositException[],
+    orphanApplied: OrphanAppliedDepositException[] }, unparsedAppliedRows:
+    number, zeroTenderRows: number, blankBookingNoRows: number, undatedRows:
+    number, voided: VoidedDepositEventSummary[] }`. Same dark-by-default gate
+    as endpoint 26: **503** (`{ error: "pms prefill not configured" }`) when
+    this property's PMS env URL is unset, **502** on a live query failure,
+    nothing returned on either. Queries the property's FULL
+    `ht_payment_ledger` history (no date window, unlike every day-scoped
+    endpoint above) for exactly the three deposit-lifecycle `ds_name`s —
+    `จ่ายล่วงหน้า` (received, exact), the `ตัดยอดล่วงหน้า Booking No:` prefix
+    family (applied), `คืนเงินจองห้อง` (refunded, exact) — voided rows
+    (`ledger_status = 'ยกเลิก'`) are RETURNED, tagged, never filtered out of
+    the query.
+
+    - `monthly` is the opening/received/applied/refunded/closing
+      reconciliation, ONE ROW PER Bangkok month that has at least one active
+      (non-voided) event — **returned CHRONOLOGICAL (ascending)**; reversing
+      for the client's "newest first" สรุปรายเดือน table
+      (`DepositRegisterPage.tsx`) is the client's own job. The first month
+      with any activity opens at `0` (OWNER-DECIDED, plan D-open-items:
+      pre-feature มัดจำ history is out of scope, hfville's first deposit-
+      lifecycle month is 2026-03, hf's is 2026-04); every later month's
+      opening is exactly the prior month's closing.
+    - `aging` is every R-number thread with `outstandingSatang > 0`
+      (received - applied - refunded, voided excluded from all three),
+      **sorted oldest-first by its earliest active event's date** — the
+      R015834-style case (applied > received) makes `outstandingSatang`
+      NEGATIVE, so it never appears here; it appears in `exceptions.mismatched`
+      instead.
+    - `exceptions.mismatched`: threads where `receivedSatang > 0 &&
+      appliedSatang > 0 && |appliedSatang - receivedSatang| >
+      RECONCILE_TOLERANCE_SATANG` (`shared/bookings.ts`, 100 satang / 1 THB —
+      the same tolerance the booking-vs-summary variance strip uses), with
+      `diffSatang = appliedSatang - receivedSatang` (signed, never abs'd —
+      the R015834 case: received 39_500, applied 79_000 -> `diffSatang:
+      39_500`).
+    - `exceptions.orphanApplied`: threads where `appliedSatang > 0 &&
+      receivedSatang === 0` — money applied against an R-number with no
+      recorded receipt at all.
+    - `unparsedAppliedRows` is a tripwire count: an applied
+      (`ตัดยอดล่วงหน้า Booking No:…`) row whose R-number suffix doesn't match
+      `R\d{6}` is still classified and counted toward `monthly`, just
+      excluded from every thread (nothing to group it by) — never dropped
+      silently.
+    - **Three more tripwire counters (review fix), none of which ever
+      invent or drop money — each just names a way a row can otherwise
+      leave with zero signal:**
+      - `zeroTenderRows`: a received/refunded row whose four tender columns
+        (`ledger_cash`/`ledger_credit`/`ledger_tran`/`ledger_web`) summed to
+        ZERO despite a nonzero `ledger_amount` — `amountSatang` ends up `0`,
+        so the row's money is otherwise invisible everywhere downstream.
+        `ledger_amount` is selected "for completeness/future tripwires" —
+        this is that future.
+      - `blankBookingNoRows`: a received/refunded row with a blank
+        `ledger_cin_no` — `rNumber: null`, so the event can never join a
+        thread (no aging row, no exception, no note ever sees it), even
+        though it still fully participates in `monthly`. Distinct from
+        `unparsedAppliedRows`, which is applied-row-only.
+      - `undatedRows`: an event whose `ledger_pay_date` failed to parse —
+        dropped from `monthly` (which needs a month to bucket by) while
+        still fully counted in whichever thread it belongs to.
+    - `voided` flattens every voided event straight out of the classified
+      event list (computed inside `buildDepositRegisterData`, review fix —
+      it used to walk `threads`, which silently dropped a voided event
+      whose R-number was unparseable/blank, since such an event never joins
+      any thread at all) — the register page's collapsed "ไม่รวมในยอดข้างต้น"
+      footnote, independent of which threads happen to also be outstanding
+      or exceptional. `VoidedDepositEventSummary.rNumber` is nullable for
+      exactly that reason.
+    - Every `aging`/`exceptions.mismatched`/`exceptions.orphanApplied` row
+      additionally carries `note: string | null`, `resolvedAt: string |
+      null`, `resolvedBy: string | null` — merged from `deposit_notes` by
+      R-number, `null`/`null`/`null` when no note thread exists yet. A
+      thread can appear in `aging` AND `exceptions` at once (still
+      outstanding, but also mismatched) — the same note applies to both.
+
+31. **`PUT /api/:property/deposits/:rNumber/note`** — body `{ note: string |
+    null, resolved: boolean }` → `DepositNote`. `:rNumber` must match
+    `/^R\d{6}$/` (400 otherwise, `{ error: "invalid rNumber" }`) — iHOTEL's
+    fixed shape, read straight off this same page's rows. `resolved: true`
+    stamps `resolvedAt`/`resolvedBy` (the caller's identity); `resolved:
+    false` clears both back to `null` — mirrors `PUT .../day/:date/verify`'s
+    resolved/unresolve toggle exactly. **NOT month-close gated** (commentary
+    rule, same as the day note/endpoint 9 and the cash-block adjustment/
+    endpoint 21) — a note against an R-number is not a booking-day write,
+    and `deposit_notes` carries no `date` at all (keyed by `property` +
+    `r_number` only), so month-close cannot structurally apply. ONE note
+    thread per `(property, rNumber)` — an R-number pairs with its deposit
+    for life (docs/adr/0001: the booking is moved, never replaced), so this
+    is never per-exception-kind.
+
+    Elysia routing note: the path parameter is internally named `:id`, not
+    `:rNumber` — the underlying router (memoirist) rejects two different
+    parameter NAMES at the same tree position, and endpoints 28/29 already
+    registered `:id` there for `deposit_events`. The URL text itself is
+    unaffected; this is purely an internal capture-group label.
+
+32. **`DELETE /api/:property/deposits/:rNumber/note`** → 204, always
+    (deleting a note thread that doesn't exist is a harmless no-op, not a
+    404 — unlike every other `DELETE` in this contract, there is no
+    "the resource must have existed" invariant worth enforcing here). Same
+    `rNumber` validation and month-close exemption as `PUT` above.
+
+33. **`POST /api/:property/bookings/:id/accept-pms-update`** — no body →
+    the updated `BookingLine`. The "accept" half of the re-pull diff flow
+    (below): re-fetches the day FRESH via `fetchDayPayments()` (never trusts
+    a client-cached diff — the client only ever saw a snapshot from the last
+    `pull-from-pms` response), then applies the fields the PMS writes onto
+    the row's CURRENT tenders via `applyPmsCandidateToBookingLine()` (merge,
+    not replace — hand-keyed `credit_icbc`/`transfer_icbc`/`other`/`deposit`
+    and `remark` survive untouched). Gates, in order: **503** when this
+    property's PMS env URL is unset; **404** (`{ error: "booking line not
+    found" }`) if `:id` doesn't exist, doesn't belong to `:property`, or
+    isn't `source: "pms"`; **409** (`{ error: "month is closed" }`) if the
+    row's date's month is closed (reopen via endpoint 24 first); **502** on
+    a live PMS query failure; **409** (`{ error: "pms candidate no longer
+    available (vanished or became a refund)" }`) if the fresh fetch no
+    longer contains this `pms_ref` at all, or it now nets negative
+    (`isRefund`). Same pre-cutover applied-deposit guard as endpoint 26
+    (F1): on a pre-cutover date, `appliedDepositSatang` is forced to `0`
+    before applying, even if the PMS now shows one on that folio — it was
+    already booked as income under the OLD rule. **Idempotent**: calling
+    this again once nothing differs re-applies the same values and still
+    succeeds (200) — it does not special-case "no diff" into a no-op response,
+    it simply converges to the same stored state either way.
+
+**Amendment to endpoint 26** (`POST .../pull-from-pms`) — response gains
+`changed: PmsBookingLineChange[]` (additive, like `autoPlaced`): every
+EXISTING row (already counted in `skipped`, never touched) that a fresh pull
+found differing from what is currently stored. Insert-only behavior is
+unchanged — `changed` is purely a report. `PmsBookingLineChange = { id:
+number, pmsRef: string, bookingNo: string | null, handEdited: boolean,
+fields: BookingLineFieldDiff[] }`; `handEdited = updatedAt !== createdAt` (a
+row nobody has touched since the original import has both timestamps
+identical); `BookingLineFieldDiff = { field: string, before: string | number
+| null, after: string | number | null }`. The diff is against the CURRENT
+stored value, not the original import — a hand-edited row shows as "changed"
+too (flagged via `handEdited`, never suppressed: "a human always decides").
+Compares ONLY the fields the PMS importer actually writes:
+`bookingNo`/`guestName`/`roomNo`/`roomCount`/`nights`/`grossRoomSatang`/
+`grossOtherSatang`, plus the tenders `cash`/`web`/`deposit_applied`/
+`transfer_kbank` (and `credit_kbank` on hfville only) — NEVER `remark`
+(hand-keyed context) or `credit_icbc`/`transfer_icbc`/`other`/`deposit`
+(hand-keyed by design, the importer never writes these).
+
+**Data model.** New table `deposit_notes`: `property`, `r_number`, `note`
+(nullable), `resolved_at` (nullable), `resolved_by` (nullable), `updated_at`,
+`updated_by`. PK `(property, r_number)`. "Explained" = `resolved_at IS NOT
+NULL` explicitly (mirrors `sheet_days.verified_at`'s convention) — a note
+saying "waiting on reception" must keep shouting until someone deliberately
+marks it resolved. db.ts fns: `getDepositNote`, `listDepositNotes`,
+`upsertDepositNote`, `deleteDepositNote`.
+
+**Register query** (`src/server/deposit-register.ts`, mirrors
+`pms-prefill.ts`'s shape exactly — pure mapping fns + a thin network shim +
+an `_internal` test override; shares `pms-prefill.ts`'s per-property
+Postgres client cache via the exported `getPmsClient()` rather than opening
+a second connection pool): `DEPOSIT_LEDGER_QUERY` selects
+`ledger_legacy_id`/`ledger_pay_no`/`ledger_cin_no`/`ledger_ds_name`/
+`ledger_pay_date`/`ledger_status`/all four tender columns/`ledger_amount`/
+`ledger_free`/`ledger_note`, filtered to the three deposit-lifecycle
+`ds_name`s, full history, no date window. `classifyDepositRow()` — received/
+refunded: R-number from `ledger_cin_no` (trimmed, unvalidated — mirrors
+`pms-prefill.ts`'s own reading of the same column), amount = abs of the
+summed tender columns (a refund's tender is stored negative in the SAME
+column the deposit used, C0's "refund column" finding), plus a `zeroTenderRow`
+flag (review fix) when those four columns sum to zero despite a nonzero
+`ledger_amount`; applied: amount from `ledger_free` (V1), R-number parsed
+from the ds_name's own system-templated suffix via the SAME
+`parseAppliedBookingNo()` `pms-prefill.ts` exports, `null` + a tripwire flag
+when unparseable (`zeroTenderRow` is always `false` on this branch — that
+tripwire is received/refunded-only). `buildDepositThreads()` groups by
+R-number; `buildMonthlyReconciliation()` builds the opening/closing table;
+`buildDepositExceptions()` derives `mismatched`/`orphanApplied` from threads;
+`collectVoidedEvents()` (review fix: takes the flat `DepositLedgerEvent[]`
+list, NOT `DepositThread[]` — the threads-based version silently dropped a
+voided event whose R-number was unparseable/blank, since such an event never
+joins any thread) flattens the voided footnote data;
+`buildDepositRegisterData()` (the row-level entry point) computes
+`zeroTenderRows`/`blankBookingNoRows`/`undatedRows`/`voided` alongside
+`threads`/`monthly`/`unparsedAppliedRows` so the endpoint never has to
+re-derive any of them.
+
+**Re-pull diff flow** (`src/server/db.ts`): `candidateTenderPatch(property,
+candidate)` — the ONE place that decides where PMS money lands on the
+9-tender record, extracted out of `insertPmsBookingLines` so
+`diffCandidateAgainstBookingLine()` and `applyPmsCandidateToBookingLine()`
+can never drift from what a fresh insert would write.
+`diffCandidateAgainstBookingLine(property, candidate, existing)` — pure,
+returns `BookingLineFieldDiff[]` over exactly the PMS-written fields (see the
+endpoint-26 amendment above). `insertPmsBookingLines()`'s return gains
+`changed: PmsBookingLineChange[]` (additive). `getBookingLinePmsRef(property,
+id)` — the ONLY way to read a row's `pms_ref` server-side; deliberately never
+added to the public `BookingLine` DTO (it's purely an idempotence/lookup
+key). `applyPmsCandidateToBookingLine(property, id, candidate, by)` — merges
+`candidateTenderPatch`'s fields into the row's CURRENT tenders (never a
+wholesale replace) and reuses `updateBookingLine()`.
+
 ## Shared types (`src/shared/types.ts`, verbatim, READ-ONLY)
 
 `Property`, `PROPERTIES`, `isProperty()`, `PROPERTY_LABELS` (full Thai/En
@@ -790,7 +1009,8 @@ category cell; `"other"` is deliberately absent — it becomes an itemized
 `OtherIncomeItem`, `CashBlockAmounts`, `CashAdjustmentAmounts`, `CashBlock`
 (now with `depositCashInSatang`/`depositCashOutSatang`, Wave C),
 `DepositEvent`, `DepositEventKind`, `DepositTender`, `DEPOSIT_TENDERS`,
-`DEPOSIT_TENDER_LABELS_TH` (Wave C), `DayProvenance`,
+`DEPOSIT_TENDER_LABELS_TH` (Wave C), `DepositNote` and `DEPOSIT_NOTE_MAX_LEN`
+(Wave D — the office deposit register's note-thread contract), `DayProvenance`,
 `DayTotals`, `BookingTotals`, `DaySheet`
 (see Wave 2 field additions above, plus `deposits: DepositEvent[]` Wave C),
 `DaySummary` (now with
@@ -805,13 +1025,15 @@ on/after, same printed slot).
 (`computeDayTotals`), `bookings.ts` (`computeBookingTotals`,
 `deriveIncomeFromBookings`, `deriveCashBlock` (now takes a `depositEvents`
 param, defaulted `[]`), `depositCashTotals` (Wave C), `lineArithmeticMismatch`,
-`RECONCILE_TOLERANCE_SATANG`) — same philosophy as `totals.ts`: the server
-computes with these and the client imports the SAME functions, so UI and
-API can never disagree. `rollup.ts`'s `computeIncomeLedgerRollup` gains a
-`depositEvents` param and the payload gains optional
-`depositReceivedSatang`/`depositRefundedSatang` (OUTSIDE `amounts` — see the
-hf-analytics section below). `date.ts` (`todayBangkok`, `isoToThaiLong`,
-`isoToBuddhist`, month helpers).
+`RECONCILE_TOLERANCE_SATANG` — Wave D's `mismatched` exception threshold
+reuses this SAME constant, never a second tolerance value) — same philosophy
+as `totals.ts`: the server computes with these and the client imports the
+SAME functions, so UI and API can never disagree. `rollup.ts`'s
+`computeIncomeLedgerRollup` gains a `depositEvents` param and the payload
+gains optional `depositReceivedSatang`/`depositRefundedSatang` (OUTSIDE
+`amounts` — see the hf-analytics section below). `date.ts` (`todayBangkok`,
+`isoToThaiLong`, `isoToBuddhist`, month helpers, plus Wave D's `daysBetween()`
+for the aging list's "days outstanding" column).
 
 ## hf-analytics ingest (Wave C addition)
 

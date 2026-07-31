@@ -383,6 +383,28 @@ export interface DepositEvent {
   updatedBy: string;
 }
 
+// ── Deposit notes (Wave D, office deposit register — issue #5 / the
+// R015834-style reconciliation requirement) ────────────────────────────
+// ONE note thread per (property, R-number) — an R-number pairs with its
+// deposit for life (docs/adr/0001: the booking is moved, never replaced),
+// so a note is keyed to the R-number, never to a specific exception kind
+// (a deposit can be BOTH "aging" and "mismatched" at once — the note is
+// the same conversation either way). "Explained" = `resolvedAt` explicitly
+// non-null — mirrors `sheet_days.verified_at`'s convention: a note saying
+// "waiting on reception" must keep shouting until someone deliberately
+// marks it resolved, not silently count as handled just because text
+// exists.
+
+export interface DepositNote {
+  property: Property;
+  rNumber: string;
+  note: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  updatedAt: string;
+  updatedBy: string;
+}
+
 /**
  * How a day's data came to exist. `"app"` = entered live in this app;
  * `"transcribed"` = the one-time Excel importer matched the paper exactly;
@@ -498,3 +520,9 @@ export const GUEST_NAME_MAX_LEN = 120;
 export const ROOM_NO_MAX_LEN = 200;
 export const COUNT_MAX = 999;
 export const DESCRIPTION_MAX_LEN = 200;
+/** Bound for `DepositNote.note` (Wave D deposit register) — deliberately
+ * more generous than `NOTE_MAX_LEN`: this is the office's ONLY durable
+ * record of *why* a deposit exception exists (e.g. the R015834-style
+ * 395->790 gap), so it needs room for a real explanation, not a one-line
+ * tag. */
+export const DEPOSIT_NOTE_MAX_LEN = 1000;

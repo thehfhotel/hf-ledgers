@@ -53,6 +53,7 @@ import { DateBar } from "../components/DateBar.tsx";
 import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../cashBlockPatches.ts";
 import { FIXTURE_DATE, fixtureBookingLines, fixtureDaySheet } from "../fixtures.ts";
 import { CASH_ADJUSTMENT_FIELDS, CASH_BLOCK_FIELDS } from "../labels.ts";
+import { PmsPullResultDialog } from "../components/PmsPullResultDialog.tsx";
 import { PrintPortal } from "../components/PrintPortal.tsx";
 import { ReportSheet } from "../components/ReportSheet.tsx";
 import { usePrintExport } from "../components/usePrintExport.ts";
@@ -83,52 +84,9 @@ function AmountInTextHint({ text, className = "" }: { text: string; className?: 
   return <p className={"text-xs text-warn " + className}>{AMOUNT_IN_TEXT_WARNING_TH}</p>;
 }
 
-/**
- * The ดึงข้อมูล button's result alert (docs/pms-prefill-plan.md's "UI"
- * section, extended Wave C docs/adr/0001): inserted/skipped counts, the
- * skipped-refund count when non-zero, the deposit-event insert/skip counts,
- * any anomalies flagged, then two possible tender listings —
- * - `autoPlaced`: payments whose credit/transfer amount the server was able
- *   to place on a bank column itself (transfer everywhere, credit only on
- *   hfville) — shown as a verification note, since it is a bank-guess even
- *   though it is now evidence-backed.
- * - `unplaced`: payments where the amount is known but which bank it landed
- *   on genuinely cannot be inferred (hf credit — two credit banks in use
- *   there) — same "key it in by hand" instruction as before.
- */
-function formatPmsPullResult(result: Awaited<ReturnType<typeof pullFromPms>>): string {
-  const lines = [`เพิ่มรายการจาก PMS แล้ว ${result.inserted} รายการ ข้ามไป ${result.skipped} รายการ (มีอยู่แล้ว)`];
-  if (result.skippedRefunds > 0) {
-    lines.push(`ข้ามรายการคืนเงิน ${result.skippedRefunds} รายการ (ไม่นำเข้ารายการติดลบ)`);
-  }
-  if (result.depositsInserted > 0 || result.depositsSkipped > 0) {
-    lines.push(`มัดจำล่วงหน้า: เพิ่ม ${result.depositsInserted} รายการ ข้ามไป ${result.depositsSkipped} รายการ (มีอยู่แล้ว)`);
-  }
-  if (result.autoPlaced.length > 0) {
-    lines.push("", "รายการที่ลงช่องธนาคารให้อัตโนมัติ — ตรวจสอบธนาคารด้วย:");
-    for (const row of result.autoPlaced) {
-      const parts: string[] = [];
-      if (row.transferSatang > 0) parts.push(`โอน/กสิกร ${formatSatang(row.transferSatang)} บาท`);
-      if (row.creditSatang > 0) parts.push(`บัตรเครดิต/กสิกร ${formatSatang(row.creditSatang)} บาท`);
-      const label = row.bookingNo ?? row.pmsRef;
-      lines.push(`เลขที่ ${label}: ลงช่อง ${parts.join(" / ")} ให้แล้ว — ตรวจสอบธนาคารด้วย`);
-    }
-  }
-  if (result.unplaced.length > 0) {
-    lines.push("", "รายการที่ยังไม่ได้ระบุธนาคาร:");
-    for (const row of result.unplaced) {
-      const parts: string[] = [];
-      if (row.creditSatang > 0) parts.push(`บัตรเครดิต ${formatSatang(row.creditSatang)} บาท`);
-      if (row.tranSatang > 0) parts.push(`เงินโอน ${formatSatang(row.tranSatang)} บาท`);
-      const label = row.bookingNo ?? row.pmsRef;
-      lines.push(`เลขที่ ${label}: ${parts.join(" / ")} — ยังไม่ได้ระบุธนาคาร กรอกในช่องธนาคารเอง`);
-    }
-  }
-  if (result.anomalies.length > 0) {
-    lines.push("", `พบรายการผิดปกติ ${result.anomalies.length} รายการ (ไม่ได้นำเข้าเป็นเงิน) — ตรวจสอบใน PMS`);
-  }
-  return lines.join("\n");
-}
+/** The ดึงข้อมูล button's result — Wave D, D5: no longer a `window.alert`,
+ * rendered by `PmsPullResultDialog` instead (see the handler below). */
+type PmsPullResultState = Awaited<ReturnType<typeof pullFromPms>> | null;
 
 /**
  * รายงานรายรับโรงแรมรายวัน — the per-booking half of the paper, rebuilt as
@@ -250,15 +208,19 @@ export function BookingDayPage({ property, date }: Props) {
   // ── ดึงข้อมูล — prefill booking rows from the PMS payment ledger ────────
   // Button-triggered only, never automatic (no fetch on load, no polling —
   // docs/pms-prefill-plan.md). Insert-only and idempotent server-side, so
-  // there is nothing to confirm before the call; the result alert after is
-  // the only user-facing feedback. Hidden unless `pmsPull` (capability flag
-  // from GET .../bookings) and never in demo mode; disabled while the month
-  // is closed or a pull is already in flight.
+  // there is nothing to confirm before the call. Hidden unless `pmsPull`
+  // (capability flag from GET .../bookings) and never in demo mode;
+  // disabled while the month is closed or a pull is already in flight.
   const [pmsPulling, setPmsPulling] = useState(false);
+  // Wave D, D5: the result is no longer a window.alert — PmsPullResultDialog
+  // renders it (and, when `changed` is non-empty, the per-row accept flow).
+  const [pmsPullResult, setPmsPullResult] = useState<PmsPullResultState>(null);
+  const [pmsPullError, setPmsPullError] = useState<string | null>(null);
 
   async function handlePullFromPms() {
     if (isDemo || !pmsPull || monthClosed || pmsPulling) return;
     setPmsPulling(true);
+    setPmsPullError(null);
     try {
       const result = await pullFromPms(effectiveProperty, effectiveDate);
       // New rows (booking lines AND deposit events — Wave C) land through
@@ -266,9 +228,9 @@ export function BookingDayPage({ property, date }: Props) {
       // from inserted/skipped counts. getDay() also returns `deposits`, so
       // this refresh covers both kinds.
       if (result.inserted > 0 || result.depositsInserted > 0) await refetchLinesAndSheet();
-      window.alert(formatPmsPullResult(result));
+      setPmsPullResult(result);
     } catch (err) {
-      window.alert(`ดึงข้อมูลไม่สำเร็จ: ${err instanceof Error ? err.message : "ลองใหม่อีกครั้ง"}`);
+      setPmsPullError(err instanceof Error ? err.message : "ดึงข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง");
     } finally {
       setPmsPulling(false);
     }
@@ -955,6 +917,9 @@ export function BookingDayPage({ property, date }: Props) {
         {printExport.error && (
           <p className="border-b border-line bg-bad/5 px-4 py-2 text-xs text-bad">{printExport.error}</p>
         )}
+        {pmsPullError && (
+          <p className="border-b border-line bg-bad/5 px-4 py-2 text-xs text-bad">{pmsPullError}</p>
+        )}
         <BookingGrid
           lines={sortedLines}
           disabled={monthClosed}
@@ -1474,6 +1439,15 @@ export function BookingDayPage({ property, date }: Props) {
           </div>
         </div>
       </PrintPortal>
+
+      {pmsPullResult && (
+        <PmsPullResultDialog
+          property={effectiveProperty}
+          result={pmsPullResult}
+          onClose={() => setPmsPullResult(null)}
+          onAccepted={refetchLinesAndSheet}
+        />
+      )}
     </div>
   );
 }

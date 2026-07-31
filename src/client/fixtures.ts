@@ -237,13 +237,17 @@ export const fixtureDaySheet: DaySheet = {
   otherIncome,
   // No deposit-machine reconciliation adjustment in the demo data — the
   // fixture's documented "sums to exactly the paper's printed total" note
-  // above must stay true.
+  // above must stay true. No deposit_events either (Wave C) — deposits: []
+  // below keeps depositCashInSatang/depositCashOutSatang at 0.
   cashBlock: {
     derived: deriveCashBlock(categories, income, otherIncome),
     entered: null,
     heldBackSatang: null,
     broughtForwardSatang: null,
+    depositCashInSatang: 0,
+    depositCashOutSatang: 0,
   },
+  deposits: [],
   provenance: "app",
   verifiedAt: null,
   verifiedBy: null,

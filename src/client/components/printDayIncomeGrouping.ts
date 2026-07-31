@@ -1,19 +1,33 @@
 import type { Category, CategoryKey, DaySheet, IncomeCell } from "../../shared/types.ts";
 
-// Pure grouping logic for the DAY-SUMMARY PRINT ONLY (PrintableDaySummary.tsx
-// / .print-stage). The owner finds the flat 14-category list confusing on
-// paper — this regroups the same cells by HOW the money arrived (cash /
-// transfer / card / web), which the screen and the JPEG export do NOT do
-// (they keep the flat list) — see PrintableDaySummary.tsx and
-// reportSheetBlocks.tsx's IncomeExpenseSummaryCard for those unchanged
-// renderings.
+// Pure grouping logic feeding reportSheetBlocks.tsx's DayTenderSummary — the
+// owner found the flat 15-category list confusing on paper, so this
+// regroups the same cells by HOW the money arrived (cash / transfer / card /
+// web, plus the optional Wave C deposit_applied group). As of the
+// "ONE LAYOUT FOR ALL THREE EXPORTS" rework (owner decision, 2026-07-31, see
+// reportSheetBlocks.tsx's own module comment), print, PDF, AND the JPEG
+// export (ReportPage.tsx via ReportSheet.tsx's "full" variant) all render
+// DayTenderSummary and therefore this same grouping — only the LIVE SCREEN
+// (DaySheetPage.tsx's own รายรับ panel, plain JSX, no shared component)
+// keeps the flat per-category list this module was built to replace on
+// paper. The old flat-list print components this superseded
+// (IncomeExpenseSummaryCard/CashSummaryCard) are retired and no longer
+// exist — see reportSheetBlocks.tsx's module comment for that history.
 //
 // Grouping is keyed on `categoryKey`, NEVER `nameTh` — managers can rename
 // categories freely (see src/shared/types.ts Category doc comment), so any
 // logic that means "the cash room-income category" has to key off the
 // stable identity, same rule bookings.ts/rollup.ts/DaySheetPage.tsx follow.
 
-export type PrintIncomeGroupId = "cash" | "transfer" | "card" | "web";
+// `"deposit_applied"` (Wave C, docs/adr/0001) is a FIFTH group, printed only
+// when it holds money — see GROUP_ORDER/groupDayIncomeForPrint's filter
+// below and reportSheetBlocks.tsx's DayTenderSummary, which renders it as
+// an ordinary group in the left column plus a subtotal in the totals box.
+// Deliberately not folded into "card"/"transfer"/whichever bank actually
+// settled it: the ตัดยอดมัดจำ tender needs its own visible line so revenue
+// recognised via a deposit (no money moved) reads distinctly from revenue
+// that arrived by an ordinary tender today.
+export type PrintIncomeGroupId = "cash" | "transfer" | "card" | "web" | "deposit_applied";
 
 export interface PrintIncomeSubLine {
   categoryKey: CategoryKey;
@@ -54,7 +68,9 @@ export interface PrintIncomeUnclassifiedLine {
 }
 
 export interface GroupedDayIncomeForPrint {
-  /** Fixed order: cash, transfer, card, web (the task's group 1-4 order). */
+  /** Fixed order: cash, transfer, card, web, then deposit_applied (Wave C)
+   * when it holds money — the OPTIONAL fifth group is simply absent from
+   * this array on a day that applied no deposit. */
   groups: PrintIncomeGroup[];
   /** Only categories that actually hold a cell — never a full listing of
    * every manager-created category, most of which carry nothing. */
@@ -108,6 +124,9 @@ const KEY_TO_GROUP = {
   other_credit: "card",
   bar_credit: "card",
   web: "web",
+  // Wave C (docs/adr/0001): its own group, printed only when non-empty —
+  // see GROUP_ORDER/groupDayIncomeForPrint's filter below.
+  deposit_applied: "deposit_applied",
 } satisfies Record<CategoryKey, PrintIncomeGroupId>;
 
 /** Fallback Thai label per key, verbatim from the seed list in server/db.ts
@@ -117,6 +136,7 @@ const KEY_TO_GROUP = {
 const FALLBACK_LABEL_TH: Record<CategoryKey, string> = {
   deposit: "มัดจำล่วงหน้า โอน",
   deposit_credit: "มัดจำล่วงหน้า เครดิต",
+  deposit_applied: "มัดจำล่วงหน้า (ตัดยอด)",
   room_cash: "ค่าห้องเงินสด",
   credit_kbank: "บัตรเครดิต/กสิกร",
   credit_icbc: "บัตรเครดิต ICBC",
@@ -136,10 +156,12 @@ const GROUP_LABELS: Record<PrintIncomeGroupId, { label: string; totalLabel: stri
   transfer: { label: "เงินโอน", totalLabel: "รวมเงินโอน" },
   card: { label: "บัตรเครดิต", totalLabel: "รวมบัตรเครดิต" },
   web: { label: "เว็บไซต์ / OTA", totalLabel: "รวมเว็บไซต์" },
+  deposit_applied: { label: "มัดจำที่ตัดยอด", totalLabel: "รวมมัดจำที่ตัดยอด" },
 };
 
-/** Fixed print order: cash, transfer, card, web (the task's group 1-4 order). */
-const GROUP_ORDER: PrintIncomeGroupId[] = ["cash", "transfer", "card", "web"];
+/** Fixed print order: cash, transfer, card, web, deposit_applied (the
+ * task's group 1-4 order, plus the Wave C fifth group appended last). */
+const GROUP_ORDER: PrintIncomeGroupId[] = ["cash", "transfer", "card", "web", "deposit_applied"];
 
 /** Every CategoryKey assigned to `groupId`, in KEY_TO_GROUP's own (fixed,
  * spec-guaranteed) insertion order — the printed sub-line order. */
@@ -195,7 +217,11 @@ export function groupDayIncomeForPrint(sheet: DayIncomeSheet): GroupedDayIncomeF
     const lines = keysForGroup(id).map((key) => buildSubLine(key, incomeCategories, sheet.income));
     const totalSatang = lines.reduce((sum, line) => sum + (line.amountSatang ?? 0), 0);
     return { id, ...GROUP_LABELS[id], lines, totalSatang };
-  });
+  }).filter((group) => group.id !== "deposit_applied" || group.totalSatang > 0);
+  // ^ Wave C: the deposit_applied group is OPTIONAL — printed only on a day
+  // that actually applied a deposit, so a no-deposit day's printed sheet
+  // stays byte-identical to before this group existed (rather than an
+  // always-visible "0.00" row nobody asked for).
 
   const unclassified: PrintIncomeUnclassifiedLine[] = incomeCategories
     .filter((c) => c.categoryKey === null && sheet.income[c.id] != null)

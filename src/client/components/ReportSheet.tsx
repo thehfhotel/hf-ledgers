@@ -1,7 +1,7 @@
 import { forwardRef } from "react";
+import { visibleTendersForDate } from "../../shared/accrual.ts";
 import { computeBookingTotals, lineArithmeticMismatch } from "../../shared/bookings.ts";
 import {
-  TENDERS,
   type BookingLine,
   type DaySheet,
   type Property,
@@ -103,6 +103,10 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
   const draftCount = lines.length - printedLines.length;
   const bookingTotals = computeBookingTotals(lines);
   const anyMismatch = printedLines.some((line) => lineArithmeticMismatch(line));
+  // Wave C (docs/adr/0001): the 8 tender columns actually visible for this
+  // date — deposit pre-cutover, deposit_applied on/after (same printed
+  // slot, see shared/accrual.ts).
+  const visibleTenders = visibleTendersForDate(property, date);
 
   return (
     <div ref={ref} className="bg-white text-ink" style={{ width: REPORT_SHEET_WIDTH }}>
@@ -121,8 +125,8 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
               className="border-separate border-spacing-0 bg-white"
               style={{ width: PRINT_TABLE_WIDTH, tableLayout: "fixed" }}
             >
-              <BookingGridColgroup scale={PRINT_SCALE} />
-              <BookingGridHead compact />
+              <BookingGridColgroup tenders={visibleTenders} scale={PRINT_SCALE} />
+              <BookingGridHead tenders={visibleTenders} compact />
               <tbody>
                 {printedLines.length === 0 && (
                   <tr>
@@ -150,7 +154,7 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
                     <td className={PNUM}>{moneyText(line.grossRoomSatang)}</td>
                     <td className={PNUM}>{moneyText(line.grossOtherSatang)}</td>
                     <td className={PNUM}>{moneyText(line.discountSatang)}</td>
-                    {TENDERS.map((tender) => (
+                    {visibleTenders.map((tender) => (
                       <td key={tender} className={PNUM}>
                         {moneyText(line.tenders[tender])}
                       </td>
@@ -159,7 +163,7 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
                   </tr>
                 ))}
               </tbody>
-              <BookingGridFoot totals={bookingTotals} compact />
+              <BookingGridFoot tenders={visibleTenders} totals={bookingTotals} compact />
             </table>
           </div>
           {(anyMismatch || draftCount > 0) && (
@@ -183,7 +187,7 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
                 driven by the booking table above), wider than
                 PrintableDaySummary's own landscape sheet — see the "stretch
                 sensibly" note in DayTenderSummary's own comment. */}
-            <DayTenderSummary date={date} sheet={sheet} weekDays={weekDays} />
+            <DayTenderSummary property={property} date={date} sheet={sheet} weekDays={weekDays} />
 
             <ReportFooter provenance={provenance} verifiedAt={verifiedAt} verifiedBy={verifiedBy} updatedBy={updatedBy} />
           </>

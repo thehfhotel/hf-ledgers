@@ -11,13 +11,16 @@ import type {
   CategoryKey,
   CategoryKind,
   DayProvenance,
+  DepositEvent,
+  DepositEventKind,
+  DepositTender,
   ExpenseItem,
   IncomeCell,
   OtherIncomeItem,
   Property,
   Tender,
 } from "../shared/types.ts";
-import type { PrefillCandidate } from "./pms-prefill.ts";
+import type { DepositCandidate, PrefillCandidate } from "./pms-prefill.ts";
 
 const DB_PATH = process.env.DB_PATH ?? "./data/ledger.db";
 
@@ -107,6 +110,7 @@ export function migrate(): void {
       gross_other_satang INTEGER NOT NULL DEFAULT 0 CHECK (gross_other_satang >= 0),
       discount_satang INTEGER NOT NULL DEFAULT 0 CHECK (discount_satang >= 0),
       t_deposit INTEGER CHECK (t_deposit IS NULL OR t_deposit >= 0),
+      t_deposit_applied INTEGER CHECK (t_deposit_applied IS NULL OR t_deposit_applied >= 0),
       t_cash INTEGER CHECK (t_cash IS NULL OR t_cash >= 0),
       t_credit_kbank INTEGER CHECK (t_credit_kbank IS NULL OR t_credit_kbank >= 0),
       t_credit_icbc INTEGER CHECK (t_credit_icbc IS NULL OR t_credit_icbc >= 0),
@@ -177,6 +181,40 @@ export function migrate(): void {
       closed_by TEXT NOT NULL,
       PRIMARY KEY (property, month)
     );
+
+    -- Wave C (docs/adr/0001-accrual-recognition-for-deposits.md): one row
+    -- per received-or-refunded มัดจำล่วงหน้า moment. Modelled on
+    -- other_income_items (day-scoped, itemized), NOT a BookingLine flag —
+    -- see shared/types.ts's DepositEvent doc comment for the failure-mode
+    -- argument. amount_satang is always a >0 MAGNITUDE; kind carries the
+    -- sign.
+    CREATE TABLE IF NOT EXISTS deposit_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property TEXT NOT NULL CHECK (property IN ('hf', 'hfville')),
+      date TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('received', 'refunded')),
+      booking_no TEXT,
+      guest_name TEXT,
+      tender TEXT NOT NULL CHECK (tender IN ('cash', 'transfer', 'credit', 'web', 'other')),
+      amount_satang INTEGER NOT NULL CHECK (amount_satang > 0),
+      note TEXT,
+      source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'pms')),
+      pms_ref TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_by TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_deposit_events_day ON deposit_events (property, date);
+
+    -- One PMS payment can split tenders (see pms-prefill.ts), so the
+    -- idempotence key for a PMS-sourced row is (property, date, pms_ref,
+    -- tender), not (property, date, pms_ref) alone — mirrors
+    -- idx_booking_lines_pms_ref's shape. Manual (hand-entered) rows never
+    -- carry a pms_ref and are exempt.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_deposit_events_pms_ref
+      ON deposit_events (property, date, pms_ref, tender) WHERE pms_ref IS NOT NULL;
   `);
 
   migrateCategoryKeyColumn();
@@ -196,10 +234,15 @@ export function migrate(): void {
   addColumnIfMissing("sheet_days", "provenance", "TEXT NOT NULL DEFAULT 'app'");
   addColumnIfMissing("sheet_days", "verified_at", "TEXT");
   addColumnIfMissing("sheet_days", "verified_by", "TEXT");
+  // Wave C (docs/adr/0001): the ninth tender, ตัดยอดมัดจำ — see
+  // shared/types.ts's Tender doc comment. Already in the CREATE TABLE above
+  // for a fresh DB; this covers an existing one.
+  addColumnIfMissing("booking_lines", "t_deposit_applied", "INTEGER CHECK (t_deposit_applied IS NULL OR t_deposit_applied >= 0)");
 
   for (const property of PROPERTIES) seedIfEmpty(property);
 
   migrateTransferCreditSplit();
+  migrateDepositAppliedCategory();
 }
 
 /**
@@ -440,6 +483,73 @@ function migrateTransferCreditSplit(): void {
   tx();
 }
 
+// ── deposit_applied category (Wave C, docs/adr/0001-accrual-recognition-
+// for-deposits.md) ──────────────────────────────────────────────────────
+// Seeded immediately after deposit_credit — same splice-and-shift pattern
+// as splitTransferCreditCategory/splitOtherIncomeCategory above (never a
+// plain append, which would put it at the END of the list rather than
+// beside its accrual-era sibling `deposit`/`deposit_credit`). A fresh
+// database's INCOME_SEED already carries it pre-inserted (see below), so
+// this migration is a no-op there; it only does real work against a
+// pre-Wave-C database.
+
+const DEPOSIT_APPLIED_NAME_TH = "มัดจำล่วงหน้า (ตัดยอด)";
+
+/**
+ * Per property: inserts the `deposit_applied` category right after
+ * `deposit_credit`'s current sort position, shifting everything after it up
+ * by one (same splice as splitTransferCreditCategory). Guarded by
+ * `category_key` already existing at all for this property (never by
+ * name), so this is idempotent — a no-op once applied, or on a fresh DB
+ * whose seed already includes it. Collision-safe like every other category
+ * migration in this file: `idx_categories_active_name` is a UNIQUE index,
+ * so a manager could independently have created/renamed a category to this
+ * exact name before this migration ever runs — SKIP (never throw) rather
+ * than crash `migrate()` at module top level and crash-loop the container.
+ */
+function migrateDepositAppliedCategoryForProperty(property: Property): void {
+  const alreadySeeded = db
+    .query<{ n: number }, [string, string]>(
+      "SELECT 1 AS n FROM categories WHERE property = ? AND category_key = ?",
+    )
+    .get(property, "deposit_applied");
+  if (alreadySeeded) return;
+
+  const afterRow = db
+    .query<{ sort: number }, [string, string]>(
+      "SELECT sort FROM categories WHERE property = ? AND kind = 'income' AND category_key = ?",
+    )
+    .get(property, "deposit_credit");
+  // deposit_credit missing entirely should not happen (the seed always
+  // creates it, and it predates this migration) — skip cleanly rather than
+  // guess a sort position if it somehow is.
+  if (!afterRow) return;
+
+  if (activeNameCollision(property, DEPOSIT_APPLIED_NAME_TH)) {
+    console.log(
+      `[db] migrateDepositAppliedCategory: property=${property} — an active category is already named "${DEPOSIT_APPLIED_NAME_TH}"; skipped seeding deposit_applied (will retry next boot).`,
+    );
+    return;
+  }
+
+  db.prepare("UPDATE categories SET sort = sort + 1 WHERE property = ? AND kind = 'income' AND sort > ?").run(
+    property,
+    afterRow.sort,
+  );
+  db.prepare(
+    `INSERT INTO categories (property, kind, name_th, sort, is_cash, category_key)
+     VALUES (?, 'income', ?, ?, 0, 'deposit_applied')`,
+  ).run(property, DEPOSIT_APPLIED_NAME_TH, afterRow.sort + 1);
+}
+
+/** Same succeed-or-fail-together reasoning as the migrations above. */
+function migrateDepositAppliedCategory(): void {
+  const tx = db.transaction(() => {
+    for (const property of PROPERTIES) migrateDepositAppliedCategoryForProperty(property);
+  });
+  tx();
+}
+
 // Paper order; isCash flags per src/shared/api.md "Data model". รายการอื่นๆ
 // is seeded pre-split into its cash/transfer pair (see "รายการอื่นๆ —
 // RESOLVED") so a fresh database never needs that split migration to run.
@@ -450,6 +560,10 @@ function migrateTransferCreditSplit(): void {
 const INCOME_SEED: ReadonlyArray<{ nameTh: string; isCash: boolean; categoryKey: CategoryKey }> = [
   { nameTh: "มัดจำล่วงหน้า โอน", isCash: false, categoryKey: "deposit" },
   { nameTh: "มัดจำล่วงหน้า เครดิต", isCash: false, categoryKey: "deposit_credit" },
+  // Wave C (docs/adr/0001): the accrual-era counterpart, seeded right after
+  // its pre-cutover siblings — see migrateDepositAppliedCategoryForProperty
+  // above for the existing-DB migration that inserts this in the same spot.
+  { nameTh: DEPOSIT_APPLIED_NAME_TH, isCash: false, categoryKey: "deposit_applied" },
   { nameTh: "ค่าห้องเงินสด", isCash: true, categoryKey: "room_cash" },
   { nameTh: "บัตรเครดิต/กสิกร", isCash: false, categoryKey: "credit_kbank" },
   { nameTh: "บัตรเครดิต ICBC", isCash: false, categoryKey: "credit_icbc" },
@@ -986,7 +1100,7 @@ export function getSheetDay(property: Property, date: string): SheetDay | null {
 export function mergeCashBlockOverride(
   derived: CashBlockAmounts,
   sheetDay: SheetDay | null,
-): CashBlock {
+): Omit<CashBlock, "depositCashInSatang" | "depositCashOutSatang"> {
   const override = sheetDay?.cashOverride;
   const hasOverride =
     !!override &&
@@ -1165,6 +1279,7 @@ export function setMonthClosed(property: Property, month: string, closed: boolea
 
 const TENDER_COLUMN: Record<Tender, string> = {
   deposit: "t_deposit",
+  deposit_applied: "t_deposit_applied",
   cash: "t_cash",
   credit_kbank: "t_credit_kbank",
   credit_icbc: "t_credit_icbc",
@@ -1192,6 +1307,7 @@ interface BookingLineRow {
   gross_other_satang: number;
   discount_satang: number;
   t_deposit: number | null;
+  t_deposit_applied: number | null;
   t_cash: number | null;
   t_credit_kbank: number | null;
   t_credit_icbc: number | null;
@@ -1230,6 +1346,7 @@ function toBookingLine(r: BookingLineRow): BookingLine {
     // sees a concrete number for all eight columns.
     tenders: {
       deposit: r.t_deposit ?? 0,
+      deposit_applied: r.t_deposit_applied ?? 0,
       cash: r.t_cash ?? 0,
       credit_kbank: r.t_credit_kbank ?? 0,
       credit_icbc: r.t_credit_icbc ?? 0,
@@ -1317,9 +1434,9 @@ export function createBookingLine(
       `INSERT INTO booking_lines (
          property, date, seq, booking_no, guest_name, room_no, room_count, nights,
          gross_room_satang, gross_other_satang, discount_satang,
-         t_deposit, t_cash, t_credit_kbank, t_credit_icbc, t_transfer_kbank, t_transfer_icbc, t_web, t_other,
+         t_deposit, t_deposit_applied, t_cash, t_credit_kbank, t_credit_icbc, t_transfer_kbank, t_transfer_icbc, t_web, t_other,
          remark, source, draft, pms_ref, source_sheet, created_by, updated_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       property,
@@ -1334,6 +1451,7 @@ export function createBookingLine(
       input.grossOtherSatang ?? 0,
       input.discountSatang ?? 0,
       tenders.deposit,
+      tenders.deposit_applied,
       tenders.cash,
       tenders.credit_kbank,
       tenders.credit_icbc,
@@ -1412,10 +1530,19 @@ export function deleteBookingLine(property: Property, id: number): boolean {
  * Tenders — AUTO-PLACEMENT POLICY (grep "AUTO-PLACEMENT POLICY" if this
  * ever needs revisiting; evidence-based, set 2026-07-31, superseding the
  * older "never guess the acquiring bank, leave credit/transfer at 0"
- * rule for transfer specifically): `deposit`/`cash`/`web` always come
- * straight from the candidate, unchanged.
+ * rule for transfer specifically): `cash`/`web` always come straight from
+ * the candidate, unchanged.
  *
- * - `unplacedTranSatang` is now written into `transfer_kbank` for BOTH
+ * - **`t_deposit` is NEVER written here any more** (Wave C,
+ *   docs/adr/0001) — the pre-cutover `deposit` tender is retired at the
+ *   importer's write boundary; every PMS-sourced booking line now writes
+ *   `t_deposit_applied` from `candidate.appliedDepositSatang` instead (the
+ *   accrual-era ตัดยอดมัดจำ tender, per V1's reading of `ledger_free` — see
+ *   pms-prefill.ts). `appliedDepositBookingNos` (the R-numbers a ตัดยอด
+ *   line's label carries) fold into `remark` so the office can trace which
+ *   deposit(s) this line's applied amount came from, without clobbering an
+ *   existing remark the candidate never supplies one alongside.
+ * - `unplacedTranSatang` is written into `transfer_kbank` for BOTH
  *   properties. Across all 6,024 historical booking lines on hf AND
  *   hfville, `t_transfer_icbc` is 0 in every single row — every transfer
  *   this hotel group has ever recorded is โอน/กสิกร. This was previously
@@ -1460,6 +1587,11 @@ export function insertPmsBookingLines(
         continue;
       }
 
+      const remark =
+        candidate.appliedDepositBookingNos.length > 0
+          ? `ตัดยอดมัดจำ: ${candidate.appliedDepositBookingNos.join(", ")}`
+          : null;
+
       createBookingLine(
         property,
         date,
@@ -1473,15 +1605,70 @@ export function insertPmsBookingLines(
           grossOtherSatang: candidate.grossOtherSatang,
           tenders: {
             ...zeroTenders(),
-            deposit: candidate.depositSatang,
+            deposit_applied: candidate.appliedDepositSatang,
             cash: candidate.cashSatang,
             web: candidate.webSatang,
             // See the AUTO-PLACEMENT POLICY note above the function.
             transfer_kbank: candidate.unplacedTranSatang,
             credit_kbank: property === "hfville" ? candidate.unplacedCreditSatang : 0,
           },
+          remark,
           source: "pms",
           draft: false,
+          pmsRef: candidate.pmsRef,
+        },
+        actor,
+      );
+      inserted += 1;
+    }
+  });
+  tx();
+
+  return { inserted, skipped };
+}
+
+/**
+ * Inserts one `deposit_events` row per `DepositCandidate` for `POST
+ * .../pull-from-pms` (see src/server/pms-prefill.ts). ONE transaction,
+ * insert-only and idempotent — mirrors `insertPmsBookingLines()` exactly,
+ * except the dedup key is `(property, date, pms_ref, tender)` (one PMS
+ * payment can split across tenders — see `idx_deposit_events_pms_ref`),
+ * never updating a row that already exists (hand-entered notes on a
+ * manually-created event, or a hand edit to an already-imported one, are
+ * sacred just like booking-line hand edits are).
+ */
+export function insertPmsDepositEvents(
+  property: Property,
+  date: string,
+  candidates: DepositCandidate[],
+  actor: string,
+): { inserted: number; skipped: number } {
+  let inserted = 0;
+  let skipped = 0;
+
+  const tx = db.transaction(() => {
+    for (const candidate of candidates) {
+      const existing = db
+        .query<{ n: number }, [string, string, string, string]>(
+          "SELECT 1 AS n FROM deposit_events WHERE property = ? AND date = ? AND pms_ref = ? AND tender = ?",
+        )
+        .get(property, date, candidate.pmsRef, candidate.tender);
+      if (existing) {
+        skipped += 1;
+        continue;
+      }
+
+      createDepositEvent(
+        property,
+        date,
+        {
+          kind: candidate.kind,
+          bookingNo: candidate.bookingNo,
+          guestName: candidate.guestName,
+          tender: candidate.tender,
+          amountSatang: candidate.amountSatang,
+          note: candidate.note,
+          source: "pms",
           pmsRef: candidate.pmsRef,
         },
         actor,
@@ -1596,17 +1783,159 @@ export function deleteOtherIncomeItem(property: Property, id: number): boolean {
   return info.changes > 0;
 }
 
+// ── deposit_events (Wave C, docs/adr/0001) ──────────────────────────────
+// Hand-entry CRUD mirroring other_income_items above — same shape, same
+// month-close/audit conventions applied by the CALLER (server.ts, per
+// api.md's other-income endpoints), not enforced in this layer.
+
+interface DepositEventRow {
+  id: number;
+  property: string;
+  date: string;
+  kind: string;
+  booking_no: string | null;
+  guest_name: string | null;
+  tender: string;
+  amount_satang: number;
+  note: string | null;
+  source: string;
+  pms_ref: string | null;
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  updated_by: string;
+}
+
+function toDepositEvent(r: DepositEventRow): DepositEvent {
+  return {
+    id: r.id,
+    property: r.property as Property,
+    date: r.date,
+    kind: r.kind as DepositEventKind,
+    bookingNo: r.booking_no,
+    guestName: r.guest_name,
+    tender: r.tender as DepositTender,
+    amountSatang: r.amount_satang,
+    note: r.note,
+    source: r.source as DepositEvent["source"],
+    pmsRef: r.pms_ref,
+    createdAt: r.created_at,
+    createdBy: r.created_by,
+    updatedAt: r.updated_at,
+    updatedBy: r.updated_by,
+  };
+}
+
+export function getDepositEventsForDay(property: Property, date: string): DepositEvent[] {
+  return db
+    .query<DepositEventRow, [string, string]>(
+      "SELECT * FROM deposit_events WHERE property = ? AND date = ? ORDER BY id ASC",
+    )
+    .all(property, date)
+    .map(toDepositEvent);
+}
+
+export function getDepositEventById(property: Property, id: number): DepositEvent | null {
+  const row = db
+    .query<DepositEventRow, [number, string]>("SELECT * FROM deposit_events WHERE id = ? AND property = ?")
+    .get(id, property);
+  return row ? toDepositEvent(row) : null;
+}
+
+/** The editable DepositEvent fields — everything except id/property/date
+ * and the audit quartet, per the shape of BookingLineInput/other-income
+ * patch types elsewhere in this file. */
+export interface DepositEventInput {
+  kind?: DepositEventKind;
+  bookingNo?: string | null;
+  guestName?: string | null;
+  tender?: DepositTender;
+  amountSatang?: number;
+  note?: string | null;
+  source?: DepositEvent["source"];
+  pmsRef?: string | null;
+}
+
+export function createDepositEvent(
+  property: Property,
+  date: string,
+  input: DepositEventInput,
+  by: string,
+): DepositEvent {
+  const info = db
+    .prepare(
+      `INSERT INTO deposit_events (
+         property, date, kind, booking_no, guest_name, tender, amount_satang, note, source, pms_ref, created_by, updated_by
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      property,
+      date,
+      input.kind ?? "received",
+      input.bookingNo ?? null,
+      input.guestName ?? null,
+      input.tender ?? "cash",
+      input.amountSatang ?? 0,
+      input.note ?? null,
+      input.source ?? "manual",
+      input.pmsRef ?? null,
+      by,
+      by,
+    );
+  return getDepositEventById(property, Number(info.lastInsertRowid))!;
+}
+
+export function updateDepositEvent(
+  property: Property,
+  id: number,
+  patch: DepositEventInput,
+  by: string,
+): DepositEvent | null {
+  const existing = getDepositEventById(property, id);
+  if (!existing) return null;
+
+  const sets: string[] = ["updated_at = datetime('now')", "updated_by = ?"];
+  const params: Array<string | number | null> = [by];
+  const set = (column: string, value: string | number | null) => {
+    sets.push(`${column} = ?`);
+    params.push(value);
+  };
+  if (patch.kind !== undefined) set("kind", patch.kind);
+  if (patch.bookingNo !== undefined) set("booking_no", patch.bookingNo);
+  if (patch.guestName !== undefined) set("guest_name", patch.guestName);
+  if (patch.tender !== undefined) set("tender", patch.tender);
+  if (patch.amountSatang !== undefined) set("amount_satang", patch.amountSatang);
+  if (patch.note !== undefined) set("note", patch.note);
+  if (patch.source !== undefined) set("source", patch.source);
+  if (patch.pmsRef !== undefined) set("pms_ref", patch.pmsRef);
+
+  db.prepare(`UPDATE deposit_events SET ${sets.join(", ")} WHERE id = ? AND property = ?`).run(
+    ...params,
+    id,
+    property,
+  );
+  return getDepositEventById(property, id);
+}
+
+export function deleteDepositEvent(property: Property, id: number): boolean {
+  const info = db.prepare("DELETE FROM deposit_events WHERE id = ? AND property = ?").run(id, property);
+  return info.changes > 0;
+}
+
 // ── moving a day between properties ────────────────────────────────────
 
 /**
- * Moves ONE day's `booking_lines` and `other_income_items` from `from` to
- * `to` — see src/shared/api.md `POST .../day/:date/move`. Deliberately
- * narrow scope: `sheet_days` (income cells, expenses, the day note, the
- * cash-block override) is never touched or re-keyed here — a merge of two
- * single-valued cash-block overrides would be meaningless, and the day
- * sheet is a separate page's territory. Both tables merge cleanly into
- * whatever the destination day already holds; this never refuses on a
- * non-empty destination.
+ * Moves ONE day's `booking_lines`, `other_income_items`, AND
+ * `deposit_events` (Wave C, Opus money-review F2, 2026-07-31 — a moved
+ * day's deposit_events used to stay stranded on the origin property, so a
+ * cash มัดจำล่วงหน้า kept reaching the WRONG side's ยอดฝากจริง forever) from
+ * `from` to `to` — see src/shared/api.md `POST .../day/:date/move`.
+ * Deliberately narrow scope beyond those three tables: `sheet_days` (income
+ * cells, expenses, the day note, the cash-block override) is never touched
+ * or re-keyed here — a merge of two single-valued cash-block overrides
+ * would be meaningless, and the day sheet is a separate page's territory.
+ * All three tables merge cleanly into whatever the destination day already
+ * holds; this never refuses on a non-empty destination.
  *
  * `booking_lines.seq` is a dense per-(property,date) row order the printed
  * day sheet renders as the line number, but it is only a plain index, not
@@ -1615,25 +1944,25 @@ export function deleteOtherIncomeItem(property: Property, id: number): boolean {
  * renumbered starting at the destination day's current `MAX(seq) + 1`,
  * walked in the moved rows' existing seq order (ties broken by `id`, their
  * insertion order) so their relative order survives the merge.
- * `other_income_items` carries no `seq` (or category) — it merges with a
- * plain re-key, no renumbering needed.
+ * `other_income_items`/`deposit_events` carry no `seq` (or category) — both
+ * merge with a plain re-key, no renumbering needed.
  *
  * Runs as a single transaction: if the destination day already holds a
- * booking line sharing a `(property, date, pms_ref)` with a moved row (the
- * partial unique index — nothing writes `pms_ref` from the UI today, but
- * a future importer might), the UPDATE throws, the transaction rolls back,
- * and NOTHING is moved — callers must not partially apply this.
- * `touchSheetDay()` bumps `updated_at`/`updated_by` on BOTH property-days'
- * `sheet_days` row (creating it if the day has no row yet) so the move
- * itself is visible in each day's own audit trail even though its content
- * is untouched.
+ * booking line OR a deposit event sharing a `(property, date, pms_ref, ...)`
+ * with a moved row (the partial unique indexes — nothing writes `pms_ref`
+ * from the UI today, but a future importer might), the UPDATE throws, the
+ * transaction rolls back, and NOTHING is moved — callers must not partially
+ * apply this. `touchSheetDay()` bumps `updated_at`/`updated_by` on BOTH
+ * property-days' `sheet_days` row (creating it if the day has no row yet)
+ * so the move itself is visible in each day's own audit trail even though
+ * its content is untouched.
  */
 export function moveBookingDay(
   from: Property,
   to: Property,
   date: string,
   actor: string,
-): { bookingLines: number; otherIncome: number } {
+): { bookingLines: number; otherIncome: number; depositEvents: number } {
   const tx = db.transaction(() => {
     const destMax = db
       .query<{ n: number }, [string, string]>(
@@ -1664,10 +1993,21 @@ export function moveBookingDay(
       )
       .run(to, actor, from, date);
 
+    const depositEventsInfo = db
+      .prepare(
+        `UPDATE deposit_events SET property = ?, updated_at = datetime('now'), updated_by = ?
+         WHERE property = ? AND date = ?`,
+      )
+      .run(to, actor, from, date);
+
     touchSheetDay(from, date, actor);
     touchSheetDay(to, date, actor);
 
-    return { bookingLines: movingLines.length, otherIncome: otherIncomeInfo.changes };
+    return {
+      bookingLines: movingLines.length,
+      otherIncome: otherIncomeInfo.changes,
+      depositEvents: depositEventsInfo.changes,
+    };
   });
   return tx();
 }

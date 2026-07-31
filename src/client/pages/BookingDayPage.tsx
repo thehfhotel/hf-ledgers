@@ -1,14 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isAccrualDay, visibleTendersForDate } from "../../shared/accrual.ts";
 import { isoToThaiLong, shiftDays } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
 import {
   RECONCILE_TOLERANCE_SATANG,
+  depositCashTotals,
   deriveCashBlock,
   deriveIncomeFromBookings,
 } from "../../shared/bookings.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import {
+  BOOKING_NO_MAX_LEN,
+  DEPOSIT_TENDERS,
+  DEPOSIT_TENDER_LABELS_TH,
   DESCRIPTION_MAX_LEN,
+  GUEST_NAME_MAX_LEN,
+  NOTE_MAX_LEN,
   PROPERTY_LABELS,
   TENDER_TO_CATEGORY_KEY,
   type BookingLine,
@@ -16,13 +23,18 @@ import {
   type CashBlockAmounts,
   type CategoryKey,
   type DaySheet,
+  type DepositEvent,
+  type DepositEventKind,
+  type DepositTender,
   type OtherIncomeItem,
   type Property,
 } from "../../shared/types.ts";
 import {
   createBookingLine,
+  createDepositEvent,
   createOtherIncomeItem,
   deleteBookingLine,
+  deleteDepositEvent,
   deleteOtherIncomeItem,
   getDay,
   listBookingLines,
@@ -30,9 +42,9 @@ import {
   pullFromPms,
   putCashBlock,
   updateBookingLine,
+  updateDepositEvent,
   updateOtherIncomeItem,
   type BookingLineInput,
-  type PmsUnplacedTender,
 } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { AmountInput } from "../components/AmountInput.tsx";
@@ -72,33 +84,10 @@ function AmountInTextHint({ text, className = "" }: { text: string; className?: 
 }
 
 /**
- * One payment whose credit/transfer amount the server auto-placed on a bank
- * column (see db.ts `insertPmsBookingLines`'s AUTO-PLACEMENT POLICY:
- * transfer -> transfer_kbank on every property; credit -> credit_kbank only
- * on hfville, where it is the only credit bank in use). `src/client/api.ts`'s
- * `pullFromPms()` return type does not carry this field yet — this repo's
- * shared-tree edit lock for this change excludes api.ts, so the result is
- * widened locally in `handlePullFromPms` (see `PmsPullResult` below) rather
- * than there. Runtime shape matches `src/shared/api.md`'s documented
- * contract for endpoint 26.
- */
-interface PmsAutoPlacedTender {
-  pmsRef: string;
-  bookingNo: string | null;
-  transferSatang: number;
-  creditSatang: number;
-}
-
-/** Local widening of `pullFromPms()`'s return type to include `autoPlaced` —
- * see `PmsAutoPlacedTender`'s note on why this isn't in api.ts yet. */
-type PmsPullResult = Awaited<ReturnType<typeof pullFromPms>> & {
-  autoPlaced: PmsAutoPlacedTender[];
-};
-
-/**
  * The ดึงข้อมูล button's result alert (docs/pms-prefill-plan.md's "UI"
- * section): inserted/skipped counts, the skipped-refund count when it's
- * non-zero, then two possible listings —
+ * section, extended Wave C docs/adr/0001): inserted/skipped counts, the
+ * skipped-refund count when non-zero, the deposit-event insert/skip counts,
+ * any anomalies flagged, then two possible tender listings —
  * - `autoPlaced`: payments whose credit/transfer amount the server was able
  *   to place on a bank column itself (transfer everywhere, credit only on
  *   hfville) — shown as a verification note, since it is a bank-guess even
@@ -107,16 +96,13 @@ type PmsPullResult = Awaited<ReturnType<typeof pullFromPms>> & {
  *   on genuinely cannot be inferred (hf credit — two credit banks in use
  *   there) — same "key it in by hand" instruction as before.
  */
-function formatPmsPullResult(result: {
-  inserted: number;
-  skipped: number;
-  skippedRefunds: number;
-  unplaced: PmsUnplacedTender[];
-  autoPlaced: PmsAutoPlacedTender[];
-}): string {
+function formatPmsPullResult(result: Awaited<ReturnType<typeof pullFromPms>>): string {
   const lines = [`เพิ่มรายการจาก PMS แล้ว ${result.inserted} รายการ ข้ามไป ${result.skipped} รายการ (มีอยู่แล้ว)`];
   if (result.skippedRefunds > 0) {
     lines.push(`ข้ามรายการคืนเงิน ${result.skippedRefunds} รายการ (ไม่นำเข้ารายการติดลบ)`);
+  }
+  if (result.depositsInserted > 0 || result.depositsSkipped > 0) {
+    lines.push(`มัดจำล่วงหน้า: เพิ่ม ${result.depositsInserted} รายการ ข้ามไป ${result.depositsSkipped} รายการ (มีอยู่แล้ว)`);
   }
   if (result.autoPlaced.length > 0) {
     lines.push("", "รายการที่ลงช่องธนาคารให้อัตโนมัติ — ตรวจสอบธนาคารด้วย:");
@@ -137,6 +123,9 @@ function formatPmsPullResult(result: {
       const label = row.bookingNo ?? row.pmsRef;
       lines.push(`เลขที่ ${label}: ${parts.join(" / ")} — ยังไม่ได้ระบุธนาคาร กรอกในช่องธนาคารเอง`);
     }
+  }
+  if (result.anomalies.length > 0) {
+    lines.push("", `พบรายการผิดปกติ ${result.anomalies.length} รายการ (ไม่ได้นำเข้าเป็นเงิน) — ตรวจสอบใน PMS`);
   }
   return lines.join("\n");
 }
@@ -241,7 +230,7 @@ export function BookingDayPage({ property, date }: Props) {
     if (isDemo || monthClosed || moving) return;
     const confirmed = window.confirm(
       `ย้ายข้อมูลวันที่ ${isoToThaiLong(effectiveDate)} จาก${PROPERTY_LABELS[effectiveProperty].th} ไปยัง${PROPERTY_LABELS[otherProperty].th}\n\n` +
-        "จะย้ายเฉพาะรายการจองและรายการอื่นๆของวันนี้ทั้งหมด — ถ้าฝั่งปลายทางมีรายการอยู่แล้ว จะรวมเข้าด้วยกัน ไม่ทับข้อมูลเดิม\n\n" +
+        "จะย้ายเฉพาะรายการจอง รายการอื่นๆ และรายการมัดจำล่วงหน้าของวันนี้ทั้งหมด — ถ้าฝั่งปลายทางมีรายการอยู่แล้ว จะรวมเข้าด้วยกัน ไม่ทับข้อมูลเดิม\n\n" +
         "สรุปวัน (รายรับ/รายจ่าย/หมายเหตุ) และการปรับยอดเงินสด (**หมายเหตุ) ของทั้งสองฝั่งจะไม่ถูกย้าย ต้องไปแก้ไขเองภายหลังถ้าจำเป็น\n\n" +
         "ดำเนินการย้ายหรือไม่",
     );
@@ -271,12 +260,12 @@ export function BookingDayPage({ property, date }: Props) {
     if (isDemo || !pmsPull || monthClosed || pmsPulling) return;
     setPmsPulling(true);
     try {
-      // Cast widens in the autoPlaced field the server now returns — see
-      // PmsPullResult's note above (api.ts is out of scope for this change).
-      const result = (await pullFromPms(effectiveProperty, effectiveDate)) as PmsPullResult;
-      // New rows land through the same GET pair the page already loads
-      // with — never hand-built from inserted/skipped counts.
-      if (result.inserted > 0) await refetchLinesAndSheet();
+      const result = await pullFromPms(effectiveProperty, effectiveDate);
+      // New rows (booking lines AND deposit events — Wave C) land through
+      // the same GET pair the page already loads with — never hand-built
+      // from inserted/skipped counts. getDay() also returns `deposits`, so
+      // this refresh covers both kinds.
+      if (result.inserted > 0 || result.depositsInserted > 0) await refetchLinesAndSheet();
       window.alert(formatPmsPullResult(result));
     } catch (err) {
       window.alert(`ดึงข้อมูลไม่สำเร็จ: ${err instanceof Error ? err.message : "ลองใหม่อีกครั้ง"}`);
@@ -287,6 +276,14 @@ export function BookingDayPage({ property, date }: Props) {
 
   const sortedLines = useMemo(() => [...(lines ?? [])].sort((a, b) => a.seq - b.seq), [lines]);
   const monthClosed = daySheet?.monthClosed ?? false;
+  // Wave C (docs/adr/0001): the 8 tender columns actually visible for this
+  // date — deposit pre-cutover, deposit_applied on/after (same printed
+  // slot, see shared/accrual.ts).
+  const visibleTenders = useMemo(
+    () => visibleTendersForDate(effectiveProperty, effectiveDate),
+    [effectiveProperty, effectiveDate],
+  );
+  const accrualDay = isAccrualDay(effectiveProperty, effectiveDate);
 
   // ── พิมพ์ / PDF — the booking sheet only (grid + totals), landscape ────
   // Read-only actions: unlike every mutation above, NEVER gated on
@@ -355,7 +352,17 @@ export function BookingDayPage({ property, date }: Props) {
       grossRoomSatang: 0,
       grossOtherSatang: 0,
       discountSatang: 0,
-      tenders: { deposit: 0, cash: 0, credit_kbank: 0, credit_icbc: 0, transfer_kbank: 0, transfer_icbc: 0, web: 0, other: 0 },
+      tenders: {
+        deposit: 0,
+        deposit_applied: 0,
+        cash: 0,
+        credit_kbank: 0,
+        credit_icbc: 0,
+        transfer_kbank: 0,
+        transfer_icbc: 0,
+        web: 0,
+        other: 0,
+      },
       remark: null,
       source: "manual",
       draft: false,
@@ -464,6 +471,7 @@ export function BookingDayPage({ property, date }: Props) {
                 otherIncome,
                 prev.cashBlock.heldBackSatang,
                 prev.cashBlock.broughtForwardSatang,
+                prev.deposits,
               ),
             },
           }
@@ -544,6 +552,7 @@ export function BookingDayPage({ property, date }: Props) {
               otherIncome,
               prev.cashBlock.heldBackSatang,
               prev.cashBlock.broughtForwardSatang,
+              prev.deposits,
             ),
           },
         };
@@ -565,6 +574,148 @@ export function BookingDayPage({ property, date }: Props) {
       await deleteOtherIncomeItem(effectiveProperty, item.id);
     } catch (err) {
       setDaySheet((prev) => (prev ? { ...prev, otherIncome: prevOtherIncome, cashBlock: prevCashBlock } : prev));
+      window.alert(err instanceof Error ? err.message : "ลบรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
+    }
+  }
+
+  // ── มัดจำล่วงหน้า (deposit_events hand entry, Wave C, docs/adr/0001) ────
+  // Received/refunded มัดจำล่วงหน้า moments — a day-scoped itemized list,
+  // same shape/pattern as รายการอื่นๆ above. Disabled (never hidden — same
+  // convention as every other closed-month field) when the month is closed
+  // OR this date is before the property's accrual cutover
+  // (shared/accrual.ts) — a pre-cutover day can never legitimately hold one.
+  const depositEntryDisabled = monthClosed || !accrualDay;
+
+  /** Recomputes cashBlock.derived AND the always-derived depositCashIn/Out
+   * display figures from a fresh `deposits` list — the client-side mirror
+   * of server.ts's buildCashBlock(), so the optimistic UI never shows a
+   * stale ยอดฝากจริง after a deposit is added/edited/removed. `update`
+   * receives the CURRENT `prev.deposits` (never a possibly-stale closure
+   * value), so this is safe to call from both the optimistic write and the
+   * post-await success write. */
+  function applyDepositsUpdater(update: (deposits: DepositEvent[]) => DepositEvent[]) {
+    setDaySheet((prev) => {
+      if (!prev) return prev;
+      const deposits = update(prev.deposits);
+      const derived = deriveCashBlock(
+        prev.categories,
+        prev.income,
+        prev.otherIncome,
+        prev.cashBlock.heldBackSatang,
+        prev.cashBlock.broughtForwardSatang,
+        deposits,
+      );
+      const { depositCashInSatang, depositCashOutSatang } = depositCashTotals(deposits);
+      return { ...prev, deposits, cashBlock: { ...prev.cashBlock, derived, depositCashInSatang, depositCashOutSatang } };
+    });
+  }
+
+  const [newDepositKind, setNewDepositKind] = useState<DepositEventKind>("received");
+  const [newDepositBookingNo, setNewDepositBookingNo] = useState("");
+  const [newDepositGuestName, setNewDepositGuestName] = useState("");
+  const [newDepositTender, setNewDepositTender] = useState<DepositTender>("cash");
+  const [newDepositAmountText, setNewDepositAmountText] = useState("");
+  const [newDepositNote, setNewDepositNote] = useState("");
+  const [addingDeposit, setAddingDeposit] = useState(false);
+  const [newDepositError, setNewDepositError] = useState<string | null>(null);
+
+  async function submitNewDeposit() {
+    if (!daySheet || depositEntryDisabled) return;
+    setNewDepositError(null);
+    const amountSatang = parseAmountToSatang(newDepositAmountText);
+    if (amountSatang === null || amountSatang <= 0) {
+      setNewDepositError("กรอกจำนวนเงินให้ถูกต้อง (มากกว่า 0)");
+      return;
+    }
+    const bookingNo = newDepositBookingNo.trim() === "" ? null : newDepositBookingNo.trim().slice(0, BOOKING_NO_MAX_LEN);
+    const guestName =
+      newDepositGuestName.trim() === "" ? null : newDepositGuestName.trim().slice(0, GUEST_NAME_MAX_LEN);
+    const note = newDepositNote.trim() === "" ? null : newDepositNote.trim().slice(0, NOTE_MAX_LEN);
+    const resetForm = () => {
+      setNewDepositBookingNo("");
+      setNewDepositGuestName("");
+      setNewDepositAmountText("");
+      setNewDepositNote("");
+    };
+    if (isDemo) {
+      applyDepositsUpdater((deposits) => [
+        ...deposits,
+        {
+          id: -Date.now(),
+          property: effectiveProperty,
+          date: effectiveDate,
+          kind: newDepositKind,
+          bookingNo,
+          guestName,
+          tender: newDepositTender,
+          amountSatang,
+          note,
+          source: "manual",
+          pmsRef: null,
+          createdAt: "",
+          createdBy: "",
+          updatedAt: "",
+          updatedBy: "",
+        },
+      ]);
+      resetForm();
+      return;
+    }
+    setAddingDeposit(true);
+    try {
+      const created = await createDepositEvent(effectiveProperty, effectiveDate, {
+        kind: newDepositKind,
+        bookingNo,
+        guestName,
+        tender: newDepositTender,
+        amountSatang,
+        note,
+      });
+      applyDepositsUpdater((deposits) => [...deposits, created]);
+      resetForm();
+    } catch (err) {
+      setNewDepositError(err instanceof Error ? err.message : "เพิ่มรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
+    } finally {
+      setAddingDeposit(false);
+    }
+  }
+
+  async function commitDepositField(
+    event: DepositEvent,
+    patch: Partial<{
+      kind: DepositEventKind;
+      bookingNo: string | null;
+      guestName: string | null;
+      tender: DepositTender;
+      amountSatang: number;
+      note: string | null;
+    }>,
+  ) {
+    if (!daySheet) return;
+    const prevDeposits = daySheet.deposits;
+    const prevCashBlock = daySheet.cashBlock;
+    applyDepositsUpdater((deposits) => deposits.map((d) => (d.id === event.id ? { ...d, ...patch } : d)));
+    if (isDemo) return;
+    try {
+      const updated = await updateDepositEvent(effectiveProperty, event.id, patch);
+      applyDepositsUpdater((deposits) => deposits.map((d) => (d.id === updated.id ? updated : d)));
+    } catch (err) {
+      setDaySheet((prev) => (prev ? { ...prev, deposits: prevDeposits, cashBlock: prevCashBlock } : prev));
+      window.alert(err instanceof Error ? err.message : "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง");
+    }
+  }
+
+  async function removeDeposit(event: DepositEvent) {
+    if (!daySheet) return;
+    if (!window.confirm("ลบรายการมัดจำนี้ใช่หรือไม่")) return;
+    const prevDeposits = daySheet.deposits;
+    const prevCashBlock = daySheet.cashBlock;
+    applyDepositsUpdater((deposits) => deposits.filter((d) => d.id !== event.id));
+    if (isDemo) return;
+    try {
+      await deleteDepositEvent(effectiveProperty, event.id);
+    } catch (err) {
+      setDaySheet((prev) => (prev ? { ...prev, deposits: prevDeposits, cashBlock: prevCashBlock } : prev));
       window.alert(err instanceof Error ? err.message : "ลบรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
     }
   }
@@ -807,10 +958,226 @@ export function BookingDayPage({ property, date }: Props) {
         <BookingGrid
           lines={sortedLines}
           disabled={monthClosed}
+          visibleTenders={visibleTenders}
           onPatch={commitLinePatch}
           onCreate={addBookingLine}
           onDelete={removeLine}
         />
+      </section>
+
+      {/* Panel มัดจำล่วงหน้า (deposit_events hand entry, Wave C,
+          docs/adr/0001) — received/refunded มัดจำล่วงหน้า moments, a
+          day-scoped itemized list mirroring รายการอื่นๆ below. Disabled
+          (never hidden) on a closed month OR before this property's
+          accrual cutover — see depositEntryDisabled above. */}
+      <section className="overflow-hidden rounded-lg border border-line bg-panel">
+        <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">
+          มัดจำล่วงหน้า (ไม่ใช่รายรับ)
+        </h2>
+        {!accrualDay && (
+          <p className="border-b border-line bg-gold-50 px-4 py-2 text-xs text-warn">
+            วันนี้อยู่ก่อนวันเริ่มใช้เกณฑ์บัญชีคงค้าง — ยังบันทึกมัดจำล่วงหน้าสำหรับวันนี้ไม่ได้
+          </p>
+        )}
+        {daySheet.deposits.length === 0 ? (
+          <p className="px-4 py-3 text-sm text-ink-muted">ยังไม่มีรายการมัดจำล่วงหน้าวันนี้</p>
+        ) : (
+          <div className="divide-y divide-line">
+            {daySheet.deposits.map((event) => (
+              <div key={event.id} className="flex flex-col gap-1 px-4 py-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex shrink-0 overflow-hidden rounded-md border border-line-strong text-xs font-medium">
+                    <button
+                      type="button"
+                      disabled={depositEntryDisabled}
+                      onClick={() => commitDepositField(event, { kind: "received" })}
+                      className={
+                        "px-2 py-1.5 transition disabled:opacity-50 " +
+                        (event.kind === "received" ? "bg-brand-500 text-white" : "bg-panel text-ink-muted hover:bg-tint")
+                      }
+                    >
+                      รับ
+                    </button>
+                    <button
+                      type="button"
+                      disabled={depositEntryDisabled}
+                      onClick={() => commitDepositField(event, { kind: "refunded" })}
+                      className={
+                        "border-l border-line-strong px-2 py-1.5 transition disabled:opacity-50 " +
+                        (event.kind === "refunded" ? "bg-brand-500 text-white" : "bg-panel text-ink-muted hover:bg-tint")
+                      }
+                    >
+                      คืน
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    defaultValue={event.bookingNo ?? ""}
+                    key={`bn-${event.id}-${event.bookingNo ?? ""}`}
+                    placeholder="เลขที่ (R...)"
+                    aria-label="เลขที่การจอง"
+                    disabled={depositEntryDisabled}
+                    maxLength={BOOKING_NO_MAX_LEN}
+                    onBlur={(e) => {
+                      const trimmed = e.target.value.trim();
+                      const bookingNo = trimmed === "" ? null : trimmed.slice(0, BOOKING_NO_MAX_LEN);
+                      if (bookingNo !== event.bookingNo) commitDepositField(event, { bookingNo });
+                    }}
+                    className="w-28 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+                  />
+                  <input
+                    type="text"
+                    defaultValue={event.guestName ?? ""}
+                    key={`gn-${event.id}-${event.guestName ?? ""}`}
+                    placeholder="ชื่อลูกค้า"
+                    aria-label="ชื่อลูกค้า"
+                    disabled={depositEntryDisabled}
+                    maxLength={GUEST_NAME_MAX_LEN}
+                    onBlur={(e) => {
+                      const trimmed = e.target.value.trim();
+                      const guestName = trimmed === "" ? null : trimmed.slice(0, GUEST_NAME_MAX_LEN);
+                      if (guestName !== event.guestName) commitDepositField(event, { guestName });
+                    }}
+                    className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+                  />
+                  <select
+                    value={event.tender}
+                    disabled={depositEntryDisabled}
+                    aria-label="ช่องทางมัดจำ"
+                    onChange={(e) => commitDepositField(event, { tender: e.target.value as DepositTender })}
+                    className="rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+                  >
+                    {DEPOSIT_TENDERS.map((tender) => (
+                      <option key={tender} value={tender}>
+                        {DEPOSIT_TENDER_LABELS_TH[tender]}
+                      </option>
+                    ))}
+                  </select>
+                  <AmountInput
+                    value={event.amountSatang}
+                    disabled={depositEntryDisabled}
+                    onCommit={(satang) => {
+                      if (satang === null || satang <= 0) throw new Error("จำนวนเงินต้องมากกว่า 0");
+                      return commitDepositField(event, { amountSatang: satang });
+                    }}
+                    ariaLabel={`จำนวนเงินมัดจำ ${event.guestName ?? ""}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeDeposit(event)}
+                    disabled={depositEntryDisabled}
+                    className="rounded-md border border-bad/40 px-2.5 py-1.5 text-xs font-medium text-bad hover:bg-bad/10 disabled:opacity-50"
+                  >
+                    ลบ
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  defaultValue={event.note ?? ""}
+                  key={`note-${event.id}-${event.note ?? ""}`}
+                  placeholder="หมายเหตุ"
+                  aria-label="หมายเหตุมัดจำ"
+                  disabled={depositEntryDisabled}
+                  maxLength={NOTE_MAX_LEN}
+                  onBlur={(e) => {
+                    const trimmed = e.target.value.trim();
+                    const note = trimmed === "" ? null : trimmed.slice(0, NOTE_MAX_LEN);
+                    if (note !== event.note) commitDepositField(event, { note });
+                  }}
+                  className="w-full rounded-md border border-line-strong bg-panel px-2 py-1 text-xs text-ink-muted focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+                />
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-line bg-tint px-4 py-3">
+          <div className="flex shrink-0 overflow-hidden rounded-md border border-line-strong text-xs font-medium">
+            <button
+              type="button"
+              disabled={depositEntryDisabled}
+              onClick={() => setNewDepositKind("received")}
+              className={
+                "px-2 py-1.5 disabled:opacity-50 " +
+                (newDepositKind === "received" ? "bg-brand-500 text-white" : "bg-panel text-ink-muted hover:bg-tint")
+              }
+            >
+              รับ
+            </button>
+            <button
+              type="button"
+              disabled={depositEntryDisabled}
+              onClick={() => setNewDepositKind("refunded")}
+              className={
+                "border-l border-line-strong px-2 py-1.5 disabled:opacity-50 " +
+                (newDepositKind === "refunded" ? "bg-brand-500 text-white" : "bg-panel text-ink-muted hover:bg-tint")
+              }
+            >
+              คืน
+            </button>
+          </div>
+          <input
+            type="text"
+            value={newDepositBookingNo}
+            onChange={(e) => setNewDepositBookingNo(e.target.value)}
+            placeholder="เลขที่ (R...)"
+            aria-label="เลขที่การจองมัดจำใหม่"
+            disabled={depositEntryDisabled}
+            maxLength={BOOKING_NO_MAX_LEN}
+            className="w-28 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+          />
+          <input
+            type="text"
+            value={newDepositGuestName}
+            onChange={(e) => setNewDepositGuestName(e.target.value)}
+            placeholder="ชื่อลูกค้า"
+            aria-label="ชื่อลูกค้ามัดจำใหม่"
+            disabled={depositEntryDisabled}
+            maxLength={GUEST_NAME_MAX_LEN}
+            className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+          />
+          <select
+            value={newDepositTender}
+            onChange={(e) => setNewDepositTender(e.target.value as DepositTender)}
+            disabled={depositEntryDisabled}
+            aria-label="ช่องทางมัดจำใหม่"
+            className="rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+          >
+            {DEPOSIT_TENDERS.map((tender) => (
+              <option key={tender} value={tender}>
+                {DEPOSIT_TENDER_LABELS_TH[tender]}
+              </option>
+            ))}
+          </select>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={newDepositAmountText}
+            onChange={(e) => setNewDepositAmountText(e.target.value)}
+            placeholder="0.00"
+            aria-label="จำนวนเงินมัดจำใหม่"
+            disabled={depositEntryDisabled}
+            className="w-28 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-right tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+          />
+          <input
+            type="text"
+            value={newDepositNote}
+            onChange={(e) => setNewDepositNote(e.target.value)}
+            placeholder="หมายเหตุ"
+            aria-label="หมายเหตุมัดจำใหม่"
+            disabled={depositEntryDisabled}
+            className="min-w-[8rem] flex-1 rounded-md border border-line-strong bg-panel px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint"
+          />
+          <button
+            type="button"
+            onClick={submitNewDeposit}
+            disabled={addingDeposit || depositEntryDisabled}
+            className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
+          >
+            เพิ่มรายการ
+          </button>
+          {newDepositError && <p className="w-full text-xs text-bad">{newDepositError}</p>}
+        </div>
       </section>
 
       {/* Three desktop panels: itemized รายการอื่นๆ, the cash block, the
@@ -974,6 +1341,35 @@ export function BookingDayPage({ property, date }: Props) {
           </div>
           <div className="flex flex-col gap-2">
             {cashOverrideComponentFields.map(({ key, label }) => renderCashOverrideRow(key, label))}
+
+            {/* Deposit cash in/out (Wave C, docs/adr/0001, judgment-call (b)
+                fix — Opus money-review, 2026-07-31): display-only, no new
+                arithmetic — CashBlock.depositCashInSatang/depositCashOutSatang
+                already fold into bankedSatang below (deriveCashBlock(),
+                shared/bookings.ts); this just makes that folding VISIBLE on
+                screen, mirroring reportSheetBlocks.tsx's printed
+                depositCashRows exactly (same labels, same sign). Rendered
+                only when nonzero — silent on an ordinary no-deposit day. */}
+            {(daySheet.cashBlock.depositCashInSatang > 0 || daySheet.cashBlock.depositCashOutSatang > 0) && (
+              <div className="flex flex-col gap-1 border-t border-line-strong pt-2">
+                {daySheet.cashBlock.depositCashInSatang > 0 && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-ink">มัดจำรับเป็นเงินสด</span>
+                    <span className="text-sm tabular-nums whitespace-nowrap text-ink">
+                      + {formatSatang(daySheet.cashBlock.depositCashInSatang)}
+                    </span>
+                  </div>
+                )}
+                {daySheet.cashBlock.depositCashOutSatang > 0 && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-ink">คืนมัดจำเป็นเงินสด</span>
+                    <span className="text-sm tabular-nums whitespace-nowrap text-ink">
+                      − {formatSatang(daySheet.cashBlock.depositCashOutSatang)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Deposit-machine reconciliation ("adjusting") rows —
                 docs/plan-unify-exports-tender-split.md item 6, Wave C,

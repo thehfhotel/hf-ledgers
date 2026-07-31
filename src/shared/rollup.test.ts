@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { computeIncomeLedgerRollup } from "./rollup.ts";
-import type { Category, ExpenseItem, IncomeCell } from "./types.ts";
+import type { Category, DepositEvent, ExpenseItem, IncomeCell } from "./types.ts";
 
 const PROPERTY = "hf";
 const DATE = "2026-06-15";
@@ -146,5 +146,79 @@ describe("computeIncomeLedgerRollup", () => {
     const rollup = computeIncomeLedgerRollup("hfville", DATE, [], {}, [], false, "app");
     expect(rollup.property).toBe("hfville");
     expect(rollup.date).toBe(DATE);
+  });
+
+  // Wave C (docs/adr/0001): deposit_applied foots INSIDE amounts like any
+  // ordinary key; received/refunded ride OUTSIDE amounts entirely — never
+  // weaken the footing rule with an excluded key.
+  describe("Wave C: deposit_applied inside amounts, received/refunded outside (docs/adr/0001)", () => {
+    function depositEvent(overrides: Partial<DepositEvent> = {}): DepositEvent {
+      return {
+        id: 1,
+        property: PROPERTY,
+        date: DATE,
+        kind: "received",
+        bookingNo: "R014843",
+        guestName: null,
+        tender: "cash",
+        amountSatang: 1_000,
+        note: null,
+        source: "manual",
+        pmsRef: null,
+        createdAt: "2026-06-15T10:00:00Z",
+        createdBy: "tester@thehfhotel.org",
+        updatedAt: "2026-06-15T10:00:00Z",
+        updatedBy: "tester@thehfhotel.org",
+        ...overrides,
+      };
+    }
+
+    test("deposit_applied sums into amounts and foots into totalSatang like any other key", () => {
+      const categories = [category(1, "deposit_applied"), category(2, "room_cash")];
+      const income: Record<number, IncomeCell> = {
+        1: incomeCell(1, 79_000),
+        2: incomeCell(2, 10_000),
+      };
+      const rollup = computeIncomeLedgerRollup(PROPERTY, DATE, categories, income, [], false, "app");
+      expect(rollup.amounts).toEqual({ deposit_applied: 79_000, room_cash: 10_000 });
+      expect(rollup.totalSatang).toBe(89_000);
+    });
+
+    test("no deposit events -> depositReceivedSatang/depositRefundedSatang are both omitted, never an explicit 0", () => {
+      const rollup = computeIncomeLedgerRollup(PROPERTY, DATE, [], {}, [], false, "app", []);
+      expect(rollup.depositReceivedSatang).toBeUndefined();
+      expect(rollup.depositRefundedSatang).toBeUndefined();
+    });
+
+    test("received deposits sum into depositReceivedSatang, OUTSIDE amounts and totalSatang", () => {
+      const rollup = computeIncomeLedgerRollup(PROPERTY, DATE, [], {}, [], false, "app", [
+        depositEvent({ id: 1, kind: "received", amountSatang: 89_000 }),
+        depositEvent({ id: 2, kind: "received", amountSatang: 10_000 }),
+      ]);
+      expect(rollup.depositReceivedSatang).toBe(99_000);
+      expect(rollup.depositRefundedSatang).toBeUndefined();
+      expect(rollup.amounts).toEqual({});
+      expect(rollup.totalSatang).toBe(0);
+    });
+
+    test("refunded deposits sum into depositRefundedSatang, OUTSIDE amounts and totalSatang", () => {
+      const rollup = computeIncomeLedgerRollup(PROPERTY, DATE, [], {}, [], false, "app", [
+        depositEvent({ kind: "refunded", amountSatang: 30_000 }),
+      ]);
+      expect(rollup.depositRefundedSatang).toBe(30_000);
+      expect(rollup.depositReceivedSatang).toBeUndefined();
+      expect(rollup.totalSatang).toBe(0);
+    });
+
+    test("applied (inside) and received/refunded (outside) coexist without conflating footing", () => {
+      const categories = [category(1, "deposit_applied")];
+      const income: Record<number, IncomeCell> = { 1: incomeCell(1, 79_000) };
+      const rollup = computeIncomeLedgerRollup(PROPERTY, DATE, categories, income, [], false, "app", [
+        depositEvent({ kind: "received", amountSatang: 89_000 }),
+      ]);
+      expect(rollup.amounts).toEqual({ deposit_applied: 79_000 });
+      expect(rollup.totalSatang).toBe(79_000); // received deposit never inflates this
+      expect(rollup.depositReceivedSatang).toBe(89_000);
+    });
   });
 });

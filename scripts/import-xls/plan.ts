@@ -239,6 +239,9 @@ export const VARIANCE_CATEGORY_KEYS: readonly CategoryKey[] = Object.values(TEND
 export function toAppTenders(t: BookingTenders): Record<Tender, number> {
   return {
     deposit: t.depositSatang,
+    // Wave C (docs/adr/0001): the accrual-era tender didn't exist when any
+    // of this importer's historical Excel data was recorded — always 0.
+    deposit_applied: 0,
     cash: t.cashSatang,
     credit_kbank: t.creditKbankSatang,
     credit_icbc: t.creditIcbcSatang,

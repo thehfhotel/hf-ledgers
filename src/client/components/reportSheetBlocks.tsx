@@ -1,7 +1,10 @@
 import { Fragment } from "react";
+import { isAccrualDay } from "../../shared/accrual.ts";
 import { isoToBuddhist, isoToThaiLong } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
 import {
+  DEPOSIT_TENDER_LABELS_TH,
+  DEPOSIT_TENDERS,
   PROPERTY_LABELS,
   type DayProvenance,
   type DaySheet,
@@ -199,6 +202,10 @@ const WEEK_CHART_PLOT_HEIGHT_PX = 130;
 const WEEK_CHART_BAR_MAX_PX = 64;
 
 export interface DayTenderSummaryProps {
+  /** Wave C (docs/adr/0001): decides the era footnote under รวมรายรับทั้งวัน
+   * and, together with `date`, whether this is a pre/post-cutover day (see
+   * shared/accrual.ts's isAccrualDay). */
+  property: Property;
   /** The day this summary describes — drives the weekly chart's "printed
    * date" bar highlighting/override, not otherwise displayed here (the
    * title carries the date). */
@@ -207,12 +214,16 @@ export interface DayTenderSummaryProps {
   /** The Monday-start calendar week containing `date`, zero-filled to
    * exactly 7 entries (see DaySheetPage.tsx / printWeekChart.ts). Absent
    * (undefined) while loading or after a fetch failure — the chart section
-   * simply doesn't render rather than breaking the rest of the summary. */
+   * simply doesn't render rather than breaking the rest of the summary.
+   * ALSO suppressed outright on any day carrying deposit events (Wave C,
+   * owner decision, 2026-07-31) — see `hasDepositEvents` below, which
+   * yields the chart's slot to the deposit-receipts box instead. */
   weekDays?: WeekDayIncome[];
 }
 
-export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProps) {
-  const { totals, cashBlock, otherIncome, note } = sheet;
+export function DayTenderSummary({ property, date, sheet, weekDays }: DayTenderSummaryProps) {
+  const { totals, cashBlock, otherIncome, deposits, note } = sheet;
+  const accrualDay = isAccrualDay(property, date);
   const grouped = groupDayIncomeForPrint(sheet);
   // A REAL cross-check, not a re-derivation the print trusts blindly: the
   // grouping's own independently-summed grandTotalSatang against the
@@ -266,6 +277,48 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
     label: field.label,
     amountSatang: cashBlock[field.key] ?? 0,
     sign: field.key === "heldBackSatang" ? ("-" as const) : ("+" as const),
+  })).filter((row) => row.amountSatang > 0);
+
+  // Deposit cash in/out (Wave C, docs/adr/0001) — MANDATORY whenever
+  // nonzero, same "print only what's actually nonzero, but never omit it
+  // when it is" rule as cashAdjustmentRows above: a cash มัดจำล่วงหน้า
+  // received today already reaches cashBlock.derived.bankedSatang (see
+  // deriveCashBlock() in shared/bookings.ts), so without this row printed
+  // ยอดฝากจริง stops adding up on paper against the category rows shown
+  // above it. Signed the same top-to-bottom-reads-into-the-total way.
+  const depositCashRows = [
+    { key: "in" as const, label: "มัดจำรับเป็นเงินสด", amountSatang: cashBlock.depositCashInSatang, sign: "+" as const },
+    { key: "out" as const, label: "คืนมัดจำเป็นเงินสด", amountSatang: cashBlock.depositCashOutSatang, sign: "-" as const },
+  ].filter((row) => row.amountSatang > 0);
+
+  // Deposit-receipts box (Wave C, docs/adr/0001, owner decision
+  // 2026-07-31): มัดจำล่วงหน้า RECEIVED today — money in, but explicitly NOT
+  // รายรับ under accrual, so it gets its own clearly-captioned box rather
+  // than folding into any income figure. `hasDepositEvents` covers BOTH
+  // received and refunded rows (any deposit activity at all this day) —
+  // that is what yields the weekly chart's slot below, even on the rare
+  // day that carries only a refund and zero receipts to list.
+  const hasDepositEvents = deposits.length > 0;
+  const DEPOSIT_RECEIPT_ROW_CAP = 3;
+  const receivedDeposits = deposits.filter((d) => d.kind === "received");
+  const shownReceivedDeposits = receivedDeposits.slice(0, DEPOSIT_RECEIPT_ROW_CAP);
+  const hiddenReceivedDepositsCount = receivedDeposits.length - shownReceivedDeposits.length;
+  // Total row (print polish, Opus money-review, 2026-07-31): always shown
+  // alongside the (possibly capped) row list, so a >3-receipt day's true
+  // total is derivable from paper even though only 3 rows print.
+  const receivedTotalSatang = receivedDeposits.reduce((sum, event) => sum + event.amountSatang, 0);
+
+  // Refund visibility (print polish, Opus money-review, 2026-07-31): a
+  // คืนเงินจองห้อง (refunded มัดจำล่วงหน้า) used to be entirely absent from
+  // the printed sheet — summarized one line per tender actually used
+  // (never per-event) so the box stays compact even on a day with several
+  // refunds. DEPOSIT_TENDERS' own order keeps this deterministic.
+  const refundedDeposits = deposits.filter((d) => d.kind === "refunded");
+  const refundedByTender = DEPOSIT_TENDERS.map((tender) => ({
+    tender,
+    amountSatang: refundedDeposits
+      .filter((event) => event.tender === tender)
+      .reduce((sum, event) => sum + event.amountSatang, 0),
   })).filter((row) => row.amountSatang > 0);
 
   // The chart bar for `date` always reflects the LIVE sheet totals, never
@@ -421,6 +474,20 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
                   </td>
                 </tr>
               )}
+              {/* Era footnote (Wave C, docs/adr/0001): the one-line
+                  discontinuity note for whoever reconciles this sheet
+                  against the bank figure below — printed ONLY on/after this
+                  property's accrual cutover (shared/accrual.ts), since a
+                  pre-cutover day's รวมรายรับทั้งวัน still means the old
+                  "money received today" thing this footnote would
+                  mischaracterize. */}
+              {accrualDay && (
+                <tr>
+                  <td colSpan={2} className={ROW_LABEL + " pb-1 text-[11px] leading-snug text-ink-muted"}>
+                    รวมรายรับทั้งวัน = รายได้ที่เกิดขึ้นจริงในวันนี้ (ไม่รวมมัดจำที่รับล่วงหน้า)
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
           <p className="px-3 pt-1 pb-2 text-[11px] leading-snug text-ink-muted">
@@ -449,6 +516,23 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
                     </span>
                     <span className="text-sm tabular-nums whitespace-nowrap text-ink">
                       {formatSatang(row.entered)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Deposit cash in/out (Wave C) — MANDATORY whenever nonzero
+                (see depositCashRows' doc comment above): a cash มัดจำล่วงหน้า
+                received/refunded today already moved ยอดฝากจริง below, so
+                without this row printed the arithmetic against the category
+                rows in the left column stops closing on paper. */}
+            {depositCashRows.length > 0 && (
+              <div className="mb-1 flex flex-col gap-0.5 border-b border-line pb-1">
+                {depositCashRows.map((row) => (
+                  <div key={row.key} className="flex items-baseline justify-between gap-3">
+                    <span className="text-sm text-ink">{row.label}</span>
+                    <span className="text-sm tabular-nums whitespace-nowrap text-ink">
+                      {row.sign} {formatSatang(row.amountSatang)}
                     </span>
                   </div>
                 ))}
@@ -492,12 +576,86 @@ export function DayTenderSummary({ date, sheet, weekDays }: DayTenderSummaryProp
           </div>
         </div>
 
+        {/* Deposit-receipts box (Wave C, docs/adr/0001, owner decision
+            2026-07-31): มัดจำล่วงหน้า received today — money in, explicitly
+            NOT รายรับ, captioned as such so nobody mistakes it for revenue.
+            Takes the weekly chart's slot below (never both on the same
+            sheet, and no deposit chart of any kind — see hasDepositEvents'
+            doc comment above). Print polish (Opus money-review,
+            2026-07-31): also renders whenever there's a REFUND to show,
+            even on a day with zero receipts — a refund-only day must not
+            print silent. */}
+        {(shownReceivedDeposits.length > 0 || refundedByTender.length > 0) && (
+          <div className={BOX}>
+            <h2 className={BOX_HEAD}>มัดจำล่วงหน้าที่รับวันนี้ (ไม่ใช่รายรับ)</h2>
+            {shownReceivedDeposits.length > 0 && (
+              <table className="w-full border-separate border-spacing-0">
+                <tbody>
+                  {shownReceivedDeposits.map((event) => (
+                    <tr key={event.id} className="align-baseline">
+                      <td className={ROW_LABEL + " border-b border-line"}>
+                        {[event.bookingNo, event.guestName].filter(Boolean).join(" · ") || "-"}
+                      </td>
+                      <td className="border-b border-line px-2 py-0.5 text-xs text-ink-muted whitespace-nowrap">
+                        {DEPOSIT_TENDER_LABELS_TH[event.tender]}
+                      </td>
+                      <td className={ROW_AMOUNT + " border-b border-line"}>{formatSatang(event.amountSatang)}</td>
+                    </tr>
+                  ))}
+                  {/* Total row (print polish): always printed alongside the
+                      list, so a >3-receipt day's true total is still
+                      derivable from paper even though only 3 rows show. */}
+                  <tr className="bg-tint">
+                    <td colSpan={2} className={ROW_LABEL + " border-t border-line font-semibold"}>
+                      รวมมัดจำที่รับวันนี้
+                    </td>
+                    <td className={ROW_AMOUNT + " border-t border-line font-semibold"}>
+                      {formatSatang(receivedTotalSatang)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+            {hiddenReceivedDepositsCount > 0 && (
+              <p className="px-3 py-1 text-xs text-ink-muted">อีก {hiddenReceivedDepositsCount} รายการ</p>
+            )}
+            {/* คืนมัดจำ (print polish, Opus money-review, 2026-07-31): one
+                summarized row per tender actually refunded today — never
+                per-event, so the box stays compact. */}
+            {refundedByTender.length > 0 && (
+              <table className="w-full border-separate border-spacing-0">
+                <tbody>
+                  {refundedByTender.map((row) => (
+                    <tr key={row.tender} className="align-baseline">
+                      <td className={ROW_LABEL + (shownReceivedDeposits.length > 0 ? " border-t border-line" : "")}>
+                        คืนมัดจำ ({DEPOSIT_TENDER_LABELS_TH[row.tender]})
+                      </td>
+                      <td
+                        className={
+                          ROW_AMOUNT + (shownReceivedDeposits.length > 0 ? " border-t border-line" : "") + " text-bad"
+                        }
+                      >
+                        − {formatSatang(row.amountSatang)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p className="border-t border-line px-3 py-1.5 text-[11px] leading-snug text-ink-muted">
+              เงินรับล่วงหน้า ยังไม่ถือเป็นรายได้ — จะบันทึกเป็นรายได้ในวันที่เข้าพัก
+            </p>
+          </div>
+        )}
+
         {/* Weekly income bar chart — decorative trend context, deliberately
             placed after the cash/**หมายเหตุ box (which carries the actual
             banking figure the office needs). Absent entirely when weekDays
             hasn't loaded yet or failed to load (DaySheetPage.tsx never
-            throws on that failure). */}
-        {printedWeekDays && printedWeekDays.length === 7 && (
+            throws on that failure), AND on any day carrying deposit events
+            (Wave C, owner decision 2026-07-31) — that slot goes to the
+            deposit-receipts box above instead, never both. */}
+        {!hasDepositEvents && printedWeekDays && printedWeekDays.length === 7 && (
           <div className={BOX}>
             <h2 className={BOX_HEAD}>
               {WEEK_CHART_TITLE_TH}{" "}

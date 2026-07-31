@@ -21,7 +21,7 @@
 // totals) rather than any new summation — see totals.ts.
 
 import { computeDayTotals } from "./totals.ts";
-import type { Category, CategoryKey, DayProvenance, ExpenseItem, IncomeCell, Property } from "./types.ts";
+import type { Category, CategoryKey, DayProvenance, DepositEvent, ExpenseItem, IncomeCell, Property } from "./types.ts";
 
 /**
  * The exact JSON body POSTed to hf-analytics' POST /api/ingest/income-ledger
@@ -32,17 +32,34 @@ import type { Category, CategoryKey, DayProvenance, ExpenseItem, IncomeCell, Pro
 export interface IncomeLedgerRollup {
   property: Property;
   date: string;
-  /** Keyed by the fourteen CategoryKey values. A key with a zero amount is
-   * omitted entirely — the wire contract never sends an explicit 0. */
+  /** Keyed by the fifteen CategoryKey values (Wave C, docs/adr/0001, added
+   * deposit_applied). A key with a zero amount is omitted entirely — the
+   * wire contract never sends an explicit 0. */
   amounts: Partial<Record<CategoryKey, number>>;
   /** Satang landed on a manager-created category (category_key IS NULL
-   * upstream) — these don't map to any of the fourteen CategoryKeys. */
+   * upstream) — these don't map to any of the fifteen CategoryKeys. */
   uncategorizedSatang: number;
   /** Always sum(amounts) + uncategorizedSatang. */
   totalSatang: number;
   expenseSatang: number;
   verified: boolean;
   provenance: DayProvenance;
+  /**
+   * Wave C (docs/adr/0001-accrual-recognition-for-deposits.md): this day's
+   * total มัดจำล่วงหน้า received/refunded, across every DepositTender (not
+   * cash-only — see `CashBlock.depositCashInSatang`/`depositCashOutSatang`,
+   * shared/types.ts, for the cash-only figure that feeds the bank line).
+   * Ride OUTSIDE `amounts` deliberately: under accrual this money is
+   * received-but-not-earned / refunded-but-never-earned, so folding it into
+   * the footing sum would silently overstate revenue — NEVER weaken the
+   * footing rule by excluding a key from `amounts` instead of using this
+   * separate top-level pair. Applied deposits are the opposite case: they
+   * ARE revenue, and ride INSIDE `amounts` as the ordinary `deposit_applied`
+   * key, footing normally. Omitted (not present, never an explicit 0) when
+   * the respective total is zero — same convention as `amounts`.
+   */
+  depositReceivedSatang?: number;
+  depositRefundedSatang?: number;
 }
 
 /**
@@ -59,7 +76,14 @@ export interface IncomeLedgerRollup {
  * every value server.ts ever produces — saveIncomeCell() only ever writes
  * a category with kind "income"), so `totalSatang` always equals
  * sum(amounts) + uncategorizedSatang, matching the wire contract's stated
- * invariant.
+ * invariant. `deposit_applied` cells (Wave C) flow through this same loop
+ * like any other keyed category — no special casing needed, since applied
+ * deposits foot normally inside `amounts`.
+ *
+ * `depositEvents` (Wave C, defaulted to `[]` so every pre-existing call
+ * site is unaffected) is this day's received/refunded มัดจำล่วงหน้า rows —
+ * summed into the OUTSIDE-of-amounts `depositReceivedSatang`/
+ * `depositRefundedSatang` pair (see `IncomeLedgerRollup`'s doc comment).
  */
 export function computeIncomeLedgerRollup(
   property: Property,
@@ -69,6 +93,7 @@ export function computeIncomeLedgerRollup(
   expenses: ExpenseItem[],
   verified: boolean,
   provenance: DayProvenance,
+  depositEvents: DepositEvent[] = [],
 ): IncomeLedgerRollup {
   const categoryKeyByCategoryId = new Map(categories.map((c) => [c.id, c.categoryKey]));
 
@@ -88,6 +113,13 @@ export function computeIncomeLedgerRollup(
   // independently (see totals.ts).
   const totals = computeDayTotals(categories, income, expenses);
 
+  let depositReceivedSatang = 0;
+  let depositRefundedSatang = 0;
+  for (const event of depositEvents) {
+    if (event.kind === "received") depositReceivedSatang += event.amountSatang;
+    else depositRefundedSatang += event.amountSatang;
+  }
+
   return {
     property,
     date,
@@ -97,5 +129,7 @@ export function computeIncomeLedgerRollup(
     expenseSatang: totals.expenseSatang,
     verified,
     provenance,
+    ...(depositReceivedSatang > 0 ? { depositReceivedSatang } : {}),
+    ...(depositRefundedSatang > 0 ? { depositRefundedSatang } : {}),
   };
 }

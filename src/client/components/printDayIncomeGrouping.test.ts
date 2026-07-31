@@ -231,4 +231,46 @@ describe("groupDayIncomeForPrint", () => {
     expect(UNCLASSIFIED_GROUP_LABEL_TH).toBe("อื่นๆ (ไม่ระบุประเภท)");
     expect(UNCLASSIFIED_TOTAL_LABEL_TH).toBe("รวมอื่นๆ (ไม่ระบุประเภท)");
   });
+
+  // Wave C (docs/adr/0001): deposit_applied is a FIFTH, OPTIONAL group —
+  // absent entirely from `groups` on a no-deposit day (the STANDARD fixture
+  // above never seeds this key, and its own test already asserts exactly
+  // the four groups), present as a trailing group only when it holds money.
+  describe("Wave C: deposit_applied group (optional, skip-when-empty)", () => {
+    test("absent from groups when the category exists but carries no cell for the day", () => {
+      const categories: Category[] = [
+        ...STANDARD_CATEGORIES,
+        makeCategory({ id: 15, nameTh: "มัดจำล่วงหน้า (ตัดยอด)", categoryKey: "deposit_applied", sort: 15 }),
+      ];
+      const grouped = groupDayIncomeForPrint({ categories, income: STANDARD_INCOME });
+      expect(grouped.groups.map((g) => g.id)).toEqual(["cash", "transfer", "card", "web"]);
+    });
+
+    test("present as the trailing fifth group, correctly labelled, when it holds money", () => {
+      const categories: Category[] = [
+        ...STANDARD_CATEGORIES,
+        makeCategory({ id: 15, nameTh: "มัดจำล่วงหน้า (ตัดยอด)", categoryKey: "deposit_applied", sort: 15 }),
+      ];
+      const income: Record<number, IncomeCell> = { ...STANDARD_INCOME, 15: makeCell(15, 79_000) };
+      const grouped = groupDayIncomeForPrint({ categories, income });
+
+      expect(grouped.groups.map((g) => g.id)).toEqual(["cash", "transfer", "card", "web", "deposit_applied"]);
+      const depositAppliedGroup = grouped.groups[4]!;
+      expect(depositAppliedGroup.label).toBe("มัดจำที่ตัดยอด");
+      expect(depositAppliedGroup.totalLabel).toBe("รวมมัดจำที่ตัดยอด");
+      expect(depositAppliedGroup.totalSatang).toBe(79_000);
+      expect(depositAppliedGroup.lines).toHaveLength(1);
+      expect(depositAppliedGroup.lines[0]!.label).toBe("มัดจำล่วงหน้า (ตัดยอด)");
+
+      // The independently-summed cross-check must still include it.
+      const totals = computeDayTotals(categories, income, []);
+      expect(grouped.grandTotalSatang).toBe(totals.incomeSatang);
+    });
+
+    test("falls back to the seed label when no category holds the key yet, still only when it holds money", () => {
+      const income: Record<number, IncomeCell> = { ...STANDARD_INCOME };
+      const grouped = groupDayIncomeForPrint({ categories: STANDARD_CATEGORIES, income });
+      expect(grouped.groups.some((g) => g.id === "deposit_applied")).toBe(false);
+    });
+  });
 });

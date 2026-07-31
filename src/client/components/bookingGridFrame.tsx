@@ -1,5 +1,5 @@
 import { formatSatang } from "../../shared/money.ts";
-import { TENDERS, type BookingTotals } from "../../shared/types.ts";
+import { TENDERS, type BookingTotals, type Tender } from "../../shared/types.ts";
 
 // The booking grid's FRAME: column widths, the three-row grouped header
 // verbatim from the workbook, and the totals row.
@@ -10,11 +10,22 @@ import { TENDERS, type BookingTotals } from "../../shared/types.ts";
 // copies would drift the moment either screen is touched. Only the two
 // things that legitimately differ between screen and paper are props: the
 // delete column (`withActions`) and print density (`compact`).
+//
+// Wave C (docs/adr/0001, shared/accrual.ts): the grid shows exactly 8 money
+// columns, but WHICH 8 now varies by date — `deposit` pre-cutover,
+// `deposit_applied` on/after (same printed slot, see
+// `visibleTendersForDate()`). Every function here that renders actual
+// columns (BookingGridColgroup/Head/Foot) takes the caller's
+// `visibleTendersForDate()` result as its `tenders` prop instead of
+// assuming the module-level `TENDERS` constant (which is the full 9-entry
+// superset, for money math, not display).
 
 /**
- * Widths of the 18 data columns in printed order — seq, bookingNo,
- * guestName, roomNo, roomCount, nights, grossRoom, grossOther, discount,
- * the eight TENDERS, remark. Sums to 1468px at scale 1.
+ * Widths of the fixed (non-tender) data columns in printed order — seq,
+ * bookingNo, guestName, roomNo, roomCount, nights, grossRoom, grossOther,
+ * discount. The 8 tender columns and the remark column are appended by
+ * `bookingGridWidths()` below, keyed by whichever `tenders` the caller is
+ * actually rendering.
  *
  * guestName and roomNo are deliberately generous. On the printed sheet those
  * cells wrap, so any width reads; on the entry grid they are inputs, which
@@ -27,14 +38,50 @@ import { TENDERS, type BookingTotals } from "../../shared/types.ts";
  * PMS format ("CH26-001712", 11 chars) — a prior width here assumed a
  * shorter 10-char legacy format ("B2607-0447") and clipped the real one.
  */
-export const BOOKING_GRID_DATA_WIDTHS: readonly number[] = [
-  40, 100, 200, 84, 42, 42, 84, 78, 74, 84, 80, 76, 76, 76, 76, 76, 76, 104,
-];
+const FIXED_COLUMN_WIDTHS_BEFORE_TENDERS: readonly number[] = [40, 100, 200, 84, 42, 42, 84, 78, 74];
+
+/** Per-tender column width. `deposit`/`deposit_applied` share the identical
+ * width (84px) — they share one printed slot (see accrual.ts), so the
+ * grid's total width is invariant to which of the two a given date shows. */
+const TENDER_COLUMN_WIDTH_PX: Record<Tender, number> = {
+  deposit: 84,
+  deposit_applied: 84,
+  cash: 80,
+  credit_kbank: 76,
+  credit_icbc: 76,
+  transfer_kbank: 76,
+  transfer_icbc: 76,
+  web: 76,
+  other: 76,
+};
+
+const REMARK_COLUMN_WIDTH_PX = 104;
 
 /** The row-edge delete column, present on the entry grid only. */
 export const BOOKING_GRID_ACTION_WIDTH = 40;
 
+/** The canonical 8-of-9 tender list used ONLY as `bookingGridWidths()`'s
+ * default when a caller omits `tenders` — safe because `deposit`/
+ * `deposit_applied` share an identical column width (see
+ * `TENDER_COLUMN_WIDTH_PX` above), so the grid's TOTAL width never actually
+ * depends on which of the two is included. This lets module-level sizing
+ * constants that have no date to compute from (ReportSheet.tsx's
+ * `PRINT_TABLE_WIDTH`/`REPORT_SHEET_WIDTH`, exported for ReportPage.tsx's
+ * preview-scale math) stay computed once at import time. Anything that
+ * renders ACTUAL columns (`BookingGridColgroup`/`BookingGridHead`/
+ * `BookingGridFoot`) must always pass the real `visibleTendersForDate()`
+ * result instead — never rely on this default for rendering, only for a
+ * pure total-width number. */
+const WIDTH_CALC_TENDERS: readonly Tender[] = TENDERS.filter((tender) => tender !== "deposit_applied");
+
 export interface BookingGridFrameOptions {
+  /** The 8 tender columns actually visible for the date being rendered —
+   * see shared/accrual.ts's `visibleTendersForDate()`. Optional ONLY for
+   * `bookingGridWidths()`/`bookingGridWidth()`'s pure-total-width use
+   * (defaults to `WIDTH_CALC_TENDERS`, see its doc comment); every
+   * column-RENDERING caller (`BookingGridColgroup`/`BookingGridHead`/
+   * `BookingGridFoot`) must pass it explicitly. */
+  tenders?: readonly Tender[];
   /** Include the row-edge delete column (entry grid) or not (printed sheet). */
   withActions?: boolean;
   /** Multiplier on every column width — the printed sheet shrinks the grid
@@ -43,10 +90,17 @@ export interface BookingGridFrameOptions {
   scale?: number;
 }
 
-export function bookingGridWidths({ withActions = false, scale = 1 }: BookingGridFrameOptions = {}): number[] {
-  const base = withActions
-    ? [...BOOKING_GRID_DATA_WIDTHS, BOOKING_GRID_ACTION_WIDTH]
-    : [...BOOKING_GRID_DATA_WIDTHS];
+export function bookingGridWidths({
+  tenders = WIDTH_CALC_TENDERS,
+  withActions = false,
+  scale = 1,
+}: BookingGridFrameOptions = {}): number[] {
+  const base = [
+    ...FIXED_COLUMN_WIDTHS_BEFORE_TENDERS,
+    ...tenders.map((tender) => TENDER_COLUMN_WIDTH_PX[tender]),
+    REMARK_COLUMN_WIDTH_PX,
+    ...(withActions ? [BOOKING_GRID_ACTION_WIDTH] : []),
+  ];
   return base.map((width) => Math.round(width * scale));
 }
 
@@ -75,20 +129,65 @@ export interface BookingGridFrameProps extends BookingGridFrameOptions {
   sticky?: boolean;
 }
 
-export function BookingGridColgroup({ withActions, scale }: BookingGridFrameOptions) {
+export function BookingGridColgroup({ tenders, withActions, scale }: BookingGridFrameOptions) {
   return (
     <colgroup>
-      {bookingGridWidths({ withActions, scale }).map((width, index) => (
+      {bookingGridWidths({ tenders, withActions, scale }).map((width, index) => (
         <col key={index} style={{ width }} />
       ))}
     </colgroup>
   );
 }
 
-/** Three-row grouped header, wording verbatim from the workbook. Each row
- * spans the full 18 data columns (19 with the delete column). */
-export function BookingGridHead({ withActions = false, compact = false, sticky = false }: BookingGridFrameProps) {
+/**
+ * Each tender column's header label split across the group row (row 2) and
+ * the leaf row (row 3) — e.g. `cash` prints "เงินสด" over "ค่าห้อง",
+ * combining to "เงินสดค่าห้อง" (`TENDER_LABELS_TH.cash`). `deposit_applied`
+ * ("ตัดยอดมัดจำ", Wave C) has no natural two-word split, so its row-3 half
+ * is simply empty — the column's single group-row label already carries
+ * the whole meaning.
+ */
+const TENDER_HEADER_SPLIT: Record<Tender, [row2: string, row3: string]> = {
+  deposit: ["มัดจำค่าห้อง", "โอน/เครดิต"],
+  deposit_applied: ["ตัดยอดมัดจำ", ""],
+  cash: ["เงินสด", "ค่าห้อง"],
+  credit_kbank: ["บัตรเครดิต", "กสิกร"],
+  credit_icbc: ["บัตรเครดิต", "ICBC"],
+  transfer_kbank: ["เงินโอน", "กสิกร"],
+  transfer_icbc: ["เงินโอน", "ICBC"],
+  web: ["แอพฯ", "/เว็บไซด์"],
+  other: ["อื่นๆ", "สด/โอน/เครดิต"],
+};
+
+/** Groups consecutive tenders sharing the same row-2 header label into one
+ * colSpan cell — in the canonical order this merges credit_kbank+
+ * credit_icbc under "บัตรเครดิต" and transfer_kbank+transfer_icbc under
+ * "เงินโอน" (exactly the workbook's original hardcoded shape); every other
+ * tender, including whichever of deposit/deposit_applied is visible, gets
+ * its own colSpan=1 cell. Purely positional (adjacency in `tenders`), so
+ * this still works correctly for whatever 8-of-9 subset a given date shows. */
+function groupTenderHeaderRow2(tenders: readonly Tender[]): Array<{ label: string; colSpan: number }> {
+  const groups: Array<{ label: string; colSpan: number }> = [];
+  for (const tender of tenders) {
+    const [row2Label] = TENDER_HEADER_SPLIT[tender];
+    const last = groups[groups.length - 1];
+    if (last && last.label === row2Label) last.colSpan += 1;
+    else groups.push({ label: row2Label, colSpan: 1 });
+  }
+  return groups;
+}
+
+/** Three-row grouped header, wording verbatim from the workbook (except the
+ * deposit slot's label, which is date-driven — see `TENDER_HEADER_SPLIT`).
+ * Each row spans the full 18 data columns (19 with the delete column). */
+export function BookingGridHead({
+  tenders = WIDTH_CALC_TENDERS,
+  withActions = false,
+  compact = false,
+  sticky = false,
+}: BookingGridFrameProps) {
   const H = compact ? HEAD_COMPACT : HEAD_ROOMY;
+  const row2Groups = groupTenderHeaderRow2(tenders);
   return (
     <thead className={sticky ? "sticky top-0 z-10" : undefined}>
       <tr>
@@ -109,7 +208,7 @@ export function BookingGridHead({ withActions = false, compact = false, sticky =
         <th rowSpan={3} className={H}>
           ส่วนลด
         </th>
-        <th colSpan={8} className={H}>
+        <th colSpan={tenders.length} className={H}>
           จำนวนเงินรับ
         </th>
         <th rowSpan={3} className={H}>
@@ -137,28 +236,20 @@ export function BookingGridHead({ withActions = false, compact = false, sticky =
         <th colSpan={2} className={H}>
           ก่อนหักส่วนลด
         </th>
-        <th className={H}>มัดจำค่าห้อง</th>
-        <th className={H}>เงินสด</th>
-        <th colSpan={2} className={H}>
-          บัตรเครดิต
-        </th>
-        <th colSpan={2} className={H}>
-          เงินโอน
-        </th>
-        <th className={H}>แอพฯ</th>
-        <th className={H}>อื่นๆ</th>
+        {row2Groups.map((group, i) => (
+          <th key={i} colSpan={group.colSpan} className={H}>
+            {group.label}
+          </th>
+        ))}
       </tr>
       <tr>
         <th className={H}>ค่าห้อง</th>
         <th className={H}>อื่นๆ</th>
-        <th className={H}>โอน/เครดิต</th>
-        <th className={H}>ค่าห้อง</th>
-        <th className={H}>กสิกร</th>
-        <th className={H}>ICBC</th>
-        <th className={H}>กสิกร</th>
-        <th className={H}>ICBC</th>
-        <th className={H}>/เว็บไซด์</th>
-        <th className={H}>สด/โอน/เครดิต</th>
+        {tenders.map((tender) => (
+          <th key={tender} className={H}>
+            {TENDER_HEADER_SPLIT[tender][1]}
+          </th>
+        ))}
       </tr>
     </thead>
   );
@@ -175,8 +266,13 @@ export function countText(count: number | null | undefined): string {
 }
 
 /** The totals row. Every figure comes from computeBookingTotals() — nothing
- * here recomputes anything. */
+ * here recomputes anything. `totals.byTender` always carries all 9 tenders
+ * (see BookingTotals/computeBookingTotals) — this indexes into it with
+ * whichever 8 `tenders` the caller is displaying for this date, so a
+ * hidden column's total (if any — see BookingGrid.tsx's warning chip) is
+ * simply not shown here, never lost from `totals` itself. */
 export function BookingGridFoot({
+  tenders = WIDTH_CALC_TENDERS,
   totals,
   withActions = false,
   compact = false,
@@ -195,7 +291,7 @@ export function BookingGridFoot({
         <td className={F + " text-right"}>{moneyText(totals.grossRoomSatang)}</td>
         <td className={F + " text-right"}>{moneyText(totals.grossOtherSatang)}</td>
         <td className={F + " text-right"}>{moneyText(totals.discountSatang)}</td>
-        {TENDERS.map((tender) => (
+        {tenders.map((tender) => (
           <td key={tender} className={F + " text-right"}>
             {moneyText(totals.byTender[tender])}
           </td>

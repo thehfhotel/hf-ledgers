@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   computeBookingTotals,
+  depositCashTotals,
   deriveCashBlock,
   deriveIncomeFromBookings,
   lineArithmeticMismatch,
   RECONCILE_TOLERANCE_SATANG,
 } from "./bookings.ts";
 import { TENDERS } from "./types.ts";
-import type { BookingLine, Category, IncomeCell, OtherIncomeItem, Tender } from "./types.ts";
+import type { BookingLine, Category, DepositEvent, IncomeCell, OtherIncomeItem, Tender } from "./types.ts";
 
 function zeroTenders(): Record<Tender, number> {
   return Object.fromEntries(TENDERS.map((tender) => [tender, 0])) as Record<Tender, number>;
@@ -148,6 +149,17 @@ describe("deriveIncomeFromBookings", () => {
     const derived = deriveIncomeFromBookings([draftLine]);
 
     expect(derived.room_cash).toBeUndefined();
+  });
+
+  // Wave C (docs/adr/0001): deposit_applied ("ตัดยอดมัดจำ") derives into its
+  // own same-named CategoryKey exactly like every other tender — no special
+  // casing needed since the function loops TENDERS generically.
+  test("deposit_applied maps to its own CategoryKey", () => {
+    const line = makeLine({ tenders: { ...zeroTenders(), deposit_applied: 79_000 } });
+
+    const derived = deriveIncomeFromBookings([line]);
+
+    expect(derived.deposit_applied).toBe(79_000);
   });
 });
 
@@ -418,6 +430,124 @@ describe("deriveCashBlock", () => {
       expect(block.otherCashSatang).toBe(5_000);
       expect(block.bankedSatang).toBe(CASH_TOTAL_SATANG - 12_000 + 8_500);
     });
+  });
+
+  // Wave C (docs/adr/0001): a cash มัดจำล่วงหน้า received/refunded today
+  // folds into bankedSatang (it moved the till) while staying entirely out
+  // of every income cell above (never รายรับ under accrual) — transfer/
+  // credit/web/other deposit tenders never touch it either way.
+  describe("depositEvents folding (Wave C)", () => {
+    function depositEvent(overrides: Partial<DepositEvent> = {}): DepositEvent {
+      return {
+        id: 1,
+        property: "hf",
+        date: "2026-08-01",
+        kind: "received",
+        bookingNo: "R014843",
+        guestName: "ทดสอบ มัดจำ",
+        tender: "cash",
+        amountSatang: 89_000,
+        note: null,
+        source: "manual",
+        pmsRef: null,
+        createdAt: "2026-08-01 10:00:00",
+        createdBy: "tester@thehfhotel.org",
+        updatedAt: "2026-08-01 10:00:00",
+        updatedBy: "tester@thehfhotel.org",
+        ...overrides,
+      };
+    }
+
+    test("default call sites (no depositEvents passed) are unaffected", () => {
+      const block = deriveCashBlock(categories, {}, []);
+      expect(block.bankedSatang).toBe(0);
+    });
+
+    test("a received cash deposit ADDS to bankedSatang, with no income-cell effect", () => {
+      const block = deriveCashBlock(categories, {}, [], null, null, [depositEvent({ amountSatang: 89_000 })]);
+      expect(block.bankedSatang).toBe(89_000);
+      expect(block.roomCashSatang).toBe(0);
+      expect(block.otherCashSatang).toBe(0);
+      expect(block.barCashSatang).toBe(0);
+    });
+
+    test("a refunded cash deposit SUBTRACTS from bankedSatang", () => {
+      const block = deriveCashBlock(categories, {}, [], null, null, [
+        depositEvent({ kind: "refunded", amountSatang: 30_000 }),
+      ]);
+      expect(block.bankedSatang).toBe(-30_000);
+    });
+
+    test("received + refunded cash deposits net together", () => {
+      const block = deriveCashBlock(categories, {}, [], null, null, [
+        depositEvent({ id: 1, kind: "received", amountSatang: 89_000 }),
+        depositEvent({ id: 2, kind: "refunded", amountSatang: 30_000 }),
+      ]);
+      expect(block.bankedSatang).toBe(89_000 - 30_000);
+    });
+
+    test("non-cash deposit tenders (transfer/credit/web/other) never touch bankedSatang", () => {
+      const block = deriveCashBlock(categories, {}, [], null, null, [
+        depositEvent({ id: 1, tender: "transfer", amountSatang: 50_000 }),
+        depositEvent({ id: 2, tender: "credit", amountSatang: 60_000 }),
+        depositEvent({ id: 3, tender: "web", amountSatang: 70_000 }),
+        depositEvent({ id: 4, tender: "other", amountSatang: 80_000 }),
+      ]);
+      expect(block.bankedSatang).toBe(0);
+    });
+
+    test("combines with room/other/bar cash AND the heldBack/broughtForward adjustment in the same formula", () => {
+      const income: Record<number, IncomeCell> = {
+        1: incomeCell(1, 49_000), // room cash
+        2: incomeCell(2, 2_000), // bar cash
+      };
+      const block = deriveCashBlock(categories, income, [], 12_000, 8_500, [depositEvent({ amountSatang: 89_000 })]);
+      expect(block.bankedSatang).toBe(49_000 + 2_000 + 89_000 - 12_000 + 8_500);
+    });
+  });
+});
+
+describe("depositCashTotals", () => {
+  function depositEvent(overrides: Partial<DepositEvent> = {}): DepositEvent {
+    return {
+      id: 1,
+      property: "hf",
+      date: "2026-08-01",
+      kind: "received",
+      bookingNo: null,
+      guestName: null,
+      tender: "cash",
+      amountSatang: 1_000,
+      note: null,
+      source: "manual",
+      pmsRef: null,
+      createdAt: "2026-08-01 10:00:00",
+      createdBy: "tester@thehfhotel.org",
+      updatedAt: "2026-08-01 10:00:00",
+      updatedBy: "tester@thehfhotel.org",
+      ...overrides,
+    };
+  }
+
+  test("empty list -> both zero", () => {
+    expect(depositCashTotals([])).toEqual({ depositCashInSatang: 0, depositCashOutSatang: 0 });
+  });
+
+  test("sums cash received into depositCashInSatang, cash refunded into depositCashOutSatang", () => {
+    const totals = depositCashTotals([
+      depositEvent({ id: 1, kind: "received", amountSatang: 89_000 }),
+      depositEvent({ id: 2, kind: "received", amountSatang: 10_000 }),
+      depositEvent({ id: 3, kind: "refunded", amountSatang: 30_000 }),
+    ]);
+    expect(totals).toEqual({ depositCashInSatang: 99_000, depositCashOutSatang: 30_000 });
+  });
+
+  test("non-cash tenders are excluded entirely, regardless of kind", () => {
+    const totals = depositCashTotals([
+      depositEvent({ id: 1, tender: "transfer", kind: "received", amountSatang: 50_000 }),
+      depositEvent({ id: 2, tender: "credit", kind: "refunded", amountSatang: 20_000 }),
+    ]);
+    expect(totals).toEqual({ depositCashInSatang: 0, depositCashOutSatang: 0 });
   });
 });
 

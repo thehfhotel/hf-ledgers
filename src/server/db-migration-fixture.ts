@@ -51,7 +51,11 @@ const AMOUNTS_BY_KEY: Readonly<Record<string, number>> = {
 
 function rollHfBackToLegacyShape(): void {
   const removeCredit = dbModule.db.prepare("DELETE FROM categories WHERE property = 'hf' AND category_key = ?");
-  for (const key of ["deposit_credit", "other_credit", "bar_credit"]) removeCredit.run(key);
+  // Wave B's three เครดิต siblings, AND Wave C's deposit_applied (added
+  // later still) — simulating a genuinely pre-both-waves legacy shape so
+  // the real migrate() call below exercises restoring ALL of them, not
+  // just the Wave B set.
+  for (const key of ["deposit_credit", "other_credit", "bar_credit", "deposit_applied"]) removeCredit.run(key);
 
   const remaining = dbModule.db
     .query<{ id: number }, []>(
@@ -116,16 +120,18 @@ const mode = process.env.FIXTURE_MODE ?? "normal";
 if (mode === "collision") {
   rollHfBackToLegacyShape();
 
-  // Two manager-created (category_key NULL) categories that happen to
-  // occupy exactly two of the six target names — one blocks bar_credit's
-  // INSERT, the other blocks deposit's RENAME target. Both stay well clear
-  // of the dense 0..N sort range so they never disturb the adjacency of
-  // the unaffected pairs.
+  // Three manager-created (category_key NULL) categories that happen to
+  // occupy exactly three of the target names — one blocks bar_credit's
+  // INSERT, one blocks deposit's RENAME target, and one blocks
+  // deposit_applied's INSERT (Wave C, docs/adr/0001). All three stay well
+  // clear of the dense 0..N sort range so they never disturb the adjacency
+  // of the unaffected pairs.
   const blocker = dbModule.db.prepare(
     "INSERT INTO categories (property, kind, name_th, sort, is_cash, category_key) VALUES ('hf', 'income', ?, 999, 0, NULL)",
   );
   blocker.run("บาร์น้ำ เครดิต"); // blocks the bar_credit INSERT target
   blocker.run("มัดจำล่วงหน้า โอน"); // blocks the deposit RENAME target
+  blocker.run("มัดจำล่วงหน้า (ตัดยอด)"); // blocks the deposit_applied INSERT target
 
   dbModule.migrate(); // must not throw — see the module comment above
 

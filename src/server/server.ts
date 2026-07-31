@@ -7,14 +7,18 @@ import {
   countBookingLinesForDay,
   createBookingLine,
   createCategory,
+  createDepositEvent,
   createExpenseItem,
   createOtherIncomeItem,
   deleteBookingLine,
+  deleteDepositEvent,
   deleteExpenseItem,
   deleteOtherIncomeItem,
   getBookingLineById,
   getBookingLinesForDay,
   getCategoryById,
+  getDepositEventById,
+  getDepositEventsForDay,
   getEffectiveIncomeForDay,
   getExpenseById,
   getExpensesForDay,
@@ -23,6 +27,7 @@ import {
   getOtherIncomeItemById,
   getSheetDay,
   insertPmsBookingLines,
+  insertPmsDepositEvents,
   isComputedOtherIncomeCategory,
   isMonthClosed,
   listCategories,
@@ -39,21 +44,24 @@ import {
   touchSheetDay,
   updateBookingLine,
   updateCategory,
+  updateDepositEvent,
   updateExpenseItem,
   updateOtherIncomeItem,
 } from "./db.ts";
-import type { BookingLineInput, SheetDay } from "./db.ts";
+import type { BookingLineInput, DepositEventInput, SheetDay } from "./db.ts";
 import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
 import { fetchDayPayments, pmsConfigured } from "./pms-prefill.ts";
-import type { PrefillCandidate } from "./pms-prefill.ts";
+import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
 import { computeDayTotals } from "../shared/totals.ts";
-import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings } from "../shared/bookings.ts";
+import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings, depositCashTotals } from "../shared/bookings.ts";
+import { isAccrualDay } from "../shared/accrual.ts";
 import { isValidIso, isValidMonth } from "../shared/date.ts";
 import {
   AMOUNT_SATANG_MAX,
   AMOUNT_SATANG_MIN,
   BOOKING_NO_MAX_LEN,
   COUNT_MAX,
+  DEPOSIT_TENDERS,
   DESCRIPTION_MAX_LEN,
   GUEST_NAME_MAX_LEN,
   NAME_TH_MAX_LEN,
@@ -72,6 +80,7 @@ import type {
   CategoryKey,
   DaySheet,
   DaySummary,
+  DepositEvent,
   IncomeCell,
   Me,
   OtherIncomeItem,
@@ -115,30 +124,36 @@ function isUniqueConstraintError(err: unknown): boolean {
 /** Composes the pieces every day-scoped handler needs — categories,
  * other-income items, the EFFECTIVE income view (the two รายการอื่นๆ cells
  * computed from other-income items whenever the day has any — see
- * getEffectiveIncomeForDay), expenses, and totals — so endpoints 6/7/8 can
- * never disagree on what a day's numbers are. */
+ * getEffectiveIncomeForDay), expenses, deposit events (Wave C), and
+ * totals — so endpoints 6/7/8 can never disagree on what a day's numbers
+ * are. */
 function loadDayData(property: Property, date: string) {
   const categories = categoriesForDay(property, date);
   const otherIncomeItems = getOtherIncomeForDay(property, date);
   const income = getEffectiveIncomeForDay(property, date, categories, otherIncomeItems);
   const expenses = getExpensesForDay(property, date);
+  const deposits = getDepositEventsForDay(property, date);
   const totals = computeDayTotals(categories, income, expenses);
-  return { categories, otherIncomeItems, income, expenses, totals };
+  return { categories, otherIncomeItems, income, expenses, deposits, totals };
 }
 
 /**
  * Composes a day's full CashBlock: reads the heldBack/broughtForward
  * adjustment off `sheetDay` (see CashAdjustmentAmounts, shared/types.ts)
- * and feeds it into deriveCashBlock() so it always participates in
- * `derived.bankedSatang`, then layers the stored `CashBlockAmounts`
- * override on top. The ONE path GET day (endpoint 7) and PUT cash-block
- * (endpoint 21) both use — never recompute this arithmetic separately.
+ * and feeds it, along with this day's `deposits` (Wave C), into
+ * deriveCashBlock() so both always participate in `derived.bankedSatang`,
+ * then layers the stored `CashBlockAmounts` override on top and adds the
+ * always-derived `depositCashInSatang`/`depositCashOutSatang` display
+ * figures (same `depositCashTotals()` helper, never a second computation).
+ * The ONE path GET day (endpoint 7) and PUT income/cash-block (endpoints
+ * 8/21) all use — never recompute this arithmetic separately.
  */
 function buildCashBlock(
   categories: Category[],
   income: Record<number, IncomeCell>,
   otherIncomeItems: OtherIncomeItem[],
   sheetDay: SheetDay | null,
+  deposits: DepositEvent[],
 ): CashBlock {
   const derived = deriveCashBlock(
     categories,
@@ -146,8 +161,11 @@ function buildCashBlock(
     otherIncomeItems,
     sheetDay?.cashOverride.heldBackSatang ?? null,
     sheetDay?.cashOverride.broughtForwardSatang ?? null,
+    deposits,
   );
-  return mergeCashBlockOverride(derived, sheetDay);
+  const merged = mergeCashBlockOverride(derived, sheetDay);
+  const { depositCashInSatang, depositCashOutSatang } = depositCashTotals(deposits);
+  return { ...merged, depositCashInSatang, depositCashOutSatang };
 }
 
 function isValidCount(n: unknown): n is number {
@@ -193,6 +211,7 @@ const bookingLineInputSchema = t.Object({
   tenders: t.Optional(
     t.Object({
       deposit: t.Number(),
+      deposit_applied: t.Number(),
       cash: t.Number(),
       credit_kbank: t.Number(),
       credit_icbc: t.Number(),
@@ -239,6 +258,74 @@ function validateBookingLineInput(body: Omit<BookingLineInput, "source"> & { sou
   // NOTE_MAX_LEN — same number today, but the client reads the same named
   // constant, so the two can never drift apart again silently.
   if (body.remark != null && !isValidBoundedString(body.remark, REMARK_MAX_LEN)) return "invalid remark";
+  return null;
+}
+
+/** Bounds for a (possibly partial) DepositEvent body — see
+ * validateBookingLineInput's own doc comment for the pattern. Reused for
+ * both create (every declared field required by the Elysia schema, so the
+ * presence checks below are effectively no-ops there) and update (every
+ * field optional). Takes the loosely-typed Typebox-validated body (kind/
+ * tender: string, not yet narrowed) — this function's own enum checks are
+ * what narrow them; callers cast to DepositEventInput once this returns
+ * null, same pattern as validateBookingLineInput. */
+function validateDepositEventInput(
+  body: Omit<DepositEventInput, "kind" | "tender"> & { kind?: string; tender?: string },
+): string | null {
+  if (body.kind !== undefined && body.kind !== "received" && body.kind !== "refunded") {
+    return "invalid kind";
+  }
+  if (body.bookingNo != null && !isValidBoundedString(body.bookingNo, BOOKING_NO_MAX_LEN)) {
+    return "invalid bookingNo";
+  }
+  if (body.guestName != null && !isValidBoundedString(body.guestName, GUEST_NAME_MAX_LEN)) {
+    return "invalid guestName";
+  }
+  if (body.tender !== undefined && !(DEPOSIT_TENDERS as readonly string[]).includes(body.tender)) {
+    return "invalid tender";
+  }
+  if (body.amountSatang !== undefined && (!isValidAmount(body.amountSatang) || body.amountSatang <= 0)) {
+    return "invalid amountSatang";
+  }
+  if (body.note != null && !isValidNote(body.note)) return "invalid note";
+  return null;
+}
+
+/** 400s a write against a date before `property`'s accrual cutover (see
+ * shared/accrual.ts) — a pre-cutover day can never legitimately hold a
+ * deposit_events row under the new model (C7: gate ONLY at write
+ * boundaries; read paths stay ungated because no pre-cutover day can ever
+ * hold one in the first place). Callers apply this before mutating,
+ * alongside closedMonthResponse. */
+function preCutoverResponse(
+  property: Property,
+  date: string,
+  status: (code: number, body: unknown) => unknown,
+): unknown {
+  if (!isAccrualDay(property, date)) {
+    return status(400, { error: "pre-cutover date: deposits are not tracked before the accrual cutover" });
+  }
+  return null;
+}
+
+/** F1 (Opus money-review, 2026-07-31): the same pre-cutover gate as
+ * preCutoverResponse above, but for a direct booking-line write carrying a
+ * nonzero `deposit_applied` tender — a hand-typed or hand-edited row could
+ * otherwise plant the accrual-era tender on a pre-cutover date exactly the
+ * way an un-gated PMS pull used to. `validateBookingLineInput` has no date
+ * context (it's a pure body-shape check), so this lives in the route
+ * handlers instead, where `date` is known. */
+function preCutoverDepositAppliedResponse(
+  property: Property,
+  date: string,
+  tenders: Record<Tender, number> | undefined,
+  status: (code: number, body: unknown) => unknown,
+): unknown {
+  if (tenders !== undefined && tenders.deposit_applied !== 0 && !isAccrualDay(property, date)) {
+    return status(400, {
+      error: "pre-cutover date: deposit_applied is not tracked before the accrual cutover",
+    });
+  }
   return null;
 }
 
@@ -386,7 +473,7 @@ export const api = new Elysia({ prefix: "/api" })
     if (!isProperty(property)) return status(400, { error: "invalid property" });
     if (!isValidIso(date)) return status(400, { error: "invalid date" });
 
-    const { categories, otherIncomeItems, income, expenses, totals } = loadDayData(property, date);
+    const { categories, otherIncomeItems, income, expenses, deposits, totals } = loadDayData(property, date);
     const sheetDay = getSheetDay(property, date);
 
     const sheet: DaySheet = {
@@ -397,7 +484,8 @@ export const api = new Elysia({ prefix: "/api" })
       totals,
       bookingLineCount: countBookingLinesForDay(property, date),
       otherIncome: otherIncomeItems,
-      cashBlock: buildCashBlock(categories, income, otherIncomeItems, sheetDay),
+      cashBlock: buildCashBlock(categories, income, otherIncomeItems, sheetDay, deposits),
+      deposits,
       provenance: sheetDay?.provenance ?? "app",
       verifiedAt: sheetDay?.verifiedAt ?? null,
       verifiedBy: sheetDay?.verifiedBy ?? null,
@@ -448,7 +536,13 @@ export const api = new Elysia({ prefix: "/api" })
       // go stale after every income edit until the next full day reload.
       const dayData = loadDayData(property, date);
       const sheetDay = getSheetDay(property, date);
-      const cashBlock = buildCashBlock(dayData.categories, dayData.income, dayData.otherIncomeItems, sheetDay);
+      const cashBlock = buildCashBlock(
+        dayData.categories,
+        dayData.income,
+        dayData.otherIncomeItems,
+        sheetDay,
+        dayData.deposits,
+      );
       return { income: dayData.income, totals: dayData.totals, cashBlock };
     },
     {
@@ -597,6 +691,8 @@ export const api = new Elysia({ prefix: "/api" })
       if (!isValidIso(date)) return status(400, { error: "invalid date" });
       const invalid = validateBookingLineInput(body);
       if (invalid) return status(400, { error: invalid });
+      const gated = preCutoverDepositAppliedResponse(property, date, body.tenders, status);
+      if (gated) return gated;
       const blocked = closedMonthResponse(property, date, status);
       if (blocked) return blocked;
 
@@ -621,6 +717,8 @@ export const api = new Elysia({ prefix: "/api" })
       if (!existing) return status(404, { error: "booking line not found" });
       const invalid = validateBookingLineInput(body);
       if (invalid) return status(400, { error: invalid });
+      const gated = preCutoverDepositAppliedResponse(property, existing.date, body.tenders, status);
+      if (gated) return gated;
       const blocked = closedMonthResponse(property, existing.date, status);
       if (blocked) return blocked;
 
@@ -815,9 +913,9 @@ export const api = new Elysia({ prefix: "/api" })
 
       setCashBlockOverride(property, date, body, identity!.email);
       enqueueAnalyticsPush(property, date);
-      const { categories, otherIncomeItems, income } = loadDayData(property, date);
+      const { categories, otherIncomeItems, income, deposits } = loadDayData(property, date);
       const sheetDay = getSheetDay(property, date);
-      return buildCashBlock(categories, income, otherIncomeItems, sheetDay);
+      return buildCashBlock(categories, income, otherIncomeItems, sheetDay, deposits);
     },
     {
       body: t.Union([
@@ -886,10 +984,11 @@ export const api = new Elysia({ prefix: "/api" })
     { body: t.Object({ closed: t.Boolean() }) },
   )
 
-  // 25. POST /api/:property/day/:date/move — moves ONLY booking_lines and
-  // other_income_items for :date from :property to body.to; see
-  // src/shared/api.md and moveBookingDay() in db.ts for the full scope and
-  // seq-renumbering rule. `to` is intentionally t.Optional in the schema so
+  // 25. POST /api/:property/day/:date/move — moves ONLY booking_lines,
+  // other_income_items, AND deposit_events (Wave C, Opus money-review F2,
+  // 2026-07-31) for :date from :property to body.to; see src/shared/api.md
+  // and moveBookingDay() in db.ts for the full scope and seq-renumbering
+  // rule. `to` is intentionally t.Optional in the schema so
   // a missing field reaches this handler as `undefined` and gets the same
   // app-shaped 400 as any other invalid value, rather than Elysia's own
   // schema-validation error.
@@ -912,16 +1011,17 @@ export const api = new Elysia({ prefix: "/api" })
       if (blockedDest) return blockedDest;
 
       const by = identity!.email;
-      let result: { bookingLines: number; otherIncome: number };
+      let result: { bookingLines: number; otherIncome: number; depositEvents: number };
       try {
         result = moveBookingDay(property, to, date, by);
       } catch (err) {
         // Only real-world trigger: the destination day already has a
-        // booking line sharing a (property, date, pms_ref) with a moved
-        // row (partial unique index) — nothing writes pms_ref from the UI
-        // today, so this is theoretical, but fails cleanly rather than
-        // crashing. The transaction inside moveBookingDay() already rolled
-        // back, so nothing was moved.
+        // booking line or deposit event sharing a (property, date,
+        // pms_ref, ...) with a moved row (the partial unique indexes) —
+        // nothing writes pms_ref from the UI today, so this is
+        // theoretical, but fails cleanly rather than crashing. The
+        // transaction inside moveBookingDay() already rolled back, so
+        // nothing was moved.
         if (isUniqueConstraintError(err)) {
           return status(500, { error: "cannot move: conflicting pms_ref on destination day" });
         }
@@ -935,19 +1035,21 @@ export const api = new Elysia({ prefix: "/api" })
       return {
         movedBookingLines: result.bookingLines,
         movedOtherIncome: result.otherIncome,
+        movedDepositEvents: result.depositEvents,
       };
     },
     { body: t.Object({ to: t.Optional(t.String()) }) },
   )
 
   // 26. POST /api/:property/day/:date/pull-from-pms — inserts booking lines
-  // from the PMS payment ledger for :date (src/server/pms-prefill.ts,
-  // src/shared/api.md). Button-triggered only, insert-only and idempotent
-  // (never updates an existing row — hand edits are sacred). 503 when this
-  // property's PMS env URL is unset; 409 when the month is closed; a PMS
-  // query failure 502s with nothing inserted (fetchDayPayments throws
-  // BEFORE anything is written). Refunds are split out and counted in
-  // `skippedRefunds`, never inserted.
+  // AND deposit events from the PMS payment ledger for :date
+  // (src/server/pms-prefill.ts, src/shared/api.md, Wave C docs/adr/0001).
+  // Button-triggered only, insert-only and idempotent (never updates an
+  // existing row — hand edits are sacred). 503 when this property's PMS
+  // env URL is unset; 409 when the month is closed; a PMS query failure
+  // 502s with nothing inserted (fetchDayPayments throws BEFORE anything is
+  // written). Refunds are split out and counted in `skippedRefunds`, never
+  // inserted.
   //
   // Mirrors insertPmsBookingLines' AUTO-PLACEMENT POLICY (db.ts) exactly —
   // do not let these two drift apart: transfer is auto-placed into
@@ -959,6 +1061,14 @@ export const api = new Elysia({ prefix: "/api" })
   // credit/transfer amount actually written to a bank column, for the
   // caller's verification note. `unplaced` now only ever holds the one
   // genuinely-unresolvable case: hf credit.
+  //
+  // Wave C: deposit candidates (จ่ายล่วงหน้า/คืนเงินจองห้อง) found on a
+  // PRE-cutover date are never written — C7 gates importer deposit-event
+  // emission at the cutover the same way the hand-entry endpoints below do
+  // — instead they are folded into `anomalies` (reason
+  // `pre_cutover_deposit`) so the money is reported, never silently
+  // dropped. On/after cutover they insert via `insertPmsDepositEvents`
+  // (db.ts), additive alongside the booking-line insert above.
   .post("/:property/day/:date/pull-from-pms", async ({ params, identity, status }) => {
     const { property, date } = params;
     if (!isProperty(property)) return status(400, { error: "invalid property" });
@@ -967,20 +1077,72 @@ export const api = new Elysia({ prefix: "/api" })
     const blocked = closedMonthResponse(property, date, status);
     if (blocked) return blocked;
 
-    let candidates: PrefillCandidate[];
+    let bookingCandidates: PrefillCandidate[];
+    let depositCandidates: DepositCandidate[];
+    let anomalies: PrefillAnomaly[];
     try {
-      candidates = await fetchDayPayments(property, date);
+      ({ bookingCandidates, depositCandidates, anomalies } = await fetchDayPayments(property, date));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return status(502, { error: message });
     }
 
-    const refunds = candidates.filter((c) => c.isRefund);
-    const nonRefunds = candidates.filter((c) => !c.isRefund);
+    const accrual = isAccrualDay(property, date);
+    const allAnomalies = [...anomalies];
+
+    const refunds = bookingCandidates.filter((c) => c.isRefund);
+    let nonRefunds = bookingCandidates.filter((c) => !c.isRefund);
+
+    // F1 (Opus money-review, 2026-07-31): a ตัดยอดล่วงหน้า line found on a
+    // PRE-cutover date must NEVER write its applied amount — that deposit
+    // was already booked as income under the OLD rule (docs/adr/0001), so
+    // also writing t_deposit_applied would double-count it across the
+    // cutover (proven live: a pre-cutover pull wrote appliedDepositSatang
+    // even though depositsInserted stayed 0). Strip it BEFORE
+    // insertPmsBookingLines ever sees the candidate — never after — and
+    // report the stripped amount as an anomaly, mirroring the
+    // deposit-event branch below exactly. The room/other charge on the
+    // SAME candidate is still legitimate income either way, so the
+    // candidate itself is still inserted, just without the applied tender.
+    if (!accrual) {
+      nonRefunds = nonRefunds.map((c) => {
+        if (c.appliedDepositSatang === 0) return c;
+        allAnomalies.push({
+          pmsRef: c.pmsRef,
+          reason: "pre_cutover_deposit",
+          detail: `applied ${c.appliedDepositSatang}`,
+        });
+        return { ...c, appliedDepositSatang: 0, appliedDepositBookingNos: [] };
+      });
+    }
 
     const by = identity!.email;
     const { inserted, skipped } = insertPmsBookingLines(property, date, nonRefunds, by);
-    if (inserted > 0) {
+
+    let depositsInserted = 0;
+    let depositsSkipped = 0;
+    if (!accrual) {
+      // Pre-cutover: report every deposit candidate as an anomaly rather
+      // than writing a deposit_events row a pre-cutover day can never
+      // legitimately hold (see preCutoverResponse's doc comment for the
+      // hand-entry side of this same gate).
+      for (const candidate of depositCandidates) {
+        allAnomalies.push({
+          pmsRef: candidate.pmsRef,
+          reason: "pre_cutover_deposit",
+          detail: `${candidate.kind} ${candidate.tender} ${candidate.amountSatang}`,
+        });
+      }
+    } else {
+      ({ inserted: depositsInserted, skipped: depositsSkipped } = insertPmsDepositEvents(
+        property,
+        date,
+        depositCandidates,
+        by,
+      ));
+    }
+
+    if (inserted > 0 || depositsInserted > 0) {
       touchSheetDay(property, date, by);
       enqueueAnalyticsPush(property, date);
     }
@@ -1003,7 +1165,108 @@ export const api = new Elysia({ prefix: "/api" })
         tranSatang: 0,
       }));
 
-    return { inserted, skipped, skippedRefunds: refunds.length, unplaced, autoPlaced };
+    return {
+      inserted,
+      skipped,
+      skippedRefunds: refunds.length,
+      unplaced,
+      autoPlaced,
+      depositsInserted,
+      depositsSkipped,
+      anomalies: allAnomalies,
+    };
+  })
+
+  // 27. POST /api/:property/day/:date/deposits — hand-entry create for a
+  // received/refunded มัดจำล่วงหน้า moment (Wave C, docs/adr/0001). Mirrors
+  // the other-income CRUD shape (endpoint 17): closedMonthResponse gate,
+  // touchSheetDay + enqueueAnalyticsPush on write. Additionally refuses a
+  // pre-cutover date (preCutoverResponse) — a pre-cutover day can never
+  // legitimately hold a deposit event under the new model.
+  .post(
+    "/:property/day/:date/deposits",
+    ({ params, body, identity, status }) => {
+      const { property, date } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (!isValidIso(date)) return status(400, { error: "invalid date" });
+      const invalid = validateDepositEventInput(body);
+      if (invalid) return status(400, { error: invalid });
+      const gated = preCutoverResponse(property, date, status);
+      if (gated) return gated;
+      const blocked = closedMonthResponse(property, date, status);
+      if (blocked) return blocked;
+
+      const by = identity!.email;
+      const event = createDepositEvent(property, date, body as DepositEventInput, by);
+      touchSheetDay(property, date, by);
+      enqueueAnalyticsPush(property, date);
+      return status(201, event);
+    },
+    {
+      body: t.Object({
+        kind: t.String(),
+        bookingNo: t.Optional(t.Union([t.String(), t.Null()])),
+        guestName: t.Optional(t.Union([t.String(), t.Null()])),
+        tender: t.String(),
+        amountSatang: t.Number(),
+        note: t.Optional(t.Union([t.String(), t.Null()])),
+      }),
+    },
+  )
+
+  // 28. PATCH /api/:property/deposits/:id
+  .patch(
+    "/:property/deposits/:id",
+    ({ params, body, identity, status }) => {
+      const { property } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      const id = Number(params.id);
+      if (!Number.isInteger(id)) return status(404, { error: "deposit event not found" });
+      const existing = getDepositEventById(property, id);
+      if (!existing) return status(404, { error: "deposit event not found" });
+      const invalid = validateDepositEventInput(body);
+      if (invalid) return status(400, { error: invalid });
+      const gated = preCutoverResponse(property, existing.date, status);
+      if (gated) return gated;
+      const blocked = closedMonthResponse(property, existing.date, status);
+      if (blocked) return blocked;
+
+      const by = identity!.email;
+      const updated = updateDepositEvent(property, id, body as DepositEventInput, by);
+      if (!updated) return status(404, { error: "deposit event not found" });
+      touchSheetDay(property, updated.date, by);
+      enqueueAnalyticsPush(property, updated.date);
+      return updated;
+    },
+    {
+      body: t.Object({
+        kind: t.Optional(t.String()),
+        bookingNo: t.Optional(t.Union([t.String(), t.Null()])),
+        guestName: t.Optional(t.Union([t.String(), t.Null()])),
+        tender: t.Optional(t.String()),
+        amountSatang: t.Optional(t.Number()),
+        note: t.Optional(t.Union([t.String(), t.Null()])),
+      }),
+    },
+  )
+
+  // 29. DELETE /api/:property/deposits/:id
+  .delete("/:property/deposits/:id", ({ params, identity, status }) => {
+    const { property } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    const id = Number(params.id);
+    if (!Number.isInteger(id)) return status(404, { error: "deposit event not found" });
+    const existing = getDepositEventById(property, id);
+    if (!existing) return status(404, { error: "deposit event not found" });
+    const gated = preCutoverResponse(property, existing.date, status);
+    if (gated) return gated;
+    const blocked = closedMonthResponse(property, existing.date, status);
+    if (blocked) return blocked;
+
+    deleteDepositEvent(property, id);
+    touchSheetDay(property, existing.date, identity!.email);
+    enqueueAnalyticsPush(property, existing.date);
+    return status(204);
   });
 
 const apiFetch = (req: Request) => api.handle(req);

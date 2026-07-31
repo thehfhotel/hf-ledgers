@@ -87,12 +87,13 @@ const {
 describe("Wave B โอน/เครดิต split migration (migrateTransferCreditSplit, via a real migrate() boot)", () => {
   // T2: the roll-back fixture must actually produce a legacy shape, or
   // every assertion below would pass vacuously against an already-split DB.
-  test("sanity: the fixture's pre-migrate hf is genuinely legacy-shaped (eleven income categories, old names, no เครดิต siblings)", () => {
+  test("sanity: the fixture's pre-migrate hf is genuinely legacy-shaped (eleven income categories, old names, no เครดิต siblings, no deposit_applied)", () => {
     const income = beforeMigrate.hf;
     expect(income).toHaveLength(11);
     expect(income.some((c) => c.key === "deposit_credit")).toBe(false);
     expect(income.some((c) => c.key === "other_credit")).toBe(false);
     expect(income.some((c) => c.key === "bar_credit")).toBe(false);
+    expect(income.some((c) => c.key === "deposit_applied")).toBe(false);
     expect(byKey(income, "deposit").name).toBe("มัดจำล่วงหน้า");
     expect(byKey(income, "bar_transfer").name).toBe("บาร์น้ำ โอน/เครดิต");
     expect(byKey(income, "other_transfer").name).toBe(CUSTOM_OTHER_TRANSFER_NAME);
@@ -108,22 +109,27 @@ describe("Wave B โอน/เครดิต split migration (migrateTransferCr
     expect(byKey(afterFirstMigrate.hf, "other_transfer").name).toBe(CUSTOM_OTHER_TRANSFER_NAME);
   });
 
-  test("hf: seeds the three เครดิต siblings exactly once, adjacent to their โอน partner in sort order", () => {
+  test("hf: seeds the three เครดิต siblings AND deposit_applied exactly once, each adjacent to its partner in sort order", () => {
     const income = afterFirstMigrate.hf;
-    expect(income).toHaveLength(14);
+    expect(income).toHaveLength(15);
 
     expect(byKey(income, "deposit_credit").name).toBe("มัดจำล่วงหน้า เครดิต");
     expect(byKey(income, "other_credit").name).toBe("รายการอื่นๆ เครดิต");
     expect(byKey(income, "bar_credit").name).toBe("บาร์น้ำ เครดิต");
-    for (const key of ["deposit_credit", "other_credit", "bar_credit"]) expect(byKey(income, key).isCash).toBe(false);
+    expect(byKey(income, "deposit_applied").name).toBe("มัดจำล่วงหน้า (ตัดยอด)");
+    for (const key of ["deposit_credit", "other_credit", "bar_credit", "deposit_applied"]) {
+      expect(byKey(income, key).isCash).toBe(false);
+    }
 
-    // Adjacency: each เครดิต sibling sits immediately after its โอน partner
-    // once sorted, and sort stays a dense, gap-free, duplicate-free 0..13
-    // sequence — the migration shifted everything after each insertion
-    // point rather than leaving a hole or colliding two rows on one value.
-    expect(income.map((c) => c.sort)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    // Adjacency: each เครดิต sibling (and deposit_applied) sits immediately
+    // after its partner once sorted, and sort stays a dense, gap-free,
+    // duplicate-free 0..14 sequence — the migrations shifted everything
+    // after each insertion point rather than leaving a hole or colliding
+    // two rows on one value.
+    expect(income.map((c) => c.sort)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     const indexOf = (key: string) => income.findIndex((c) => c.key === key);
     expect(indexOf("deposit_credit")).toBe(indexOf("deposit") + 1);
+    expect(indexOf("deposit_applied")).toBe(indexOf("deposit_credit") + 1);
     expect(indexOf("other_credit")).toBe(indexOf("other_transfer") + 1);
     expect(indexOf("bar_credit")).toBe(indexOf("bar_transfer") + 1);
   });
@@ -136,11 +142,12 @@ describe("Wave B โอน/เครดิต split migration (migrateTransferCr
     expect(amountsAfterFirstMigrate).toEqual(amountsBeforeMigrate);
   });
 
-  test("hfville: a property untouched since its original fresh seed is already pre-split (fourteen income categories, no rename needed)", () => {
+  test("hfville: a property untouched since its original fresh seed is already pre-split (fifteen income categories, no rename needed)", () => {
     const income = afterFirstMigrate.hfville;
-    expect(income).toHaveLength(14);
+    expect(income).toHaveLength(15);
     expect(byKey(income, "deposit").name).toBe("มัดจำล่วงหน้า โอน");
     expect(byKey(income, "deposit_credit").name).toBe("มัดจำล่วงหน้า เครดิต");
+    expect(byKey(income, "deposit_applied").name).toBe("มัดจำล่วงหน้า (ตัดยอด)");
   });
 
   test("idempotent: calling migrate() again (twice more) does not duplicate categories, re-touch names, or disturb sort", () => {
@@ -152,8 +159,9 @@ describe("Wave B โอน/เครดิต split migration (migrateTransferCr
 });
 
 // F2 / T3: the active-name UNIQUE index (idx_categories_active_name) means
-// a manager-created category can independently collide with one of the six
-// rename/insert targets. Before the fix, that collision threw inside
+// a manager-created category can independently collide with one of the
+// rename/insert targets (six from Wave B, plus deposit_applied's own INSERT
+// target from Wave C). Before the fix, that collision threw inside
 // migrate() at module top level — the process died before Bun.serve, and
 // restart:unless-stopped crash-looped the container. This must now be
 // structurally impossible: skip the individual colliding operation, log
@@ -161,11 +169,11 @@ describe("Wave B โอน/เครดิต split migration (migrateTransferCr
 describe("F2 collision guard: a manager-created category blocking a target name", () => {
   const collisionResult = runFixture("collision");
 
-  test("migrate() does not throw / crash the process when two target names are already taken", () => {
+  test("migrate() does not throw / crash the process when three target names are already taken", () => {
     expect(collisionResult.success).toBe(true);
   });
 
-  test("the colliding INSERT (bar_credit) and RENAME (deposit) are skipped; every unaffected pair still completes", () => {
+  test("the colliding INSERTs (bar_credit, deposit_applied) and RENAME (deposit) are skipped; every unaffected pair still completes", () => {
     const lastLine = collisionResult.stdout.toString().trim().split("\n").pop() ?? "";
     const { hf }: CollisionFixtureOutput = JSON.parse(lastLine);
 
@@ -181,8 +189,15 @@ describe("F2 collision guard: a manager-created category blocking a target name"
     expect(byKey(hf, "deposit").name).toBe("มัดจำล่วงหน้า");
     expect(hf.filter((c) => c.key === null && c.name === "มัดจำล่วงหน้า โอน")).toHaveLength(1);
 
+    // Blocked (Wave C): deposit_applied's insert target "มัดจำล่วงหน้า
+    // (ตัดยอด)" was already active on a manager-created category — the
+    // insert must be skipped, not crash, and not hijack the manager's
+    // category.
+    expect(hf.some((c) => c.key === "deposit_applied")).toBe(false);
+    expect(hf.filter((c) => c.key === null && c.name === "มัดจำล่วงหน้า (ตัดยอด)")).toHaveLength(1);
+
     // Unaffected pairs still complete fully, proving the guard is scoped to
-    // exactly the two colliding operations and nothing else stalls with it.
+    // exactly the three colliding operations and nothing else stalls with it.
     expect(byKey(hf, "deposit_credit").name).toBe("มัดจำล่วงหน้า เครดิต"); // insert unblocked, even though deposit's OWN rename was blocked
     expect(byKey(hf, "bar_transfer").name).toBe("บาร์น้ำ โอน"); // rename unblocked, even though bar's OWN insert was blocked
     expect(byKey(hf, "other_credit").name).toBe("รายการอื่นๆ เครดิต");

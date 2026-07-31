@@ -64,3 +64,12 @@ guest is not charged twice. The income ledger reads both. No new capture UI, no 
 app, and no deposit entry surface in this app — see issue #4 for the import specifics, including
 that voided rows carry `ledger_status = 'ยกเลิก'` while `book_deposit_amount` on the booking header
 is left stale, so the payment ledger is the only trustworthy source.
+
+**Correction (Wave C build, 2026-07-31 — the plan's C1 section superseded the "no deposit entry
+surface" line above):** the built app DOES carry one narrow hand-entry surface after all — a
+`deposit_events` CRUD (mirroring `other_income_items`'s shape exactly), entered/edited on the
+bookings page with a read-only mirror on the day-sheet page. This is deliberately an OFFICE
+correction/backfill surface, not reception capture: it exists so the office can record a deposit
+the PMS import missed or needs correcting, the same way `other_income_items` lets the office record
+non-booking revenue by hand — iHOTEL's จ่ายล่วงหน้า/ตัดยอดล่วงหน้า feature remains the primary
+capture point this ADR describes, and reception still never touches this app.

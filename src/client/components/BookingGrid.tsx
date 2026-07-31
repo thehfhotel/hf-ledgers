@@ -1,6 +1,6 @@
 import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { computeBookingTotals, lineArithmeticMismatch } from "../../shared/bookings.ts";
-import { parseAmountToSatang } from "../../shared/money.ts";
+import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import { shouldLeaveCell, stepColumn, stepRow } from "../../shared/gridNav.ts";
 import {
@@ -52,22 +52,6 @@ function parseCount(text: string): number | null {
 // index = lines.length) is just "the next row down" with no special case.
 // The decisions that do not need the DOM live in shared/gridNav.ts.
 
-/** Left-to-right editable column order, the same order the cells are emitted
- *  in below. Built from TENDERS so the money block can never drift out of
- *  step with the printed sheet. */
-const NAV_COLUMNS: readonly string[] = [
-  "bookingNo",
-  "guestName",
-  "roomNo",
-  "roomCount",
-  "nights",
-  "grossRoomSatang",
-  "grossOtherSatang",
-  "discountSatang",
-  ...TENDERS,
-  "remark",
-];
-
 /** Focus the cell at (col,row) if it exists and is editable. Re-queried live
  *  every time — an uncontrolled cell's <input> is replaced whenever its
  *  committed value changes, so a cached ref would point at a dead node. */
@@ -80,6 +64,21 @@ function focusCell(table: HTMLTableElement | null, col: string, row: number): bo
   // plain focus() can park the row beneath one of them.
   next.scrollIntoView({ block: "nearest", inline: "nearest" });
   return true;
+}
+
+/** The grid's actual left-to-right editable column order, read live from
+ * row 0's own `data-col` attributes rather than a fixed module constant —
+ * Wave C (shared/accrual.ts): which 8 tender columns are visible varies by
+ * date, so a hardcoded `NAV_COLUMNS` list would drift from whatever
+ * `visibleTendersForDate()` actually rendered. Row 0 always exists (the
+ * first booking, or the blank new row on an empty day), and its cells are
+ * emitted in the exact same left-to-right order as every other row. */
+function readNavColumns(table: HTMLTableElement | null): readonly string[] {
+  if (!table) return [];
+  const cells = table.querySelectorAll<HTMLElement>('[data-row="0"]');
+  return Array.from(cells)
+    .map((el) => el.dataset.col)
+    .filter((col): col is string => col !== undefined);
 }
 
 function gridKeys(event: ReactKeyboardEvent<HTMLInputElement>) {
@@ -114,7 +113,7 @@ function gridKeys(event: ReactKeyboardEvent<HTMLInputElement>) {
     const dir = event.key === "ArrowLeft" ? "left" : "right";
     // Inside the text, the arrow is the caret's — only step out at the edge.
     if (!shouldLeaveCell(dir, el.selectionStart, el.selectionEnd, el.value.length)) return;
-    const target = stepColumn(col, dir, NAV_COLUMNS);
+    const target = stepColumn(col, dir, readNavColumns(table));
     if (!target) return;
     event.preventDefault();
     focusCell(table, target, row);
@@ -325,6 +324,11 @@ interface BookingGridProps {
   /** Already sorted by seq. */
   lines: BookingLine[];
   disabled: boolean;
+  /** The 8 tender columns to render for this date — see
+   *  shared/accrual.ts's `visibleTendersForDate()`. Caller-computed (once,
+   *  from `property`+`date`) rather than recomputed here, since this
+   *  component has no date of its own. */
+  visibleTenders: readonly Tender[];
   onPatch: (line: BookingLine, patch: BookingLineInput) => void;
   /** Resolves false when the row could not be saved, so the typed values can
    *  be put back in the blank row instead of being lost. */
@@ -335,8 +339,13 @@ interface BookingGridProps {
 /** Key for a หมายเหตุ draft: a saved row by id, the blank bottom row as "new". */
 const NEW_ROW_REMARK_KEY = "new";
 
-export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: BookingGridProps) {
+export function BookingGrid({ lines, disabled, visibleTenders, onPatch, onCreate, onDelete }: BookingGridProps) {
   const totals = computeBookingTotals(lines);
+  // The one tender NOT visible today (deposit pre-cutover, deposit_applied
+  // on/after — see shared/accrual.ts) — a line carrying stray money there
+  // would otherwise be invisible on screen. Exactly one match by
+  // construction (visibleTenders is always 8 of TENDERS' 9).
+  const hiddenTender = TENDERS.find((tender) => !visibleTenders.includes(tender));
   // The draft lives in a ref as well as state: a cell's own onBlur and the
   // row's bubbling onBlur run in the SAME event, so the row handler would
   // otherwise read a pre-update copy and drop the last cell typed.
@@ -425,8 +434,8 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
         className="w-full min-w-[1360px] border-separate border-spacing-0 bg-panel text-sm"
         style={{ tableLayout: "fixed" }}
       >
-        <BookingGridColgroup withActions />
-        <BookingGridHead withActions sticky />
+        <BookingGridColgroup tenders={visibleTenders} withActions />
+        <BookingGridHead tenders={visibleTenders} withActions sticky />
 
         <tbody>
           {lines.map((line, rowIndex) => (
@@ -435,6 +444,8 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
               line={line}
               row={rowIndex}
               disabled={disabled}
+              visibleTenders={visibleTenders}
+              hiddenTender={hiddenTender}
               onPatch={(patch) => onPatch(line, patch)}
               onDelete={() => onDelete(line)}
               onRemarkDraft={(text) => setRemarkDraft(String(line.id), text)}
@@ -534,7 +545,7 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
                 onCommit={(discountSatang) => patchDraft({ discountSatang })}
               />
             </td>
-            {TENDERS.map((tender) => (
+            {visibleTenders.map((tender) => (
               <td key={tender} className={CELL}>
                 <MoneyCell
                   row={newRow}
@@ -565,7 +576,7 @@ export function BookingGrid({ lines, disabled, onPatch, onCreate, onDelete }: Bo
 
         {/* Totals pinned at the bottom — every figure from
             computeBookingTotals(), never recomputed here. */}
-        <BookingGridFoot totals={totals} withActions sticky />
+        <BookingGridFoot tenders={visibleTenders} totals={totals} withActions sticky />
       </table>
     </div>
 
@@ -605,6 +616,11 @@ interface BookingRowProps {
   line: BookingLine;
   row: number;
   disabled: boolean;
+  visibleTenders: readonly Tender[];
+  /** The one tender not shown today (deposit pre-cutover, deposit_applied
+   *  on/after — see BookingGrid's own doc comment) — undefined only in the
+   *  defensive/unreachable case where every tender is somehow visible. */
+  hiddenTender: Tender | undefined;
   onPatch: (patch: BookingLineInput) => void;
   onDelete: () => void;
   onRemarkDraft: (text: string) => void;
@@ -616,6 +632,8 @@ function BookingRow({
   line,
   row,
   disabled,
+  visibleTenders,
+  hiddenTender,
   onPatch,
   onDelete,
   onRemarkDraft,
@@ -623,6 +641,10 @@ function BookingRow({
   warnRemarkAmountInText,
 }: BookingRowProps) {
   const mismatch = !line.draft && lineArithmeticMismatch(line);
+  // Wave C: a hidden column can still hold money (e.g. a legacy `deposit`
+  // value on a row dated after this property's accrual cutover) — flag it
+  // rather than let it go quietly invisible on screen.
+  const hiddenColumnHoldsMoney = hiddenTender !== undefined && line.tenders[hiddenTender] !== 0;
 
   return (
     <tr className={line.draft ? "bg-gold-50 hover:bg-gold-100" : "hover:bg-tint"}>
@@ -635,6 +657,15 @@ function BookingRow({
             className="ml-0.5 align-super text-[11px] font-bold text-warn"
           >
             *
+          </span>
+        )}
+        {hiddenColumnHoldsMoney && hiddenTender && (
+          <span
+            title={`มีเงินอยู่ในช่อง "${TENDER_LABELS_TH[hiddenTender]}" ซึ่งไม่แสดงในตารางนี้ (${formatSatang(line.tenders[hiddenTender])} บาท)`}
+            aria-label="มีเงินในคอลัมน์ที่ซ่อนอยู่"
+            className="ml-0.5 align-super text-[11px] font-bold text-warn"
+          >
+            !
           </span>
         )}
         {line.draft && (
@@ -740,7 +771,7 @@ function BookingRow({
           onCommit={(discountSatang) => onPatch({ discountSatang })}
         />
       </td>
-      {TENDERS.map((tender) => (
+      {visibleTenders.map((tender) => (
         <td key={tender} className={CELL}>
           <MoneyCell
             row={row}

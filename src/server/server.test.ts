@@ -13,7 +13,7 @@ import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../client/cashBlockPatches.ts";
 import { REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
 import type { CashBlock, Category, CategoryKey, Property, Tender } from "../shared/types.ts";
-import type { PrefillCandidate } from "./pms-prefill.ts";
+import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
 
 const { api } = await import("./server.ts");
 // server.ts already imported pms-prefill.ts above, so this re-import just
@@ -64,13 +64,23 @@ beforeAll(async () => {
 });
 
 describe("category seed and category_key", () => {
-  test("seeds fourteen income categories, including the split รายการอื่นๆ and โอน/เครดิต pairs", () => {
+  test("seeds fifteen income categories, including the split รายการอื่นๆ, โอน/เครดิต pairs, and the Wave C deposit_applied category", () => {
     const income = categories.filter((c) => c.kind === "income");
-    expect(income).toHaveLength(14);
+    expect(income).toHaveLength(15);
     expect(income.find((c) => c.categoryKey === "other_cash")?.nameTh).toBe("รายการอื่นๆ เงินสด");
     expect(income.find((c) => c.categoryKey === "other_transfer")?.nameTh).toBe("รายการอื่นๆ โอน");
     expect(income.find((c) => c.categoryKey === "other_cash")?.isCash).toBe(true);
     expect(income.find((c) => c.categoryKey === "other_transfer")?.isCash).toBe(false);
+  });
+
+  // Wave C (docs/adr/0001): the accrual-era category, seeded right after
+  // deposit_credit.
+  test("seeds deposit_applied ('มัดจำล่วงหน้า (ตัดยอด)') immediately after deposit_credit", () => {
+    const income = categories.filter((c) => c.kind === "income");
+    expect(income.find((c) => c.categoryKey === "deposit_applied")?.nameTh).toBe("มัดจำล่วงหน้า (ตัดยอด)");
+    expect(income.find((c) => c.categoryKey === "deposit_applied")?.isCash).toBe(false);
+    const indexOf = (key: string) => income.findIndex((c) => c.categoryKey === key);
+    expect(indexOf("deposit_applied")).toBe(indexOf("deposit_credit") + 1);
   });
 
   // Wave B (docs/plan-unify-exports-tender-split.md item 2): the three
@@ -280,6 +290,7 @@ describe("fill-from-bookings", () => {
       grossRoomSatang: 700_000,
       tenders: {
         deposit: 10_000,
+        deposit_applied: 0,
         cash: 20_000,
         credit_kbank: 30_000,
         credit_icbc: 40_000,
@@ -341,7 +352,17 @@ describe("fill-from-bookings", () => {
     const list = await call<{ lines: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
     const lineId = list.body.lines[0]!.id;
     await call("PATCH", `/${PROPERTY}/bookings/${lineId}`, {
-      tenders: { deposit: 0, cash: 20_000, credit_kbank: 30_000, credit_icbc: 40_000, transfer_kbank: 50_000, transfer_icbc: 60_000, web: 70_000, other: 15_000 },
+      tenders: {
+        deposit: 0,
+        deposit_applied: 0,
+        cash: 20_000,
+        credit_kbank: 30_000,
+        credit_icbc: 40_000,
+        transfer_kbank: 50_000,
+        transfer_icbc: 60_000,
+        web: 70_000,
+        other: 15_000,
+      },
     });
 
     const applied = await call<{ diff: Array<{ categoryKey: CategoryKey }> }>(
@@ -865,6 +886,45 @@ describe("move a booking day to the other property", () => {
       expect(destDay.body.otherIncome).toHaveLength(1);
       expect(destDay.body.otherIncome[0]?.amountSatang).toBe(2_000);
     });
+
+    // F2 (Opus money-review, 2026-07-31): moveBookingDay used to strand
+    // deposit_events on the origin property — a moved day's cash มัดจำล่วงหน้า
+    // kept reaching the WRONG side's ยอดฝากจริง forever. Needs a post-cutover
+    // date, since deposit_events writes are gated by isAccrualDay.
+    test("F2 regression: also moves this day's deposit_events, so the destination's cash block picks up the deposit cash", async () => {
+      const DEPOSIT_DATE = "2026-08-23"; // on/after the 2026-07-31 cutover
+      await call("POST", `/${PROPERTY}/day/${DEPOSIT_DATE}/deposits`, {
+        kind: "received",
+        bookingNo: "R020010",
+        guestName: "ทดสอบ ย้ายมัดจำ",
+        tender: "cash",
+        amountSatang: 89_000,
+        note: null,
+      });
+
+      const moved = await call<{ movedBookingLines: number; movedOtherIncome: number; movedDepositEvents: number }>(
+        "POST",
+        `/${PROPERTY}/day/${DEPOSIT_DATE}/move`,
+        { to: OTHER },
+      );
+      expect(moved.status).toBe(200);
+      expect(moved.body.movedDepositEvents).toBe(1);
+
+      const sourceDay = await call<{ deposits: unknown[]; cashBlock: { depositCashInSatang: number } }>(
+        "GET",
+        `/${PROPERTY}/day/${DEPOSIT_DATE}`,
+      );
+      expect(sourceDay.body.deposits).toEqual([]);
+      expect(sourceDay.body.cashBlock.depositCashInSatang).toBe(0);
+
+      const destDay = await call<{
+        deposits: Array<{ bookingNo: string | null; amountSatang: number }>;
+        cashBlock: { depositCashInSatang: number };
+      }>("GET", `/${OTHER}/day/${DEPOSIT_DATE}`);
+      expect(destDay.body.deposits).toHaveLength(1);
+      expect(destDay.body.deposits[0]).toMatchObject({ bookingNo: "R020010", amountSatang: 89_000 });
+      expect(destDay.body.cashBlock.depositCashInSatang).toBe(89_000);
+    });
   });
 
   describe("merge into a non-empty destination", () => {
@@ -994,6 +1054,9 @@ describe("move a booking day to the other property", () => {
 describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
   // "hf" is PROPERTY's env URL per the locked env-var mapping
   // (PMS_DB_URL_HF / PMS_DB_URL_HFVILLE) — see pms-prefill.ts / api.md.
+  // All dates in this describe block are on/after both properties' accrual
+  // cutover (2026-07-31, shared/accrual.ts) unless a test says otherwise —
+  // see the dedicated "pre-cutover" describe block below for that gate.
   function pmsCandidate(overrides: Partial<PrefillCandidate> = {}): PrefillCandidate {
     return {
       pmsRef: "R2608-0000",
@@ -1004,15 +1067,38 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
       nights: 1,
       grossRoomSatang: 100_000,
       grossOtherSatang: 0,
-      depositSatang: 0,
       cashSatang: 0,
       webSatang: 0,
       unplacedCreditSatang: 0,
       unplacedTranSatang: 0,
+      appliedDepositSatang: 0,
+      appliedDepositBookingNos: [],
       isRefund: false,
-      isDeposit: false,
       ...overrides,
     };
+  }
+
+  function depositCandidate(overrides: Partial<DepositCandidate> = {}): DepositCandidate {
+    return {
+      pmsRef: "R2608-9000",
+      kind: "received",
+      bookingNo: "R014000",
+      guestName: "ทดสอบ มัดจำ",
+      tender: "cash",
+      amountSatang: 50_000,
+      note: null,
+      ...overrides,
+    };
+  }
+
+  /** Wraps booking/deposit candidate arrays into the fetchDayPayments
+   * MapLedgerRowsResult shape the test override now returns. */
+  function pmsResult(
+    bookingCandidates: PrefillCandidate[] = [],
+    depositCandidates: DepositCandidate[] = [],
+    anomalies: PrefillAnomaly[] = [],
+  ) {
+    return { bookingCandidates, depositCandidates, anomalies };
   }
 
   // Every test starts from env unset; tests that need it configured set it
@@ -1038,18 +1124,21 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
 
     await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, { guestName: "จองด้วยมือก่อน", tenders: zeroTenders() });
 
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
-      pmsCandidate({
-        pmsRef: "R2608-0101",
-        bookingNo: "CH26-000101",
-        roomNo: "101",
-        cashSatang: 100_000,
-        depositSatang: 20_000,
-        unplacedTranSatang: 30_000,
-        unplacedCreditSatang: 12_000,
-      }),
-      pmsCandidate({ pmsRef: "R2608-0102", bookingNo: "CH26-000102", roomNo: "102", webSatang: 75_000 }),
-    ]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      pmsResult([
+        pmsCandidate({
+          pmsRef: "R2608-0101",
+          bookingNo: "CH26-000101",
+          roomNo: "101",
+          cashSatang: 100_000,
+          appliedDepositSatang: 20_000,
+          appliedDepositBookingNos: ["R014843"],
+          unplacedTranSatang: 30_000,
+          unplacedCreditSatang: 12_000,
+        }),
+        pmsCandidate({ pmsRef: "R2608-0102", bookingNo: "CH26-000102", roomNo: "102", webSatang: 75_000 }),
+      ]),
+    );
 
     const pulled = await call<{
       inserted: number;
@@ -1057,11 +1146,17 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
       skippedRefunds: number;
       unplaced: Array<{ pmsRef: string; bookingNo: string | null; creditSatang: number; tranSatang: number }>;
       autoPlaced: Array<{ pmsRef: string; bookingNo: string | null; transferSatang: number; creditSatang: number }>;
+      depositsInserted: number;
+      depositsSkipped: number;
+      anomalies: unknown[];
     }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
     expect(pulled.status).toBe(200);
     expect(pulled.body.inserted).toBe(2);
     expect(pulled.body.skipped).toBe(0);
     expect(pulled.body.skippedRefunds).toBe(0);
+    expect(pulled.body.depositsInserted).toBe(0);
+    expect(pulled.body.depositsSkipped).toBe(0);
+    expect(pulled.body.anomalies).toEqual([]);
     // hf: credit cannot be inferred (two banks in use there) — stays unplaced.
     expect(pulled.body.unplaced).toEqual([
       { pmsRef: "R2608-0101", bookingNo: "CH26-000101", creditSatang: 12_000, tranSatang: 0 },
@@ -1077,6 +1172,7 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
         bookingNo: string | null;
         source: string;
         draft: boolean;
+        remark: string | null;
         tenders: Record<Tender, number>;
       }>;
     }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
@@ -1086,7 +1182,11 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     expect(first.source).toBe("pms");
     expect(first.draft).toBe(false);
     expect(first.tenders.cash).toBe(100_000);
-    expect(first.tenders.deposit).toBe(20_000);
+    // Wave C: t_deposit is NEVER written by the importer any more — the
+    // applied amount lands in the ninth tender instead.
+    expect(first.tenders.deposit).toBe(0);
+    expect(first.tenders.deposit_applied).toBe(20_000);
+    expect(first.remark).toBe("ตัดยอดมัดจำ: R014843");
     // transfer_kbank now carries the auto-placed amount (the fixed money bug).
     expect(first.tenders.transfer_kbank).toBe(30_000);
     // credit stays unwritten on "hf" — two credit banks in use, cannot be inferred.
@@ -1106,15 +1206,17 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     const HFVILLE = "hfville";
     const DATE = "2026-08-02";
 
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
-      pmsCandidate({
-        pmsRef: "R2608-0501",
-        bookingNo: "CH26-000501",
-        cashSatang: 10_000,
-        unplacedCreditSatang: 18_000,
-        unplacedTranSatang: 5_000,
-      }),
-    ]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      pmsResult([
+        pmsCandidate({
+          pmsRef: "R2608-0501",
+          bookingNo: "CH26-000501",
+          cashSatang: 10_000,
+          unplacedCreditSatang: 18_000,
+          unplacedTranSatang: 5_000,
+        }),
+      ]),
+    );
 
     const pulled = await call<{
       inserted: number;
@@ -1142,9 +1244,11 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const DATE = "2026-08-08";
 
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
-      pmsCandidate({ pmsRef: "R2608-0601", bookingNo: "CH26-000601", cashSatang: 20_000, unplacedCreditSatang: 9_000 }),
-    ]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      pmsResult([
+        pmsCandidate({ pmsRef: "R2608-0601", bookingNo: "CH26-000601", cashSatang: 20_000, unplacedCreditSatang: 9_000 }),
+      ]),
+    );
 
     const pulled = await call<{
       unplaced: Array<{ pmsRef: string; bookingNo: string | null; creditSatang: number; tranSatang: number }>;
@@ -1173,16 +1277,18 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const DATE = "2026-08-09";
 
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
-      pmsCandidate({
-        pmsRef: "R2607-0701",
-        bookingNo: "CH26-000701",
-        grossRoomSatang: 250_000,
-        grossOtherSatang: 0,
-        cashSatang: 125_000,
-        unplacedTranSatang: 125_000,
-      }),
-    ]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      pmsResult([
+        pmsCandidate({
+          pmsRef: "R2607-0701",
+          bookingNo: "CH26-000701",
+          grossRoomSatang: 250_000,
+          grossOtherSatang: 0,
+          cashSatang: 125_000,
+          unplacedTranSatang: 125_000,
+        }),
+      ]),
+    );
 
     const pulled = await call<{ inserted: number }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
     expect(pulled.body.inserted).toBe(1);
@@ -1200,10 +1306,12 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const DATE = "2026-08-03";
 
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
-      pmsCandidate({ pmsRef: "R2608-0201", bookingNo: "CH26-000201", cashSatang: 50_000 }),
-      pmsCandidate({ pmsRef: "R2608-0202", bookingNo: "CH26-000202", webSatang: 25_000 }),
-    ]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      pmsResult([
+        pmsCandidate({ pmsRef: "R2608-0201", bookingNo: "CH26-000201", cashSatang: 50_000 }),
+        pmsCandidate({ pmsRef: "R2608-0202", bookingNo: "CH26-000202", webSatang: 25_000 }),
+      ]),
+    );
 
     const first = await call<{ inserted: number; skipped: number }>(
       "POST",
@@ -1227,10 +1335,12 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const DATE = "2026-08-04";
 
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
-      pmsCandidate({ pmsRef: "R2608-0301", bookingNo: "CH26-000301", cashSatang: 40_000 }),
-      pmsCandidate({ pmsRef: "R2608-0302", bookingNo: "CH26-000302", cashSatang: -10_000, isRefund: true }),
-    ]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      pmsResult([
+        pmsCandidate({ pmsRef: "R2608-0301", bookingNo: "CH26-000301", cashSatang: 40_000 }),
+        pmsCandidate({ pmsRef: "R2608-0302", bookingNo: "CH26-000302", cashSatang: -10_000, isRefund: true }),
+      ]),
+    );
 
     const pulled = await call<{ inserted: number; skipped: number; skippedRefunds: number }>(
       "POST",
@@ -1252,21 +1362,23 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const DATE = "2026-08-05";
 
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
-      pmsCandidate({
-        pmsRef: "R2608-0401",
-        bookingNo: "CH26-000401",
-        cashSatang: 10_000,
-        unplacedCreditSatang: 15_000,
-      }),
-      pmsCandidate({
-        pmsRef: "R2608-0402",
-        bookingNo: "CH26-000402",
-        webSatang: 5_000,
-        unplacedTranSatang: 8_000,
-      }),
-      pmsCandidate({ pmsRef: "R2608-0403", bookingNo: "CH26-000403", cashSatang: 1_000 }), // fully placed
-    ]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+      pmsResult([
+        pmsCandidate({
+          pmsRef: "R2608-0401",
+          bookingNo: "CH26-000401",
+          cashSatang: 10_000,
+          unplacedCreditSatang: 15_000,
+        }),
+        pmsCandidate({
+          pmsRef: "R2608-0402",
+          bookingNo: "CH26-000402",
+          webSatang: 5_000,
+          unplacedTranSatang: 8_000,
+        }),
+        pmsCandidate({ pmsRef: "R2608-0403", bookingNo: "CH26-000403", cashSatang: 1_000 }), // fully placed
+      ]),
+    );
 
     const pulled = await call<{
       unplaced: Array<{ pmsRef: string; bookingNo: string | null; creditSatang: number; tranSatang: number }>;
@@ -1286,7 +1398,7 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const MONTH = "2026-09";
     const DATE = "2026-09-15";
-    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [pmsCandidate({ pmsRef: "R2609-0001" })]);
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => pmsResult([pmsCandidate({ pmsRef: "R2609-0001" })]));
 
     await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
     const res = await call("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
@@ -1321,5 +1433,287 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const configured = await call<{ pmsPull: boolean }>("GET", `/${PROPERTY}/day/${DATE}/bookings`);
     expect(configured.body.pmsPull).toBe(true);
+  });
+
+  // ── Wave C: deposit events ride along the same pull ────────────────────
+  describe("deposit events (Wave C, docs/adr/0001)", () => {
+    test("inserts received + refunded deposit candidates as deposit_events, idempotently", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      const DATE = "2026-08-10";
+
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult(
+          [],
+          [
+            depositCandidate({ pmsRef: "R2608-9001", kind: "received", bookingNo: "R014001", tender: "cash", amountSatang: 89_000 }),
+            depositCandidate({ pmsRef: "R2608-9002", kind: "refunded", bookingNo: "R014002", tender: "transfer", amountSatang: 39_500 }),
+          ],
+        ),
+      );
+
+      const first = await call<{ depositsInserted: number; depositsSkipped: number; anomalies: unknown[] }>(
+        "POST",
+        `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+      );
+      expect(first.body.depositsInserted).toBe(2);
+      expect(first.body.depositsSkipped).toBe(0);
+      expect(first.body.anomalies).toEqual([]);
+
+      const day = await call<{ deposits: Array<{ kind: string; bookingNo: string | null; amountSatang: number }> }>(
+        "GET",
+        `/${PROPERTY}/day/${DATE}`,
+      );
+      expect(day.body.deposits).toHaveLength(2);
+      expect(day.body.deposits.find((d) => d.bookingNo === "R014001")).toMatchObject({ kind: "received", amountSatang: 89_000 });
+      expect(day.body.deposits.find((d) => d.bookingNo === "R014002")).toMatchObject({ kind: "refunded", amountSatang: 39_500 });
+
+      const second = await call<{ depositsInserted: number; depositsSkipped: number }>(
+        "POST",
+        `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+      );
+      expect(second.body.depositsInserted).toBe(0);
+      expect(second.body.depositsSkipped).toBe(2);
+    });
+
+    test("anomalies from the importer pass straight through, additive to depositsInserted/Skipped", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      const DATE = "2026-08-11";
+
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult([], [], [{ pmsRef: "R2608-9100", reason: "mixed_scope", detail: "จ่ายล่วงหน้า, ค่าห้อง" }]),
+      );
+
+      const pulled = await call<{ anomalies: Array<{ pmsRef: string; reason: string; detail: string }> }>(
+        "POST",
+        `/${PROPERTY}/day/${DATE}/pull-from-pms`,
+      );
+      expect(pulled.body.anomalies).toEqual([{ pmsRef: "R2608-9100", reason: "mixed_scope", detail: "จ่ายล่วงหน้า, ค่าห้อง" }]);
+    });
+
+    // C7: the importer refuses to write a deposit_events row for a
+    // pre-cutover date — the money is reported as an anomaly instead of
+    // silently dropped OR silently written against a rule that isn't live
+    // yet for that date.
+    test("a deposit candidate on a PRE-cutover date becomes a pre_cutover_deposit anomaly, never inserted", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      const DATE = "2026-07-15"; // before the 2026-07-31 cutover
+
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult(
+          [],
+          [depositCandidate({ pmsRef: "R2607-9001", kind: "received", tender: "cash", amountSatang: 50_000 })],
+        ),
+      );
+
+      const pulled = await call<{
+        depositsInserted: number;
+        depositsSkipped: number;
+        anomalies: Array<{ pmsRef: string; reason: string }>;
+      }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+      expect(pulled.body.depositsInserted).toBe(0);
+      expect(pulled.body.depositsSkipped).toBe(0);
+      expect(pulled.body.anomalies).toHaveLength(1);
+      expect(pulled.body.anomalies[0]).toMatchObject({ pmsRef: "R2607-9001", reason: "pre_cutover_deposit" });
+
+      const day = await call<{ deposits: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}`);
+      expect(day.body.deposits).toEqual([]);
+    });
+
+    // F1 (Opus money-review, 2026-07-31): a ตัดยอดล่วงหน้า BOOKING candidate
+    // (not a deposit-event candidate) found on a pre-cutover date used to
+    // write its appliedDepositSatang into t_deposit_applied anyway — the
+    // route computed `accrual` and gated the deposit-EVENT branch, but
+    // called insertPmsBookingLines (with the applied amount still intact)
+    // BEFORE that gate ever ran. Proven live: a pre-cutover pull wrote
+    // tenders.deposit_applied even though depositsInserted stayed 0 (since
+    // that money was already booked as income under the OLD pre-cutover
+    // rule — writing t_deposit_applied too would double-count it).
+    test("F1 regression: a pre-cutover pull strips appliedDepositSatang from the booking candidate before insert, and flags it as an anomaly", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      const DATE = "2026-07-20"; // before the 2026-07-31 cutover
+
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () =>
+        pmsResult([
+          pmsCandidate({
+            pmsRef: "R2607-8001",
+            bookingNo: "CH26-008001",
+            grossRoomSatang: 0,
+            cashSatang: 0,
+            appliedDepositSatang: 89_000,
+            appliedDepositBookingNos: ["R014843"],
+          }),
+        ]),
+      );
+
+      const pulled = await call<{
+        inserted: number;
+        anomalies: Array<{ pmsRef: string; reason: string; detail: string }>;
+      }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+      expect(pulled.body.inserted).toBe(1); // the candidate itself still inserts
+      expect(pulled.body.anomalies).toHaveLength(1);
+      expect(pulled.body.anomalies[0]).toMatchObject({ pmsRef: "R2607-8001", reason: "pre_cutover_deposit" });
+      expect(pulled.body.anomalies[0]!.detail).toContain("89000");
+
+      const bookings = await call<{ lines: Array<{ bookingNo: string | null; remark: string | null; tenders: Record<Tender, number> }> }>(
+        "GET",
+        `/${PROPERTY}/day/${DATE}/bookings`,
+      );
+      const line = bookings.body.lines.find((l) => l.bookingNo === "CH26-008001")!;
+      // The applied tender is ZERO — never written on a pre-cutover date —
+      // and the R-number never lands in remark either, since nothing was
+      // actually applied.
+      expect(line.tenders.deposit_applied).toBe(0);
+      expect(line.remark).toBeNull();
+    });
+  });
+});
+
+describe("Wave C: deposit_events hand-entry CRUD (docs/adr/0001)", () => {
+  const DATE = "2026-08-20"; // on/after the 2026-07-31 accrual cutover
+  const PRE_CUTOVER_DATE = "2026-07-01";
+
+  test("POST creates a deposit event, touches sheet_days, and is visible via GET day", async () => {
+    const created = await call<{ id: number; kind: string; amountSatang: number }>(
+      "POST",
+      `/${PROPERTY}/day/${DATE}/deposits`,
+      { kind: "received", bookingNo: "R020001", guestName: "ทดสอบ มัดจำ", tender: "cash", amountSatang: 89_000, note: null },
+    );
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ kind: "received", amountSatang: 89_000 });
+
+    const day = await call<{ deposits: Array<{ id: number }> }>("GET", `/${PROPERTY}/day/${DATE}`);
+    expect(day.body.deposits.some((d) => d.id === created.body.id)).toBe(true);
+  });
+
+  test("400 on an invalid kind/tender/amount", async () => {
+    const badKind = await call("POST", `/${PROPERTY}/day/${DATE}/deposits`, {
+      kind: "bogus",
+      bookingNo: null,
+      guestName: null,
+      tender: "cash",
+      amountSatang: 1_000,
+      note: null,
+    });
+    expect(badKind.status).toBe(400);
+
+    const badTender = await call("POST", `/${PROPERTY}/day/${DATE}/deposits`, {
+      kind: "received",
+      bookingNo: null,
+      guestName: null,
+      tender: "bogus",
+      amountSatang: 1_000,
+      note: null,
+    });
+    expect(badTender.status).toBe(400);
+
+    const badAmount = await call("POST", `/${PROPERTY}/day/${DATE}/deposits`, {
+      kind: "received",
+      bookingNo: null,
+      guestName: null,
+      tender: "cash",
+      amountSatang: 0,
+      note: null,
+    });
+    expect(badAmount.status).toBe(400);
+  });
+
+  test("400 pre-cutover: refuses to create a deposit event before the accrual cutover", async () => {
+    const res = await call("POST", `/${PROPERTY}/day/${PRE_CUTOVER_DATE}/deposits`, {
+      kind: "received",
+      bookingNo: null,
+      guestName: null,
+      tender: "cash",
+      amountSatang: 1_000,
+      note: null,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("409 when the month is closed", async () => {
+    const MONTH = "2026-10";
+    const CLOSED_DATE = "2026-10-05";
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+    const res = await call("POST", `/${PROPERTY}/day/${CLOSED_DATE}/deposits`, {
+      kind: "received",
+      bookingNo: null,
+      guestName: null,
+      tender: "cash",
+      amountSatang: 1_000,
+      note: null,
+    });
+    expect(res.status).toBe(409);
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+  });
+
+  test("PATCH updates a field, 404 for an unknown id", async () => {
+    const created = await call<{ id: number }>("POST", `/${PROPERTY}/day/${DATE}/deposits`, {
+      kind: "received",
+      bookingNo: "R020002",
+      guestName: null,
+      tender: "cash",
+      amountSatang: 50_000,
+      note: null,
+    });
+    const patched = await call<{ amountSatang: number }>("PATCH", `/${PROPERTY}/deposits/${created.body.id}`, {
+      amountSatang: 60_000,
+    });
+    expect(patched.status).toBe(200);
+    expect(patched.body.amountSatang).toBe(60_000);
+
+    const missing = await call("PATCH", `/${PROPERTY}/deposits/999999`, { amountSatang: 1_000 });
+    expect(missing.status).toBe(404);
+  });
+
+  test("DELETE removes the event, 404 for an unknown id", async () => {
+    const created = await call<{ id: number }>("POST", `/${PROPERTY}/day/${DATE}/deposits`, {
+      kind: "received",
+      bookingNo: "R020003",
+      guestName: null,
+      tender: "cash",
+      amountSatang: 10_000,
+      note: null,
+    });
+    const deleted = await call("DELETE", `/${PROPERTY}/deposits/${created.body.id}`);
+    expect(deleted.status).toBe(204);
+
+    const missing = await call("DELETE", `/${PROPERTY}/deposits/999999`);
+    expect(missing.status).toBe(404);
+  });
+
+  test("a received cash deposit reaches the cash block's depositCashInSatang and folds into bankedSatang", async () => {
+    const CASH_DATE = "2026-08-21";
+    await call("POST", `/${PROPERTY}/day/${CASH_DATE}/deposits`, {
+      kind: "received",
+      bookingNo: "R020004",
+      guestName: null,
+      tender: "cash",
+      amountSatang: 89_000,
+      note: null,
+    });
+    const day = await call<{ cashBlock: { derived: { bankedSatang: number }; depositCashInSatang: number; depositCashOutSatang: number } }>(
+      "GET",
+      `/${PROPERTY}/day/${CASH_DATE}`,
+    );
+    expect(day.body.cashBlock.depositCashInSatang).toBe(89_000);
+    expect(day.body.cashBlock.depositCashOutSatang).toBe(0);
+    expect(day.body.cashBlock.derived.bankedSatang).toBe(89_000);
+  });
+
+  test("a non-cash (transfer) received deposit never touches the cash block", async () => {
+    const NONCASH_DATE = "2026-08-22";
+    await call("POST", `/${PROPERTY}/day/${NONCASH_DATE}/deposits`, {
+      kind: "received",
+      bookingNo: "R020005",
+      guestName: null,
+      tender: "transfer",
+      amountSatang: 89_000,
+      note: null,
+    });
+    const day = await call<{ cashBlock: { derived: { bankedSatang: number }; depositCashInSatang: number } }>(
+      "GET",
+      `/${PROPERTY}/day/${NONCASH_DATE}`,
+    );
+    expect(day.body.cashBlock.depositCashInSatang).toBe(0);
+    expect(day.body.cashBlock.derived.bankedSatang).toBe(0);
   });
 });

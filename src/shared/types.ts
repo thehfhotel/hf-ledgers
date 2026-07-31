@@ -35,8 +35,20 @@ export type CategoryKind = "income" | "expense";
 // BookingLine therefore carries a full record of all eight, never a single
 // tender enum. See src/shared/bookings.ts for the functions that sum these.
 
+// `deposit_applied` (added Wave C, 2026-07-31 — see docs/adr/0001 and
+// shared/accrual.ts) is the NINTH tender: how a folio settles a
+// มัดจำล่วงหน้า it takes at the stay ("ตัดยอดมัดจำ", iHOTEL's own word) under
+// the accrual rule — it IS how the folio settled, so it belongs on the
+// tender record like every other payment method, never as a side flag. It
+// shares the booking grid's `deposit` COLUMN SLOT with the pre-cutover
+// `deposit` tender (see `visibleTendersForDate()` in accrual.ts) — only one
+// of the two is ever visible for a given day, but BOTH are always present
+// on `Tender`/`TENDERS`/every `Record<Tender, ...>` so money already in
+// either column can never silently vanish from a sum on a day using the
+// other.
 export type Tender =
   | "deposit"
+  | "deposit_applied"
   | "cash"
   | "credit_kbank"
   | "credit_icbc"
@@ -46,9 +58,14 @@ export type Tender =
   | "other";
 
 /** Paper column order. Iterate this — never `Object.keys()` on a
- * `Record<Tender, ...>` — anywhere the order must match the printed sheet. */
+ * `Record<Tender, ...>` — anywhere the order must match the printed sheet.
+ * `deposit_applied` sits immediately after `deposit` (the shared column
+ * slot — see the `Tender` doc comment above and `visibleTendersForDate()`
+ * in accrual.ts, which filters this down to the 8 actually shown for a
+ * given date). */
 export const TENDERS: readonly Tender[] = [
   "deposit",
+  "deposit_applied",
   "cash",
   "credit_kbank",
   "credit_icbc",
@@ -58,9 +75,11 @@ export const TENDERS: readonly Tender[] = [
   "other",
 ];
 
-/** Thai labels, verbatim from the paper booking-sheet header. */
+/** Thai labels, verbatim from the paper booking-sheet header (`deposit`) or
+ * iHOTEL's own wording (`deposit_applied` — "ตัดยอดมัดจำ", see docs/adr/0001). */
 export const TENDER_LABELS_TH: Record<Tender, string> = {
   deposit: "มัดจำค่าห้อง โอน/เครดิต",
+  deposit_applied: "ตัดยอดมัดจำ",
   cash: "เงินสดค่าห้อง",
   credit_kbank: "บัตรเครดิต กสิกร",
   credit_icbc: "บัตรเครดิต ICBC",
@@ -83,10 +102,18 @@ export const TENDER_LABELS_TH: Record<Tender, string> = {
  * categories used to combine โอน+เครดิต in one input cell; going forward
  * they are โอน-only and their เครดิต money enters through the new sibling
  * key instead. Existing key strings/history are untouched (no retro-split).
+ *
+ * `deposit_applied` (added Wave C, 2026-07-31 — see docs/adr/0001) is the
+ * accrual-era counterpart of `deposit`/`deposit_credit`: a มัดจำล่วงหน้า
+ * applied against the stay it was taken for, recognised as revenue on the
+ * stay's day with no money movement. `deposit`/`deposit_credit` KEEP their
+ * key + meaning after the cutover (history is not restated) but are
+ * retired at the UI layer going forward — see DaySheetPage.tsx.
  */
 export type CategoryKey =
   | "deposit"
   | "deposit_credit"
+  | "deposit_applied"
   | "room_cash"
   | "credit_kbank"
   | "credit_icbc"
@@ -101,14 +128,18 @@ export type CategoryKey =
   | "bar_credit";
 
 /**
- * The seven tenders that map straight onto a seeded income-category cell —
+ * The eight tenders that map straight onto a seeded income-category cell —
  * see `deriveIncomeFromBookings()` in `bookings.ts`. Tender `"other"` is
  * deliberately absent: on the paper it becomes an itemized
  * `OtherIncomeItem` entry, not a derived category cell, so it has no
- * `CategoryKey` counterpart.
+ * `CategoryKey` counterpart. `deposit_applied` maps onto its own
+ * same-named CategoryKey (Wave C) — it IS how the folio settled, so it
+ * derives a category cell exactly like every other tender, never a side
+ * flag.
  */
 export const TENDER_TO_CATEGORY_KEY: Partial<Record<Tender, CategoryKey>> = {
   deposit: "deposit",
+  deposit_applied: "deposit_applied",
   cash: "room_cash",
   credit_kbank: "credit_kbank",
   credit_icbc: "credit_icbc",
@@ -277,6 +308,79 @@ export interface CashBlock {
   entered: CashBlockAmounts | null;
   heldBackSatang: number | null;
   broughtForwardSatang: number | null;
+  /**
+   * Always-derived (Wave C, docs/adr/0001) sums of this day's cash-tender
+   * `deposit_events` rows — see `depositCashTotals()`/`deriveCashBlock()` in
+   * bookings.ts. NOT part of `CashBlockAmounts`/the override pair: a
+   * deposit event is itemized and hand-editable at its own source (the
+   * event itself), so a correction happens there, never via an aggregate
+   * override here. Already folded into `derived.bankedSatang` (and
+   * therefore `entered.bankedSatang` whenever that field itself isn't
+   * separately overridden) by the time this reaches a consumer — a cash
+   * deposit received reaches ยอดฝากจริง while staying excluded from
+   * `รวมรายรับทั้งวัน`; a cash refund of a cash deposit reduces it back;
+   * transfer/credit deposit tenders never touch either field. */
+  depositCashInSatang: number;
+  depositCashOutSatang: number;
+}
+
+// ── Deposit events (Wave C, docs/adr/0001-accrual-recognition-for-deposits.md) ──
+// A มัดจำล่วงหน้า has exactly two possible endings under accrual: applied to
+// a stay (recognised as revenue there — see the `deposit_applied` Tender/
+// CategoryKey above) or refunded (money leaves, revenue never recognised).
+// The RECEIVED/REFUNDED moments themselves are a separate, day-scoped table
+// (modelled on `OtherIncomeItem`, never a BookingLine flag — a forgotten
+// filter on a flag would book a received deposit as invisible revenue,
+// exactly ADR-0001's failure mode; a missing cash-block entry from a
+// separate table surfaces same-day as a bank mismatch instead).
+
+export type DepositEventKind = "received" | "refunded";
+
+/** Bank-agnostic on purpose (unlike the booking-grid Tender columns, which
+ * are bank-specific) — a มัดจำล่วงหน้า can arrive/leave by any of these, and
+ * iHOTEL's own ledger does not always resolve which bank a transfer/credit
+ * used. */
+export type DepositTender = "cash" | "transfer" | "credit" | "web" | "other";
+
+export const DEPOSIT_TENDERS: readonly DepositTender[] = ["cash", "transfer", "credit", "web", "other"];
+
+export const DEPOSIT_TENDER_LABELS_TH: Record<DepositTender, string> = {
+  cash: "เงินสด",
+  transfer: "โอน",
+  credit: "บัตรเครดิต",
+  web: "เว็บไซต์/OTA",
+  other: "อื่นๆ",
+};
+
+/**
+ * One received-or-refunded มัดจำล่วงหน้า moment. `amountSatang` is always a
+ * `>0` MAGNITUDE — `kind` carries the sign (received = money in, refunded =
+ * money out) rather than a signed amount, so every consumer that just wants
+ * "how much" never has to re-derive a sign convention.
+ *
+ * `bookingNo` is the R-number iHOTEL's own จ่ายล่วงหน้า/คืนเงินจองห้อง rows
+ * key to (`ledger_cin_no` for those ds_names — see pms-prefill.ts) — an
+ * R-number pairs with its deposit for life (docs/adr/0001: the booking is
+ * moved, never replaced). `source`/`pmsRef` mirror `BookingLine`'s own
+ * manual-vs-imported provenance pair; a manual (hand-entered) event carries
+ * `pmsRef: null`.
+ */
+export interface DepositEvent {
+  id: number;
+  property: Property;
+  date: string;
+  kind: DepositEventKind;
+  bookingNo: string | null;
+  guestName: string | null;
+  tender: DepositTender;
+  amountSatang: number;
+  note: string | null;
+  source: "manual" | "pms";
+  pmsRef: string | null;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
 }
 
 /**
@@ -337,6 +441,9 @@ export interface BookingTotals {
  * `monthClosed` mirrors whether this day's month has been closed (see
  * `GET/PUT .../months/:month/close`) and is a hint for the client to
  * disable editing, not itself an enforcement mechanism.
+ *
+ * Wave C addition: `deposits` — this day's `DepositEvent` rows (received
+ * and refunded มัดจำล่วงหน้า moments), additive alongside every field above.
  */
 export interface DaySheet {
   categories: Category[];
@@ -347,6 +454,7 @@ export interface DaySheet {
   bookingLineCount: number;
   otherIncome: OtherIncomeItem[];
   cashBlock: CashBlock;
+  deposits: DepositEvent[];
   provenance: DayProvenance;
   verifiedAt: string | null;
   verifiedBy: string | null;

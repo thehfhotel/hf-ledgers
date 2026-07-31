@@ -9,6 +9,9 @@ import type {
   CategoryKind,
   DaySheet,
   DaySummary,
+  DepositEvent,
+  DepositEventKind,
+  DepositTender,
   ExpenseItem,
   Me,
   OtherIncomeItem,
@@ -292,15 +295,16 @@ export function putMonthClose(
 }
 
 // 25. POST /api/:property/day/:date/move
-// Moves ONLY this day's booking_lines + other_income_items to the other
-// property (merging into any rows already there) — never the day-sheet
-// income/expenses/note, and never the cash-block override. See
-// BookingDayPage.tsx's confirm dialog for the exact scope told to the user.
+// Moves ONLY this day's booking_lines + other_income_items + deposit_events
+// (Wave C, Opus money-review F2, 2026-07-31) to the other property (merging
+// into any rows already there) — never the day-sheet income/expenses/note,
+// and never the cash-block override. See BookingDayPage.tsx's confirm
+// dialog for the exact scope told to the user.
 export function moveBookingDay(
   property: Property,
   date: string,
   to: Property,
-): Promise<{ movedBookingLines: number; movedOtherIncome: number }> {
+): Promise<{ movedBookingLines: number; movedOtherIncome: number; movedDepositEvents: number }> {
   return request(`/${property}/day/${date}/move`, {
     method: "POST",
     body: JSON.stringify({ to }),
@@ -318,15 +322,83 @@ export interface PmsUnplacedTender {
   tranSatang: number;
 }
 
+/** One payment whose credit/transfer amount the server auto-placed on a
+ * bank column itself (see db.ts's insertPmsBookingLines AUTO-PLACEMENT
+ * POLICY) — a verification note, since it's still an inference, just an
+ * evidence-backed one. */
+export interface PmsAutoPlacedTender {
+  pmsRef: string;
+  bookingNo: string | null;
+  transferSatang: number;
+  creditSatang: number;
+}
+
+/** One flagged-but-unbooked oddity from a pull (Wave C, docs/adr/0001) —
+ * mirrors src/server/pms-prefill.ts's `PrefillAnomaly` (never money;
+ * reported back so a human can look). */
+export interface PmsAnomaly {
+  pmsRef: string;
+  reason: "mixed_scope" | "unknown_ds_name" | "free_without_applied" | "pre_cutover_deposit";
+  detail: string;
+}
+
 // POST /api/:property/day/:date/pull-from-pms
-// Inserts booking lines from the PMS payment ledger for that property+date —
-// button-triggered only (BookingDayPage.tsx), never automatic. Insert-only
-// and idempotent: a payment whose pms_ref already exists that day is
-// skipped server-side, and an existing row is never updated. Refunds are
-// filtered out server-side and counted in `skippedRefunds`, never inserted.
+// Inserts booking lines AND deposit events from the PMS payment ledger for
+// that property+date (Wave C, docs/adr/0001) — button-triggered only
+// (BookingDayPage.tsx), never automatic. Insert-only and idempotent: a
+// payment whose pms_ref already exists that day is skipped server-side, and
+// an existing row is never updated. Refunds are filtered out server-side
+// and counted in `skippedRefunds`, never inserted.
 export function pullFromPms(
   property: Property,
   date: string,
-): Promise<{ inserted: number; skipped: number; skippedRefunds: number; unplaced: PmsUnplacedTender[] }> {
+): Promise<{
+  inserted: number;
+  skipped: number;
+  skippedRefunds: number;
+  unplaced: PmsUnplacedTender[];
+  autoPlaced: PmsAutoPlacedTender[];
+  depositsInserted: number;
+  depositsSkipped: number;
+  anomalies: PmsAnomaly[];
+}> {
   return request(`/${property}/day/${date}/pull-from-pms`, { method: "POST" });
+}
+
+// ── Wave C: deposit_events hand-entry CRUD (docs/adr/0001) ────────────────
+
+/** The editable DepositEvent fields — everything except id/property/date
+ * and the audit quartet, per the server's DepositEventInput shape. */
+export type DepositEventInput = Partial<{
+  kind: DepositEventKind;
+  bookingNo: string | null;
+  guestName: string | null;
+  tender: DepositTender;
+  amountSatang: number;
+  note: string | null;
+}>;
+
+// 27. POST /api/:property/day/:date/deposits
+export function createDepositEvent(
+  property: Property,
+  date: string,
+  body: { kind: DepositEventKind; bookingNo: string | null; guestName: string | null; tender: DepositTender; amountSatang: number; note: string | null },
+): Promise<DepositEvent> {
+  return request(`/${property}/day/${date}/deposits`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// 28. PATCH /api/:property/deposits/:id
+export function updateDepositEvent(property: Property, id: number, body: DepositEventInput): Promise<DepositEvent> {
+  return request(`/${property}/deposits/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+// 29. DELETE /api/:property/deposits/:id
+export function deleteDepositEvent(property: Property, id: number): Promise<void> {
+  return request(`/${property}/deposits/${id}`, { method: "DELETE" });
 }

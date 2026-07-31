@@ -88,7 +88,7 @@ export const PrintableDaySummary = forwardRef<HTMLDivElement, PrintableDaySummar
               reportSheetBlocks.tsx's 2026-07-31 owner-decision comment. */}
           <ReportSheetTitle property={property} date={date} demo={demo} />
 
-          <DayTenderSummary date={date} sheet={sheet} weekDays={weekDays} />
+          <DayTenderSummary property={property} date={date} sheet={sheet} weekDays={weekDays} />
 
           <ReportFooter provenance={provenance} verifiedAt={verifiedAt} verifiedBy={verifiedBy} updatedBy={updatedBy} />
         </div>

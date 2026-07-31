@@ -230,6 +230,7 @@ describe("toAppTenders", () => {
     });
     expect(mapped).toEqual({
       deposit: 1,
+      deposit_applied: 0, // Wave C tender — didn't exist for any historical Excel import
       cash: 2,
       credit_kbank: 3,
       credit_icbc: 4,

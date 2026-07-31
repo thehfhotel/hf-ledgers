@@ -36,25 +36,50 @@ including admin — there is no `name_en` field anywhere in this contract.
 
 Income seed (paper order; `*` = `is_cash`), now also carrying its stable
 `category_key` (see `CategoryKey` below): มัดจำล่วงหน้า โอน (`deposit`),
-มัดจำล่วงหน้า เครดิต (`deposit_credit`), ค่าห้องเงินสด* (`room_cash`),
-บัตรเครดิต/กสิกร (`credit_kbank`), บัตรเครดิต ICBC (`credit_icbc`), โอน/กสิกร
-(`transfer_kbank`), โอน ICBC (`transfer_icbc`), เว็ปไซด์ (`web`), รายการอื่นๆ*
-(see note below), บาร์น้ำ เงินสด* (`bar_cash`), บาร์น้ำ โอน (`bar_transfer`),
-บาร์น้ำ เครดิต (`bar_credit`) — fourteen categories total. Expense seed (all
-`is_cash = 1`, manager-editable): ซื้อของ/วัตถุดิบ, ค่าแรงรายวัน, ค่าซ่อมแซม,
-ค่าสาธารณูปโภค, อื่นๆ.
+มัดจำล่วงหน้า เครดิต (`deposit_credit`), มัดจำล่วงหน้า (ตัดยอด) (`deposit_applied`
+— Wave C, docs/adr/0001, seeded right after `deposit_credit`), ค่าห้องเงินสด*
+(`room_cash`), บัตรเครดิต/กสิกร (`credit_kbank`), บัตรเครดิต ICBC
+(`credit_icbc`), โอน/กสิกร (`transfer_kbank`), โอน ICBC (`transfer_icbc`),
+เว็ปไซด์ (`web`), รายการอื่นๆ* (see note below), บาร์น้ำ เงินสด* (`bar_cash`),
+บาร์น้ำ โอน (`bar_transfer`), บาร์น้ำ เครดิต (`bar_credit`) — fifteen
+categories total. Expense seed (all `is_cash = 1`, manager-editable):
+ซื้อของ/วัตถุดิบ, ค่าแรงรายวัน, ค่าซ่อมแซม, ค่าสาธารณูปโภค, อื่นๆ.
 
-> **Accounting rule — an advance deposit IS income on the day it is taken**
-> (owner decision, 2026-07-30). `มัดจำล่วงหน้า` (`deposit`) counts toward the day's
-> `รวม` like any other tender, because the deposit is 50% of the booking's payment,
-> collected to create the booking — not a liability held on someone else's behalf.
-> A handful of source sheets excluded it from their printed total (e.g. HF
-> 2026-05-08, printed 53,586.40 vs 54,976.40 with the 1,190 deposit); those sheets
-> are the exception and the app is deliberately not bug-compatible with them.
-> Cash refunded to a guest is NOT netted off income: the income cell stays gross and
-> the refund shows up in the cash block, so `รวม` and the banked figure legitimately
-> differ by the refund. Record the refund as a cash expense if it should reduce the
-> day's net.
+> **Accounting rule — TWO ERAS, split at each property's accrual cutover
+> (`shared/accrual.ts`'s `ACCRUAL_CUTOVER_DATE`, `2026-07-31` for both `hf`
+> and `hfville` today).** Historical days are NOT restated — a query
+> spanning the cutover legitimately sees a discontinuity in what `รวม`
+> means. See `docs/adr/0001-accrual-recognition-for-deposits.md` for the
+> full reasoning and lifecycle.
+>
+> **Pre-cutover (kept verbatim, 2026-07-30 text) — an advance deposit IS
+> income on the day it is taken.** `มัดจำล่วงหน้า` (`deposit`) counts toward
+> the day's `รวม` like any other tender, because the deposit is 50% of the
+> booking's payment, collected to create the booking — not a liability held
+> on someone else's behalf. A handful of source sheets excluded it from
+> their printed total (e.g. HF 2026-05-08, printed 53,586.40 vs 54,976.40
+> with the 1,190 deposit); those sheets are the exception and the app is
+> deliberately not bug-compatible with them. Cash refunded to a guest is NOT
+> netted off income: the income cell stays gross and the refund shows up in
+> the cash block, so `รวม` and the banked figure legitimately differ by the
+> refund. Record the refund as a cash expense if it should reduce the day's
+> net.
+>
+> **On/after cutover (Wave C) — a มัดจำล่วงหน้า is money received but NOT YET
+> EARNED; the stay's full charge is recognised when the stay happens.**
+> `รวมรายรับทั้งวัน` stops meaning "money received today" and means "revenue
+> earned today" instead — it no longer reconciles with the bank by
+> construction (that is the ADR's stated, accepted consequence). The two
+> accrual moments: **received** (`deposit_events`, `kind: "received"` —
+> money in, NOT รายรับ) and **applied** (the ninth `Tender`,
+> `deposit_applied` — "ตัดยอดมัดจำ" — IS รายรับ, no money moves). A cash
+> deposit received still reaches ยอดฝากจริง (`CashBlock.depositCashInSatang`)
+> while staying entirely out of every income cell; a cash refund of a cash
+> deposit reduces it back (`depositCashOutSatang`); transfer/credit/web/
+> other deposit tenders never touch the cash figure either way. The retired
+> pre-cutover `deposit`/`deposit_credit` categories keep their key/meaning
+> (history is not restated) but render read-only and only-when-nonzero at
+> the UI layer once a day is on/after cutover.
 
 > **รายการอื่นๆ — RESOLVED, build to this.** The paper's single อื่นๆ column
 > mixes cash and transfer/credit, so one cash-flagged category cannot express
@@ -131,11 +156,12 @@ rows) twice in a row.
   `รายการอื่นๆ เงินสด` + insert `รายการอื่นๆ โอน/เครดิต` immediately after,
   shifting every later category's `sort` by +1) runs as part of this same
   migration, wrapped in one `db.transaction()` together with the backfill.
-  A fresh database's seed now inserts all fourteen income categories
-  pre-split (see "โอน/เครดิต split" above for the three added 2026-07-31),
-  with their keys, directly — both split migrations are a no-op on a fresh
-  DB. Never match category identity by `name_th` — managers can rename
-  categories, `category_key` cannot change out from under a rename.
+  A fresh database's seed now inserts all fifteen income categories
+  pre-split (see "โอน/เครดิต split" above for the three added 2026-07-31,
+  and the Wave C section below for `deposit_applied`), with their keys,
+  directly — every split/insert migration is a no-op on a fresh DB. Never
+  match category identity by `name_th` — managers can rename categories,
+  `category_key` cannot change out from under a rename.
 - **`income_amounts.source`** (TEXT, default `manual`) and
   **`income_amounts.manual`** (INTEGER boolean, default 1) — mirror
   `IncomeCell.source`/`.manual`. Every `income_amounts` insert/update/delete
@@ -504,26 +530,28 @@ thing still worth recording after a close.
     lock is added, document the enforcement here.
 
 25. **`POST /api/:property/day/:date/move`** — moves ONLY this day's
-    `booking_lines` and `other_income_items` from `:property` to another
-    property. Body `{ to: Property }` → 200
-    `{ movedBookingLines: number, movedOtherIncome: number }`. 400
-    (`{ error: "invalid to" }`) if `to` is missing/not `"hf"`/`"hfville"`, or
-    equals `:property`. 409 (`{ error: "month is closed" }`) if `:date`'s
+    `booking_lines`, `other_income_items`, AND `deposit_events` (Wave C,
+    Opus money-review F2, 2026-07-31 — a moved day's deposit events used to
+    strand on the origin property, so a cash มัดจำล่วงหน้า kept reaching the
+    WRONG side's ยอดฝากจริง forever) from `:property` to another property.
+    Body `{ to: Property }` → 200
+    `{ movedBookingLines: number, movedOtherIncome: number, movedDepositEvents: number }`.
+    400 (`{ error: "invalid to" }`) if `to` is missing/not `"hf"`/`"hfville"`,
+    or equals `:property`. 409 (`{ error: "month is closed" }`) if `:date`'s
     month is closed on EITHER `:property` or `to` — checked for both sides
     before anything is written.
 
-    **Scope, deliberately narrow:** only `booking_lines` and
-    `other_income_items` move. The day sheet itself — `sheet_days` (income
-    cells, expenses, the day note) — is NOT moved; that is a different
-    page's data and stays on its original property/date. Neither is the
-    cash-block override: it is a single-valued correction of a derived
-    figure, and merging two overrides is meaningless, so the client must
-    say so rather than attempt it (both properties keep their own
-    `entered`/`derived` cash block, untouched). `touchSheetDay()` still
-    bumps `updated_at`/`updated_by` on BOTH property-days' `sheet_days`
-    row (creating one if the day had none) from the caller's identity, so
-    the move itself is visible in each day's own audit trail even though
-    its content is untouched.
+    **Scope, deliberately narrow beyond those three tables:** the day sheet
+    itself — `sheet_days` (income cells, expenses, the day note) — is NOT
+    moved; that is a different page's data and stays on its original
+    property/date. Neither is the cash-block override: it is a
+    single-valued correction of a derived figure, and merging two overrides
+    is meaningless, so the client must say so rather than attempt it (both
+    properties keep their own `entered`/`derived` cash block, untouched).
+    `touchSheetDay()` still bumps `updated_at`/`updated_by` on BOTH
+    property-days' `sheet_days` row (creating one if the day had none) from
+    the caller's identity, so the move itself is visible in each day's own
+    audit trail even though its content is untouched.
 
     **Merge, never refuse:** if the destination day already holds rows,
     the moved rows merge into them. `booking_lines.seq` is a dense
@@ -533,15 +561,16 @@ thing still worth recording after a close.
     numbering. The server renumbers every moved booking line starting at
     the destination day's current `MAX(seq) + 1`, walked in the moved
     rows' existing `seq` order (ties broken by `id`) so their relative
-    order survives the merge. `other_income_items` carries no `seq` (or
-    category), so it merges with a plain re-key, no renumbering.
+    order survives the merge. `other_income_items`/`deposit_events` carry
+    no `seq` (or category), so both merge with a plain re-key, no
+    renumbering.
 
     Runs as a single transaction (`moveBookingDay()` in `db.ts`): if the
-    destination day already has a booking line sharing a `(property, date,
-    pms_ref)` with a moved row (the partial unique index — nothing writes
-    `pms_ref` from the UI today, but a future importer might), the whole
-    move rolls back and responds 500 rather than partially applying or
-    crashing.
+    destination day already has a booking line OR a deposit event sharing a
+    `(property, date, pms_ref, ...)` with a moved row (the partial unique
+    indexes — nothing writes `pms_ref` from the UI today, but a future
+    importer might), the whole move rolls back and responds 500 rather
+    than partially applying or crashing.
 
     No permission check — this app has no roles (see Auth above); any
     signed-in identity may move a day. Enqueues the analytics outbox for
@@ -550,20 +579,38 @@ thing still worth recording after a close.
 
     Client wrapper (`src/client/api.ts`):
     `moveBookingDay(property: Property, date: string, to: Property):
-    Promise<{ movedBookingLines: number; movedOtherIncome: number }>`.
+    Promise<{ movedBookingLines: number; movedOtherIncome: number; movedDepositEvents: number }>`.
 
 ## Wave 3: PMS prefill (`src/server/pms-prefill.ts`, `docs/pms-prefill-plan.md`)
 
 26. **`POST /api/:property/day/:date/pull-from-pms`** — no body. Inserts
-    booking lines from the PMS payment ledger (`ht_payment_ledger`) for
-    `:property`'s day `:date`, button-triggered only (never automatic — no
-    fetch on load, no polling). → 200
+    booking lines AND deposit events (Wave C, docs/adr/0001) from the PMS
+    payment ledger (`ht_payment_ledger`) for `:property`'s day `:date`,
+    button-triggered only (never automatic — no fetch on load, no
+    polling). → 200
     `{ inserted: number, skipped: number, skippedRefunds: number,
     unplaced: Array<{ pmsRef: string, bookingNo: string | null,
     creditSatang: number, tranSatang: number }>,
     autoPlaced: Array<{ pmsRef: string, bookingNo: string | null,
-    transferSatang: number, creditSatang: number }> }`.
-    `autoPlaced` is additive (added 2026-07-31) — existing consumers reading
+    transferSatang: number, creditSatang: number }>,
+    depositsInserted: number, depositsSkipped: number,
+    anomalies: Array<{ pmsRef: string, reason: "mixed_scope" |
+    "unknown_ds_name" | "free_without_applied" | "pre_cutover_deposit",
+    detail: string }> }`.
+    `depositsInserted`/`depositsSkipped`/`anomalies` are additive (Wave C,
+    2026-07-31): `depositsInserted`/`depositsSkipped` mirror
+    `inserted`/`skipped` but for `deposit_events` rows
+    (`insertPmsDepositEvents()`, db.ts) — same idempotence key shape, just
+    `(property, date, pms_ref, tender)` instead of `(property, date,
+    pms_ref)` (one PMS payment can split tenders). `anomalies` is never
+    money — every entry is a `pms-prefill.ts` classification oddity (mixed
+    R/CH scope in one payment, an unrecognized `ds_name`, a
+    ยกเลิกห้อง/คืนเงินส่วนเกิน/ค่าปรับ line's unexplained `ledger_free`, or a
+    received/refunded deposit found on a date before this property's
+    accrual cutover — `pre_cutover_deposit`, reported rather than dropped,
+    never written as a `deposit_events` row on a day that can't
+    legitimately hold one) reported for a human to look at, never silently
+    folded into any total. `autoPlaced` is additive (added 2026-07-31) — existing consumers reading
     only `inserted`/`skipped`/`skippedRefunds`/`unplaced` are unaffected.
 
     **Dark by default.** 503 (`{ error: "pms prefill not configured" }`)
@@ -618,8 +665,15 @@ thing still worth recording after a close.
     just an evidence-backed one now. Amounts that remain genuinely
     unresolvable (hf credit only, going forward) are reported in
     `unplaced`, same "type it in by hand" contract as before. `discountSatang`
-    is never filled either — no discount column exists anywhere in the PMS
-    folio/payment data; it stays `0`, editable by hand as always.
+    is never filled either — **correction (Wave C, C0 gate V2): a discount/
+    comp column DOES exist in the PMS ledger (`ledger_free` — see below);
+    this importer still never reads it into `discountSatang`.** `ledger_free`
+    is read for exactly one purpose (the ตัดยอดล่วงหน้า line's applied-deposit
+    amount, keyed by `ds_name`, never by "free != 0" — see the Wave C
+    section below); on every OTHER line, including a ค่าห้อง line's own
+    genuine discount/comp use of the same column, it is deliberately left
+    unread. `discountSatang` stays `0` from the importer, editable by hand
+    as always.
 
     **Refunds are reported, never inserted.** A candidate whose net tender
     total is negative (`isRefund: true`) is filtered out before insertion
@@ -643,35 +697,131 @@ thing still worth recording after a close.
     Client wrapper (`src/client/api.ts`):
     `pullFromPms(property: Property, date: string):
     Promise<{ inserted: number; skipped: number; skippedRefunds: number;
-    unplaced: PmsUnplacedTender[] }>`. NOTE (2026-07-31): the server
-    response now additionally carries `autoPlaced: PmsAutoPlacedTender[]`
-    (see above) — `api.ts`'s declared return type has not been updated to
-    include it yet (out of scope for the change that added the field;
-    `src/client/pages/BookingDayPage.tsx` widens the result locally with a
-    cast until `api.ts` catches up). A follow-up should add
-    `PmsAutoPlacedTender` and the `autoPlaced` field to `api.ts` itself so
-    the contract is typed at the source.
+    unplaced: PmsUnplacedTender[]; autoPlaced: PmsAutoPlacedTender[];
+    depositsInserted: number; depositsSkipped: number; anomalies:
+    PmsAnomaly[] }>` — fully typed at the source (Wave C, 2026-07-31;
+    `PmsAutoPlacedTender` was added the same wave, closing the earlier gap
+    where `BookingDayPage.tsx` had to widen the result with a local cast).
+
+## Wave C: deposit_events (`src/server/db.ts`, `docs/adr/0001-accrual-recognition-for-deposits.md`)
+
+27. **`POST /api/:property/day/:date/deposits`** — hand-entry create for a
+    received/refunded มัดจำล่วงหน้า moment. Body
+    `{ kind: "received" | "refunded", bookingNo: string | null, guestName:
+    string | null, tender: "cash" | "transfer" | "credit" | "web" | "other",
+    amountSatang: number, note: string | null }` → 201 `DepositEvent`.
+    `amountSatang` must be `> 0` (a magnitude — `kind` carries the sign,
+    same convention as `deposit_events.amount_satang`). Mirrors the
+    other-income CRUD shape (endpoint 17): `closedMonthResponse` (409 on a
+    closed month), `touchSheetDay` + `enqueueAnalyticsPush` on write.
+    **400 (`{ error: "pre-cutover date: deposits are not tracked before the
+    accrual cutover" }`) when `:date` is before `:property`'s accrual
+    cutover** (`isAccrualDay()`, shared/accrual.ts) — a pre-cutover day can
+    never legitimately hold one under the new model.
+
+28. **`PATCH /api/:property/deposits/:id`** — body: any subset of the
+    fields above → `DepositEvent`. 404 if `:id` doesn't belong to
+    `:property`. Same closed-month/pre-cutover gates as create, evaluated
+    against the EXISTING event's own `date` (not gated by whether the patch
+    itself touches money — patching `note` alone on a pre-cutover row would
+    404 differently, but a pre-cutover row cannot exist in the first place
+    outside a data anomaly, so this is a defensive backstop, not a live
+    path).
+
+29. **`DELETE /api/:property/deposits/:id`** → 204. Same gates as update.
+
+`GET /api/:property/day/:date` (endpoint 7) gains `deposits: DepositEvent[]`
+— this day's rows, additive alongside every other `DaySheet` field.
+`CashBlock` gains always-derived `depositCashInSatang`/`depositCashOutSatang`
+(never stored, never part of the `CashBlockAmounts` override pair — see
+`depositCashTotals()`/`deriveCashBlock()` in `shared/bookings.ts`).
+
+**Data model.** New table `deposit_events`: `id` PK, `property`, `date`,
+`kind` (`received`|`refunded`), `booking_no` (nullable — the R-number for a
+PMS-sourced row), `guest_name` (nullable), `tender`
+(`cash`|`transfer`|`credit`|`web`|`other` — bank-agnostic on purpose, unlike
+the booking-grid `Tender` columns), `amount_satang` (CHECK `> 0`, a
+magnitude), `note` (nullable), `source` (`manual`|`pms`), `pms_ref`
+(nullable), audit quartet. Unique `(property, date, pms_ref, tender) WHERE
+pms_ref IS NOT NULL` — one PMS payment can split across tenders. New column
+`booking_lines.t_deposit_applied` (nullable, `CHECK >= 0`, same shape as
+every other tender column) — the ninth `Tender`'s DB column. New income
+category `deposit_applied` (nameTh "มัดจำล่วงหน้า (ตัดยอด)", `is_cash =
+0`), seeded immediately after `deposit_credit`; an additive boot migration
+(`migrateDepositAppliedCategoryForProperty()`, db.ts, same
+splice-and-shift/collision-skip-and-log shape as `migrateTransferCreditSplit`)
+inserts it for a pre-Wave-C database. Fifteen income categories total on a
+fresh DB going forward.
+
+**Importer** (`src/server/pms-prefill.ts`, rewritten this wave — see
+`docs/adr/0001` and the plan's C0/C3 sections for the full classification
+table): classifies PMS ledger lines by `ds_name` text (never `ds_id`,
+log-only now) against six exact labels (`ค่าห้อง`, `จ่ายล่วงหน้า`,
+`ยกเลิกห้อง`, `คืนเงินส่วนเกิน`, `คืนเงินจองห้อง`, `ค่าปรับ`) plus the
+ตัดยอดล่วงหน้า prefix family (`"ตัดยอดล่วงหน้า Booking No:" + R-number`). A
+payment group is R-scoped (จ่ายล่วงหน้า/คืนเงินจองห้อง → `DepositCandidate`s,
+one per non-zero raw tender column) or CH-scoped (everything else,
+including ตัดยอดล่วงหน้า → `PrefillCandidate` — the applied amount comes
+from that line's `ledger_free`, per V1, and that SAME line's
+`ledger_amount` is excluded from gross even though its `ds_id` is typically
+`P001` — the live double-booking bug this rewrite fixes). A group mixing
+both scopes emits nothing plus a `mixed_scope` anomaly (a pure safety net —
+zero live instances per the C0 gate). `PrefillCandidate` no longer carries
+`isDeposit`/`depositSatang` (retired with the pre-cutover `deposit` tender
+at the write boundary — `insertPmsBookingLines` no longer writes
+`t_deposit` at all); it gains `appliedDepositSatang` and
+`appliedDepositBookingNos` (the R-number(s) an applied line's label
+carries, folded into the inserted row's `remark`).
 
 ## Shared types (`src/shared/types.ts`, verbatim, READ-ONLY)
 
 `Property`, `PROPERTIES`, `isProperty()`, `PROPERTY_LABELS` (full Thai/En
 hotel names — `en` is contract metadata, never rendered), `CategoryKind`,
-`Tender`, `TENDERS` (paper column order — iterate this, never
-`Object.keys()`, on a `Record<Tender, ...>`), `TENDER_LABELS_TH`,
-`CategoryKey` (stable category identity, independent of `nameTh` — managers
-can rename categories), `TENDER_TO_CATEGORY_KEY` (the seven tenders that
-derive a category cell; `"other"` is deliberately absent — it becomes an
-itemized `OtherIncomeItem` instead), `Category` (now with `categoryKey`),
+`Tender` (NINE values as of Wave C — the eight paper columns plus
+`deposit_applied`, which shares the `deposit` slot on the printed grid, see
+`visibleTendersForDate()` below), `TENDERS` (paper column order — iterate
+this, never `Object.keys()`, on a `Record<Tender, ...>`), `TENDER_LABELS_TH`,
+`CategoryKey` (fifteen values as of Wave C, adding `deposit_applied` — stable
+category identity, independent of `nameTh` — managers can rename
+categories), `TENDER_TO_CATEGORY_KEY` (the eight tenders that derive a
+category cell; `"other"` is deliberately absent — it becomes an itemized
+`OtherIncomeItem` instead), `Category` (now with `categoryKey`),
 `IncomeCell` (now with `source`/`manual`), `ExpenseItem`, `BookingLine`,
-`OtherIncomeItem`, `CashBlockAmounts`, `CashAdjustmentAmounts`, `CashBlock`, `DayProvenance`,
+`OtherIncomeItem`, `CashBlockAmounts`, `CashAdjustmentAmounts`, `CashBlock`
+(now with `depositCashInSatang`/`depositCashOutSatang`, Wave C),
+`DepositEvent`, `DepositEventKind`, `DepositTender`, `DEPOSIT_TENDERS`,
+`DEPOSIT_TENDER_LABELS_TH` (Wave C), `DayProvenance`,
 `DayTotals`, `BookingTotals`, `DaySheet`
-(see Wave 2 field additions above), `DaySummary` (now with
+(see Wave 2 field additions above, plus `deposits: DepositEvent[]` Wave C),
+`DaySummary` (now with
 `verified`/`provenance`), `Me`, plus the bounds constants above.
+
+`accrual.ts` (Wave C): `ACCRUAL_CUTOVER_DATE` (per-property, commit-changed,
+never runtime), `isAccrualDay()`, `visibleTendersForDate()` (the 8 tender
+columns to render for a date — `deposit` pre-cutover, `deposit_applied`
+on/after, same printed slot).
 
 `money.ts` (`formatSatang`, `parseAmountToSatang`, `shouldCommitAmount`), `totals.ts`
 (`computeDayTotals`), `bookings.ts` (`computeBookingTotals`,
-`deriveIncomeFromBookings`, `deriveCashBlock`, `lineArithmeticMismatch`,
+`deriveIncomeFromBookings`, `deriveCashBlock` (now takes a `depositEvents`
+param, defaulted `[]`), `depositCashTotals` (Wave C), `lineArithmeticMismatch`,
 `RECONCILE_TOLERANCE_SATANG`) — same philosophy as `totals.ts`: the server
 computes with these and the client imports the SAME functions, so UI and
-API can never disagree. `date.ts` (`todayBangkok`, `isoToThaiLong`,
+API can never disagree. `rollup.ts`'s `computeIncomeLedgerRollup` gains a
+`depositEvents` param and the payload gains optional
+`depositReceivedSatang`/`depositRefundedSatang` (OUTSIDE `amounts` — see the
+hf-analytics section below). `date.ts` (`todayBangkok`, `isoToThaiLong`,
 `isoToBuddhist`, month helpers).
+
+## hf-analytics ingest (Wave C addition)
+
+The `POST /api/ingest/income-ledger` payload (`IncomeLedgerRollup`,
+`shared/rollup.ts`) gains two OPTIONAL top-level fields, OUTSIDE `amounts`:
+`depositReceivedSatang`/`depositRefundedSatang` — this day's total
+มัดจำล่วงหน้า received/refunded across every `DepositTender` (not cash-only).
+Omitted (never an explicit 0) when the respective total is zero, same
+omit-zero convention as `amounts`. Applied deposits ride INSIDE `amounts` as
+the ordinary key `deposit_applied` and foot normally — never weaken the
+footing rule by excluding a key instead of using this separate pair for the
+received/refunded case, which is money-in-not-income / money-out-not-expense
+under accrual and would silently overstate revenue if folded into `amounts`.

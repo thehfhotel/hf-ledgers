@@ -11,6 +11,7 @@ import type {
   Category,
   CashBlockAmounts,
   CategoryKey,
+  DepositEvent,
   IncomeCell,
   OtherIncomeItem,
   Tender,
@@ -68,7 +69,9 @@ export function computeBookingTotals(lines: BookingLine[]): BookingTotals {
  * TENDER_TO_CATEGORY_KEY. Tender "other" is never included — it has no
  * CategoryKey counterpart (see types.ts), so it never appears in the
  * returned partial map. A category key with no matching amount anywhere is
- * simply absent from the result, not present with a 0.
+ * simply absent from the result, not present with a 0. Loops `TENDERS`
+ * generically, so `deposit_applied` (Wave C) maps onto its own CategoryKey
+ * exactly like every other tender, with no code change needed here.
  */
 export function deriveIncomeFromBookings(lines: BookingLine[]): Partial<Record<CategoryKey, number>> {
   const confirmedLines = lines.filter((line) => !line.draft);
@@ -85,6 +88,30 @@ export function deriveIncomeFromBookings(lines: BookingLine[]): Partial<Record<C
   }
 
   return totals;
+}
+
+/**
+ * Sums of a day's `deposit_events` rows that touch the CASH till only
+ * (`tender === "cash"`) — transfer/credit/web/other deposit tenders never
+ * move cash, so they never reach `bankedSatang` (docs/adr/0001: a cash
+ * มัดจำล่วงหน้า enters the till and so reaches ยอดฝากจริง; a non-cash one
+ * doesn't touch it either way). Exported so `CashBlock.depositCashInSatang/
+ * depositCashOutSatang` (server.ts's `buildCashBlock`) and `deriveCashBlock`
+ * below share the exact same figures rather than two independent sums that
+ * could drift.
+ */
+export function depositCashTotals(depositEvents: DepositEvent[]): {
+  depositCashInSatang: number;
+  depositCashOutSatang: number;
+} {
+  let depositCashInSatang = 0;
+  let depositCashOutSatang = 0;
+  for (const event of depositEvents) {
+    if (event.tender !== "cash") continue;
+    if (event.kind === "received") depositCashInSatang += event.amountSatang;
+    else depositCashOutSatang += event.amountSatang;
+  }
+  return { depositCashInSatang, depositCashOutSatang };
 }
 
 /**
@@ -119,16 +146,34 @@ export function deriveIncomeFromBookings(lines: BookingLine[]): Partial<Record<C
  * split.md item 6, Wave C — see `CashAdjustmentAmounts` in types.ts) fold
  * into `bankedSatang` here: small change that couldn't go into the deposit
  * machine today is SUBTRACTED, and a prior round's held-back cash deposited
- * today is ADDED — `bankedSatang = roomCash + otherCash + barCash -
- * heldBackSatang + broughtForwardSatang`. `null` (not recorded) reads as 0
- * in the formula, same as every other omitted-adjustment day. Both default
- * to `null` so every pre-existing call site (no adjustment recorded)
- * derives the exact same `bankedSatang` it always has.
+ * today is ADDED. `null` (not recorded) reads as 0 in the formula, same as
+ * every other omitted-adjustment day. Both default to `null` so every
+ * pre-existing call site (no adjustment recorded) derives the exact same
+ * `bankedSatang` it always has.
+ *
+ * `depositEvents` (Wave C, docs/adr/0001) folds in the same way, through
+ * `depositCashTotals()` above: a cash มัดจำล่วงหน้า received today reaches
+ * `bankedSatang` (it entered the till) while staying entirely OUT of every
+ * income cell above (it is not `รวมรายรับทั้งวัน` — the accrual rule's whole
+ * point); a cash refund of a cash deposit reduces `bankedSatang` back down.
+ * Transfer/credit/web/other deposit tenders never touch this figure either
+ * way. Defaults to `[]` so every pre-existing call site (no deposit events
+ * ever passed) derives the exact same `bankedSatang` it always has — the
+ * full formula is `bankedSatang = roomCash + otherCash + barCash +
+ * depositCashIn - depositCashOut - heldBackSatang + broughtForwardSatang`.
+ * This total can legitimately go negative (a large refund on a light cash
+ * day) — the formula never clamps; `PUT .../cash-block`'s own bounds reject
+ * a negative EXPLICIT override, but the derived figure itself is not an
+ * override.
  *
  * Returns the `derived` half of a CashBlock; the caller layers a manager
  * `entered` override of `bankedSatang` itself on top (see api.md
  * `PUT .../cash-block`) — that override still wins regardless of what this
- * function computes.
+ * function computes. `CashBlockAmounts` itself stays exactly 4 fields —
+ * deposit terms are itemized and hand-editable at their own source (the
+ * event), so a correction happens there, never via a fifth aggregate
+ * override field here (see `CashBlock.depositCashInSatang`/
+ * `depositCashOutSatang` in types.ts for the always-derived display figures).
  */
 export function deriveCashBlock(
   categories: Category[],
@@ -136,6 +181,7 @@ export function deriveCashBlock(
   otherIncomeItems: OtherIncomeItem[],
   heldBackSatang: number | null = null,
   broughtForwardSatang: number | null = null,
+  depositEvents: DepositEvent[] = [],
 ): CashBlockAmounts {
   const categoryById = new Map(categories.map((category) => [category.id, category]));
   const hasOtherIncomeItems = otherIncomeItems.length > 0;
@@ -169,12 +215,20 @@ export function deriveCashBlock(
       .reduce((sum, item) => sum + item.amountSatang, 0);
   }
 
+  const { depositCashInSatang, depositCashOutSatang } = depositCashTotals(depositEvents);
+
   return {
     roomCashSatang,
     otherCashSatang,
     barCashSatang,
     bankedSatang:
-      roomCashSatang + otherCashSatang + barCashSatang - (heldBackSatang ?? 0) + (broughtForwardSatang ?? 0),
+      roomCashSatang +
+      otherCashSatang +
+      barCashSatang +
+      depositCashInSatang -
+      depositCashOutSatang -
+      (heldBackSatang ?? 0) +
+      (broughtForwardSatang ?? 0),
   };
 }
 

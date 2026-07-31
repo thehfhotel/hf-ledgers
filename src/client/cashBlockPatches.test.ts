@@ -18,6 +18,8 @@ function block(overrides: Partial<CashBlock> = {}): CashBlock {
     entered: null,
     heldBackSatang: null,
     broughtForwardSatang: null,
+    depositCashInSatang: 0,
+    depositCashOutSatang: 0,
     ...overrides,
   };
 }

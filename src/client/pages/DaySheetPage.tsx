@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isAccrualDay } from "../../shared/accrual.ts";
 import { RECONCILE_TOLERANCE_SATANG, deriveIncomeFromBookings } from "../../shared/bookings.ts";
 import { shiftDays } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
 import { computeDayTotals } from "../../shared/totals.ts";
 import {
+  DEPOSIT_TENDER_LABELS_TH,
   NOTE_MAX_LEN,
   TENDER_TO_CATEGORY_KEY,
   type BookingLine,
@@ -51,12 +53,22 @@ interface Props {
 // categoryKey, never nameTh, because managers can rename categories freely.
 const OTHER_INCOME_CATEGORY_KEYS = new Set(["other_cash", "other_transfer"]);
 
+// Wave C (docs/adr/0001): `deposit`/`deposit_credit` KEEP their key and
+// meaning after the accrual cutover (history is not restated — hf-mcp
+// still labels them, and archiving is refused server-side for a keyed
+// category), but are retired at the UI layer going forward — post-cutover
+// they render read-only, and only when they actually carry money (a stray
+// pre-cutover balance), never as an always-visible empty row inviting new
+// entries under a rule that no longer applies.
+const RETIRED_POST_CUTOVER_CATEGORY_KEYS = new Set(["deposit", "deposit_credit"]);
+
 // Fallback labels for the fill-from-bookings diff, verbatim from api.md's
 // seed list — needed because a diff row's categoryId is null when the
 // property has no active category seeded with that key yet.
 const CATEGORY_KEY_LABELS_TH: Record<CategoryKey, string> = {
   deposit: "มัดจำล่วงหน้า โอน",
   deposit_credit: "มัดจำล่วงหน้า เครดิต",
+  deposit_applied: "มัดจำล่วงหน้า (ตัดยอด)",
   room_cash: "ค่าห้องเงินสด",
   credit_kbank: "บัตรเครดิต/กสิกร",
   credit_icbc: "บัตรเครดิต ICBC",
@@ -692,6 +704,9 @@ export function DaySheetPage({ property, date }: Props) {
     .filter((row): row is { category: Category; cell: NonNullable<typeof row.cell> } => Boolean(row.cell) && row.cell!.amountSatang > 0);
 
   const hasOtherIncomeItems = day.otherIncome.length > 0;
+  // Wave C (docs/adr/0001): gates the deposit/deposit_credit retirement
+  // below and the deposit_credit double-entry warning's own visibility.
+  const accrualDay = isAccrualDay(property, date);
 
   // The รายจ่าย panel is LEGACY VISIBILITY ONLY (owner request 2026-07-31,
   // docs/plan-unify-exports-tender-split.md item 1: expenses now live in the
@@ -795,6 +810,37 @@ export function DaySheetPage({ property, date }: Props) {
         </section>
       )}
 
+      {/* มัดจำล่วงหน้า — READ-ONLY mirror (Wave C, docs/adr/0001). Hand
+          entry/edit stays the bookings page's job (BookingDayPage.tsx);
+          this summary just makes today's deposit activity visible without
+          leaving the day-sheet view. */}
+      {day.deposits.length > 0 && (
+        <section className="rounded-lg border border-line bg-panel px-4 py-2.5 text-sm">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-ink">มัดจำล่วงหน้า (ไม่ใช่รายรับ)</h2>
+            <button
+              type="button"
+              onClick={goToBookings}
+              className="rounded-md text-xs font-medium text-brand-500 hover:underline focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+            >
+              ไปแก้ไขที่หน้ารายละเอียดรายรับ
+            </button>
+          </div>
+          <div className="flex flex-col gap-1">
+            {day.deposits.map((event) => (
+              <div key={event.id} className="flex items-center justify-between gap-3 text-xs">
+                <span className="text-ink-muted">
+                  {event.kind === "received" ? "รับ" : "คืน"} ·{" "}
+                  {[event.bookingNo, event.guestName].filter(Boolean).join(" · ") || "-"} ·{" "}
+                  {DEPOSIT_TENDER_LABELS_TH[event.tender]}
+                </span>
+                <span className="tabular-nums text-ink">{formatSatang(event.amountSatang)}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* แถบเทียบยอดกับรายการจอง — ถาวร ไม่ใช่การเตือนให้แก้ */}
       {variance && (
         <section
@@ -888,6 +934,12 @@ export function DaySheetPage({ property, date }: Props) {
               // nameTh, so a manager rename keeps this working.
               const isComputedFromOtherIncome =
                 category.categoryKey != null && OTHER_INCOME_CATEGORY_KEYS.has(category.categoryKey) && hasOtherIncomeItems;
+              // Wave C: deposit/deposit_credit retirement — see
+              // RETIRED_POST_CUTOVER_CATEGORY_KEYS' doc comment above.
+              const isRetiredPostCutover =
+                accrualDay && category.categoryKey != null && RETIRED_POST_CUTOVER_CATEGORY_KEYS.has(category.categoryKey);
+              const hasMoney = cell != null && cell.amountSatang !== 0;
+              if (isRetiredPostCutover && !hasMoney) return null; // no stray balance to show — hide the row entirely
               return (
                 <div key={category.id} className="flex flex-col gap-2 px-4 py-1.5">
                   <div className="flex items-center justify-between gap-3">
@@ -899,7 +951,7 @@ export function DaySheetPage({ property, date }: Props) {
                       value={cell?.amountSatang ?? null}
                       onCommit={(satang) => commitIncomeAmount(category, satang)}
                       ariaLabel={category.nameTh}
-                      disabled={day.monthClosed || isComputedFromOtherIncome}
+                      disabled={day.monthClosed || isComputedFromOtherIncome || isRetiredPostCutover}
                     />
                   </div>
                   {isComputedFromOtherIncome && (
@@ -910,13 +962,22 @@ export function DaySheetPage({ property, date }: Props) {
                       </button>
                     </p>
                   )}
+                  {isRetiredPostCutover && (
+                    <p className="text-xs text-ink-muted">
+                      เลิกใช้หลังเริ่มเกณฑ์บัญชีคงค้าง — แสดงไว้เพราะมียอดค้างจากก่อนหน้านี้ (อ่านอย่างเดียว)
+                    </p>
+                  )}
                   {/* Double-entry guards (Opus money-review F3/F4): the whole
                       merged มัดจำ tender lands in "deposit" via
                       อัพเดทจากรายละเอียดรายรับ, and every itemized (non-cash)
                       รายการอื่นๆ entry lands in "other_transfer" — both
                       unconditional, so a reception typist who ALSO keys the
-                      credit-card portion here double-books it. */}
-                  {category.categoryKey === "deposit_credit" && (
+                      credit-card portion here double-books it. Retired
+                      post-cutover (Wave C) alongside the category itself —
+                      the merged มัดจำ tender no longer writes into "deposit"
+                      going forward (see shared/bookings.ts), so the warning
+                      no longer applies once this row is read-only anyway. */}
+                  {category.categoryKey === "deposit_credit" && !accrualDay && (
                     <p className="text-xs text-warn">
                       มัดจำจากรายการจองจะลงในช่อง &quot;{categoryKeyLabel(day.categories, "deposit")}&quot; ทั้งก้อน —
                       อย่ากรอกซ้ำในช่องนี้
@@ -1011,6 +1072,35 @@ export function DaySheetPage({ property, date }: Props) {
                 </div>
               );
             })}
+
+            {/* Deposit cash in/out (Wave C, docs/adr/0001, judgment-call (b)
+                fix — Opus money-review, 2026-07-31): display-only, no new
+                arithmetic — CashBlock.depositCashInSatang/depositCashOutSatang
+                already fold into bankedSatang below (deriveCashBlock(),
+                shared/bookings.ts); this just makes that folding VISIBLE on
+                screen, mirroring reportSheetBlocks.tsx's printed
+                depositCashRows and BookingDayPage.tsx's identical panel.
+                Rendered only when nonzero. */}
+            {(day.cashBlock.depositCashInSatang > 0 || day.cashBlock.depositCashOutSatang > 0) && (
+              <div className="flex flex-col gap-1 border-t border-line-strong pt-2">
+                {day.cashBlock.depositCashInSatang > 0 && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-ink">มัดจำรับเป็นเงินสด</span>
+                    <span className="tabular-nums whitespace-nowrap text-ink">
+                      + {formatSatang(day.cashBlock.depositCashInSatang)}
+                    </span>
+                  </div>
+                )}
+                {day.cashBlock.depositCashOutSatang > 0 && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-ink">คืนมัดจำเป็นเงินสด</span>
+                    <span className="tabular-nums whitespace-nowrap text-ink">
+                      − {formatSatang(day.cashBlock.depositCashOutSatang)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Deposit-machine reconciliation ("adjusting") subsection —

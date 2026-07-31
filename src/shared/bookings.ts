@@ -89,13 +89,31 @@ export function deriveIncomeFromBookings(lines: BookingLine[]): Partial<Record<C
 
 /**
  * Reproduces the paper's `**หมายเหตุ` cash block from the day's income
- * cells (room cash + bar cash, found by `categoryKey` — never by `nameTh`,
- * see CategoryKey) and its itemized other-income entries (their own
- * `isCash` flag). This replaces the old approach of reading a single
- * cash-flagged "รายการอื่นๆ" category, which measurably produced the wrong
- * bank-deposit figure (933,090 THB computed vs 871,102 actually banked,
- * wrong on 75 days) because that one paper column mixes cash and
- * transfer/credit.
+ * cells and its itemized other-income entries (their own `isCash` flag).
+ * This replaces the old approach of reading a single cash-flagged
+ * "รายการอื่นๆ" category, which measurably produced the wrong bank-deposit
+ * figure (933,090 THB computed vs 871,102 actually banked, wrong on 75
+ * days) because that one paper column mixes cash and transfer/credit.
+ *
+ * Bucket selection is by `category.isCash` (never `nameTh`, see
+ * `CategoryKey`), not by an enumerated list of keys: `room_cash` and
+ * `bar_cash` each keep their own bucket by `categoryKey`; every OTHER
+ * `isCash` category — the seeded `other_cash` key AND any custom
+ * manager-created cash category (`categoryKey: null`) — sums into the
+ * `otherCash` bucket. The seed makes `isCash` true for exactly those three
+ * keys today, so this is a pure generalization, not a behavior change for
+ * existing data.
+ *
+ * The `other_cash` cell specifically gets the SAME "items-else-cell" rule
+ * as `getEffectiveIncomeForDay` (src/server/db.ts) — mirrored here exactly
+ * (including what counts as "has items": `otherIncomeItems.length > 0`,
+ * regardless of any item's own `isCash`) rather than assumed from the
+ * caller's `income` already being the effective view, so this function is
+ * correct even when it isn't: zero itemized other-income rows -> the day's
+ * typed `other_cash` cell reaches `otherCashSatang` (previously silently
+ * dropped — a latent, UI-reachable trap with zero live instances); one or
+ * more itemized rows -> the cell is ignored and the cash items' sum is used
+ * instead, unchanged from before.
  *
  * `heldBackSatang`/`broughtForwardSatang` (docs/plan-unify-exports-tender-
  * split.md item 6, Wave C — see `CashAdjustmentAmounts` in types.ts) fold
@@ -119,19 +137,37 @@ export function deriveCashBlock(
   heldBackSatang: number | null = null,
   broughtForwardSatang: number | null = null,
 ): CashBlockAmounts {
-  const categoryKeyByCategoryId = new Map(categories.map((category) => [category.id, category.categoryKey]));
+  const categoryById = new Map(categories.map((category) => [category.id, category]));
+  const hasOtherIncomeItems = otherIncomeItems.length > 0;
 
   let roomCashSatang = 0;
   let barCashSatang = 0;
+  let otherCashSatang = 0;
+
   for (const cell of Object.values(income)) {
-    const categoryKey = categoryKeyByCategoryId.get(cell.categoryId);
-    if (categoryKey === "room_cash") roomCashSatang += cell.amountSatang;
-    if (categoryKey === "bar_cash") barCashSatang += cell.amountSatang;
+    const category = categoryById.get(cell.categoryId);
+    if (!category?.isCash) continue;
+
+    if (category.categoryKey === "room_cash") {
+      roomCashSatang += cell.amountSatang;
+    } else if (category.categoryKey === "bar_cash") {
+      barCashSatang += cell.amountSatang;
+    } else if (category.categoryKey === "other_cash") {
+      // Items win when they exist (below) — the cell is only the fallback
+      // for a day with zero itemized other-income rows.
+      if (!hasOtherIncomeItems) otherCashSatang += cell.amountSatang;
+    } else {
+      // Any other isCash category — a custom manager-created one — always
+      // counts by its typed cell, independent of otherIncomeItems.
+      otherCashSatang += cell.amountSatang;
+    }
   }
 
-  const otherCashSatang = otherIncomeItems
-    .filter((item) => item.isCash)
-    .reduce((sum, item) => sum + item.amountSatang, 0);
+  if (hasOtherIncomeItems) {
+    otherCashSatang += otherIncomeItems
+      .filter((item) => item.isCash)
+      .reduce((sum, item) => sum + item.amountSatang, 0);
+  }
 
   return {
     roomCashSatang,

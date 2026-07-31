@@ -30,6 +30,19 @@ export interface UsePrintExportResult {
   /** Merge onto that same root's style — carries the print-only scale
    * transform (a no-op, {}, outside of an in-flight print). */
   sheetStyle: CSSProperties;
+  /** Wrap the sheet (the `nodeRef`/`sheetStyle` node) in ONE extra div using
+   * this style, inside the .print-stage portal — a no-op, {}, outside of an
+   * in-flight print. Chromium's print pagination fragments a page using an
+   * element's PRE-transform (natural) box, ignoring `sheetStyle`'s scale
+   * transform entirely — an over-tall day summary spills onto a second,
+   * mostly-blank page even though the SCALED content clearly fits one (see
+   * PrintableDaySummary.tsx's 2026-07-31 comment). Pinning an ancestor to
+   * the content's exact PAINTED footprint (natural size × the same scale,
+   * on both axes) with `overflow: hidden` gives the fragmenter a box that
+   * already fits one page, so it never splits. Only ever set alongside
+   * `sheetStyle`'s transform (see handlePrint) — never during PDF/JPEG
+   * capture, which reads the node at natural size with no transform. */
+  clampStyle: CSSProperties;
   busy: PrintExportBusy;
   error: string | null;
   handlePrint: () => Promise<void>;
@@ -41,6 +54,11 @@ const DEFAULT_MARGIN_MM = 10;
 const waitForLayout = () =>
   new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
+interface ClampSize {
+  widthPx: number;
+  heightPx: number;
+}
+
 export function usePrintExport({
   orientation,
   property,
@@ -49,6 +67,7 @@ export function usePrintExport({
 }: UsePrintExportArgs): UsePrintExportResult {
   const nodeRef = useRef<HTMLDivElement>(null);
   const [printScale, setPrintScale] = useState<number | null>(null);
+  const [printClamp, setPrintClamp] = useState<ClampSize | null>(null);
   const [busy, setBusy] = useState<PrintExportBusy>("");
   const [error, setError] = useState<string | null>(null);
 
@@ -62,29 +81,51 @@ export function usePrintExport({
       const { widthPx, heightPx } = a4PrintableAreaPx(orientation, marginMm);
       let naturalWidth = node.offsetWidth;
       let naturalHeight = node.offsetHeight;
-      setPrintScale(computeFitScale(naturalWidth, naturalHeight, widthPx, heightPx));
+      let scale = computeFitScale(naturalWidth, naturalHeight, widthPx, heightPx);
+
+      // Deliberately nothing is applied to the DOM yet at this point — no
+      // transform, no clamp wrapper size — so this first pause is purely
+      // "give any asynchronously-mounting content a chance to settle" (see
+      // the re-measure comment below), never a wait for our own state to
+      // paint. That matters here specifically because the clamp wrapper
+      // (below) is a new ancestor of `node`: if it were sized while `node`
+      // still measures itself via `width: fit-content` (sheetStyle), a
+      // narrower wrapper could feed back into that measurement and shrink
+      // `node`'s own reported box before we ever get a true natural
+      // reading. Keeping both state setters out of this dance entirely
+      // sidesteps that regardless of what's mounted inside the sheet.
       await waitForLayout();
 
       // Re-measure once: content that finishes mounting asynchronously
       // after the first measure (e.g. the weekly chart, still loading when
       // พิมพ์ was clicked) can change the sheet's natural size between that
       // measure and the print dialog actually opening, leaving the scale
-      // computed above wrong for what's now on the page. offsetWidth/Height
-      // reflect the untransformed layout box (CSS transform doesn't affect
-      // them), so re-measuring the same node here is safe even with the
-      // scale transform already applied. One retry is enough — this isn't a
-      // loop against a moving target, just a single known race window.
+      // computed above wrong for what's now on the page. Nothing has been
+      // applied to `node` yet (see above), so this reads the same
+      // untransformed, unclamped natural box as the first measurement. One
+      // retry is enough — this isn't a loop against a moving target, just a
+      // single known race window.
       const remeasuredWidth = node.offsetWidth;
       const remeasuredHeight = node.offsetHeight;
       if (remeasuredWidth !== naturalWidth || remeasuredHeight !== naturalHeight) {
         naturalWidth = remeasuredWidth;
         naturalHeight = remeasuredHeight;
-        setPrintScale(computeFitScale(naturalWidth, naturalHeight, widthPx, heightPx));
+        scale = computeFitScale(naturalWidth, naturalHeight, widthPx, heightPx);
         await waitForLayout();
       }
 
+      // Now that naturalWidth/naturalHeight/scale are final, apply the
+      // scale transform AND size the clamp wrapper to match in the SAME
+      // update — they must always come and go together (see clampStyle's
+      // docstring) — then wait one more layout tick so both are actually
+      // painted before window.print() takes its snapshot.
+      setPrintScale(scale);
+      setPrintClamp({ widthPx: naturalWidth * scale, heightPx: naturalHeight * scale });
+      await waitForLayout();
+
       printWithPageRule(orientation, marginMm, () => {
         setPrintScale(null);
+        setPrintClamp(null);
         setBusy("");
       });
     } catch (err) {
@@ -93,6 +134,7 @@ export function usePrintExport({
       // disabled — same lesson as handlePdf's catch, learned the hard way.
       console.error("print failed", err);
       setPrintScale(null);
+      setPrintClamp(null);
       setBusy("");
       // Point at the working alternative, not just "try again" — a kiosk with
       // a broken print path can still save the PDF and print that file.
@@ -130,5 +172,14 @@ export function usePrintExport({
     ...(printScale != null ? { transform: `scale(${printScale})`, transformOrigin: "top left" } : {}),
   };
 
-  return { nodeRef, sheetStyle, busy, error, handlePrint, handlePdf };
+  // {} outside an in-flight print (printClamp is only ever set alongside
+  // printScale, see handlePrint) — never constrains the sheet's own layout
+  // while idle, so nodeRef's offsetWidth/Height measurement above always
+  // reads the sheet's true natural box.
+  const clampStyle: CSSProperties =
+    printClamp != null
+      ? { width: printClamp.widthPx, height: printClamp.heightPx, overflow: "hidden" }
+      : {};
+
+  return { nodeRef, sheetStyle, clampStyle, busy, error, handlePrint, handlePdf };
 }

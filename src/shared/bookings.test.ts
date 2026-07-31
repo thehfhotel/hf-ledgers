@@ -186,6 +186,32 @@ describe("deriveCashBlock", () => {
       archivedAt: null,
       createdAt: "2026-01-01 00:00:00",
     },
+    {
+      id: 4,
+      property: "hf",
+      kind: "income",
+      nameTh: "รายการอื่นๆ เงินสด",
+      sort: 4,
+      isCash: true,
+      categoryKey: "other_cash",
+      archivedAt: null,
+      createdAt: "2026-01-01 00:00:00",
+    },
+    // A manager-created custom cash category — categoryKey null, isCash
+    // true, e.g. a "กองทุนเล็ก" cash box the seed never produces today, but
+    // the generalization to category.isCash must still fold it into the
+    // otherCash bucket (see deriveCashBlock's docblock).
+    {
+      id: 5,
+      property: "hf",
+      kind: "income",
+      nameTh: "กองทุนสำรอง (เงินสด)",
+      sort: 5,
+      isCash: true,
+      categoryKey: null,
+      archivedAt: null,
+      createdAt: "2026-01-01 00:00:00",
+    },
   ];
 
   function incomeCell(categoryId: number, amountSatang: number): IncomeCell {
@@ -245,6 +271,88 @@ describe("deriveCashBlock", () => {
     });
   });
 
+  // Wave B (issue #2): the other-cash term falls back to the day's typed
+  // other_cash cell when there are zero itemized other-income rows —
+  // mirroring getEffectiveIncomeForDay's items-else-cell rule (db.ts)
+  // exactly, including what counts as "has items" (otherIncomeItems.length,
+  // regardless of any item's own isCash). Zero live instances in
+  // production (86% of days carry an explicit banked override, immune by
+  // construction) — this closes a latent, UI-reachable trap only.
+  describe("other_cash fallback (Wave B)", () => {
+    test("typed-cell-only day (no itemized rows): the cell value reaches otherCash and bankedSatang", () => {
+      const income: Record<number, IncomeCell> = {
+        1: incomeCell(1, 49_000), // room cash
+        2: incomeCell(2, 2_000), // bar cash
+        4: incomeCell(4, 7_500), // typed รายการอื่นๆ เงินสด cell, no items backing it
+      };
+
+      const block = deriveCashBlock(categories, income, []);
+
+      expect(block.otherCashSatang).toBe(7_500);
+      expect(block.bankedSatang).toBe(49_000 + 2_000 + 7_500);
+    });
+
+    test("itemized day: identical to today — items win, the cell is ignored entirely", () => {
+      const income: Record<number, IncomeCell> = {
+        1: incomeCell(1, 49_000),
+        2: incomeCell(2, 2_000),
+        // A stale/wrong cell value that must NOT leak into otherCashSatang
+        // once itemized rows exist for the day.
+        4: incomeCell(4, 999_000),
+      };
+      const otherIncomeItems: OtherIncomeItem[] = [
+        otherIncomeItem(5_000, true), // cash — counts
+        otherIncomeItem(3_000, false), // transfer/credit — must not count
+      ];
+
+      const block = deriveCashBlock(categories, income, otherIncomeItems);
+
+      expect(block.otherCashSatang).toBe(5_000);
+      expect(block.bankedSatang).toBe(49_000 + 2_000 + 5_000);
+    });
+
+    test("a day with only non-cash itemized rows still counts as 'has items' — the cell is ignored, not just the isCash filter", () => {
+      const income: Record<number, IncomeCell> = {
+        4: incomeCell(4, 12_000), // must be ignored: items exist, even though none are cash
+      };
+      const otherIncomeItems: OtherIncomeItem[] = [otherIncomeItem(3_000, false)];
+
+      const block = deriveCashBlock(categories, income, otherIncomeItems);
+
+      expect(block.otherCashSatang).toBe(0);
+    });
+  });
+
+  // Wave B (issue #2): room/bar/other selection generalises from three
+  // hardcoded categoryKey checks to category.isCash — room_cash and
+  // bar_cash keep their own buckets, every OTHER isCash category (the
+  // seeded other_cash key, or a custom manager-created one with
+  // categoryKey null) sums into otherCash.
+  describe("custom isCash category generalisation (Wave B)", () => {
+    test("a custom isCash category (categoryKey null) with a typed cell counts into otherCash", () => {
+      const income: Record<number, IncomeCell> = {
+        1: incomeCell(1, 49_000),
+        5: incomeCell(5, 1_000), // custom cash category, no otherIncomeItems at all
+      };
+
+      const block = deriveCashBlock(categories, income, []);
+
+      expect(block.otherCashSatang).toBe(1_000);
+      expect(block.bankedSatang).toBe(49_000 + 1_000);
+    });
+
+    test("a custom isCash category's cell adds ALONGSIDE itemized other-income, independent of the items-else-cell rule (that rule is other_cash-specific)", () => {
+      const income: Record<number, IncomeCell> = {
+        5: incomeCell(5, 1_000), // custom cash category
+      };
+      const otherIncomeItems: OtherIncomeItem[] = [otherIncomeItem(5_000, true)];
+
+      const block = deriveCashBlock(categories, income, otherIncomeItems);
+
+      expect(block.otherCashSatang).toBe(1_000 + 5_000);
+    });
+  });
+
   // Deposit-machine reconciliation rows (docs/plan-unify-exports-tender-
   // split.md item 6, Wave C): bankedSatang = roomCash + otherCash + barCash
   // - heldBackSatang + broughtForwardSatang. Every combination below reuses
@@ -294,6 +402,21 @@ describe("deriveCashBlock", () => {
     test("a held-back amount larger than the cash total is allowed to go negative — the formula never clamps", () => {
       const block = deriveCashBlock(categories, income, otherIncomeItems, CASH_TOTAL_SATANG + 1_000, null);
       expect(block.bankedSatang).toBe(-1_000);
+    });
+
+    // Wave B regression: the fallback/generalisation changes above must not
+    // disturb how heldBack/broughtForward fold into bankedSatang — same
+    // formula, now fed by a cash total that includes a typed-cell-only
+    // other_cash fallback instead of an itemized sum.
+    test("interplay is unchanged when the cash total comes from the other_cash fallback rather than items", () => {
+      const fallbackIncome: Record<number, IncomeCell> = {
+        1: incomeCell(1, 49_000), // room cash
+        2: incomeCell(2, 2_000), // bar cash
+        4: incomeCell(4, 5_000), // other_cash cell, no itemized rows — the Wave B fallback
+      };
+      const block = deriveCashBlock(categories, fallbackIncome, [], 12_000, 8_500);
+      expect(block.otherCashSatang).toBe(5_000);
+      expect(block.bankedSatang).toBe(CASH_TOTAL_SATANG - 12_000 + 8_500);
     });
   });
 });

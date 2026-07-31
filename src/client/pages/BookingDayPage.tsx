@@ -1057,16 +1057,24 @@ export function BookingDayPage({ property, date }: Props) {
           see PrintPortal.tsx / style.css's .print-stage. */}
       <PrintPortal>
         <div className="print-stage">
-          <div ref={printExport.nodeRef} style={printExport.sheetStyle}>
-            <ReportSheet
-              property={effectiveProperty}
-              date={effectiveDate}
-              sheet={daySheet}
-              lines={sortedLines}
-              variant="bookingsOnly"
-              demo={isDemo}
-              inlineTitle
-            />
+          {/* Print-pagination clamp (issue #3) — see usePrintExport.ts's
+              clampStyle docstring: a no-op wrapper outside an in-flight
+              print, sized to the scaled sheet's exact painted footprint
+              while one is happening so Chromium's page fragmenter (which
+              ignores sheetStyle's transform) never spills this onto a
+              second page. */}
+          <div style={printExport.clampStyle}>
+            <div ref={printExport.nodeRef} style={printExport.sheetStyle}>
+              <ReportSheet
+                property={effectiveProperty}
+                date={effectiveDate}
+                sheet={daySheet}
+                lines={sortedLines}
+                variant="bookingsOnly"
+                demo={isDemo}
+                inlineTitle
+              />
+            </div>
           </div>
         </div>
       </PrintPortal>

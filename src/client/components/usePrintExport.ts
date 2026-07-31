@@ -60,9 +60,29 @@ export function usePrintExport({
     setBusy("print");
     try {
       const { widthPx, heightPx } = a4PrintableAreaPx(orientation, marginMm);
-      const scale = computeFitScale(node.offsetWidth, node.offsetHeight, widthPx, heightPx);
-      setPrintScale(scale);
+      let naturalWidth = node.offsetWidth;
+      let naturalHeight = node.offsetHeight;
+      setPrintScale(computeFitScale(naturalWidth, naturalHeight, widthPx, heightPx));
       await waitForLayout();
+
+      // Re-measure once: content that finishes mounting asynchronously
+      // after the first measure (e.g. the weekly chart, still loading when
+      // พิมพ์ was clicked) can change the sheet's natural size between that
+      // measure and the print dialog actually opening, leaving the scale
+      // computed above wrong for what's now on the page. offsetWidth/Height
+      // reflect the untransformed layout box (CSS transform doesn't affect
+      // them), so re-measuring the same node here is safe even with the
+      // scale transform already applied. One retry is enough — this isn't a
+      // loop against a moving target, just a single known race window.
+      const remeasuredWidth = node.offsetWidth;
+      const remeasuredHeight = node.offsetHeight;
+      if (remeasuredWidth !== naturalWidth || remeasuredHeight !== naturalHeight) {
+        naturalWidth = remeasuredWidth;
+        naturalHeight = remeasuredHeight;
+        setPrintScale(computeFitScale(naturalWidth, naturalHeight, widthPx, heightPx));
+        await waitForLayout();
+      }
+
       printWithPageRule(orientation, marginMm, () => {
         setPrintScale(null);
         setBusy("");

@@ -143,6 +143,25 @@ body {
   border-radius: 0 !important;
 }
 
+/* Browsers drop background colors by default when printing (Chrome/Safari
+   require the user to manually tick "Background graphics" in the print
+   dialog) — invisible in printSheet.ts's window.print() flow even though
+   exportPdf.ts's html2canvas-pro capture (which reads computed styles
+   directly, off-screen, never through the browser's print pipeline) shows
+   them fine. Without this, a div-based bar in PrintableDaySummary.tsx's
+   weekly income chart would render in the PDF but VANISH as an empty
+   column in the actual print dialog — a silent mismatch between the two
+   export paths that only shows up on paper. Also what makes the title
+   block's brand/gold rule bars (bg-brand-800 / bg-gold-500 at the top of
+   every printed sheet) print at all, same failure mode. Same .print-stage
+   scope as every rule above: reaches both the print dialog and the PDF
+   capture, the one hook both outputs share. */
+.print-stage,
+.print-stage * {
+  print-color-adjust: exact !important;
+  -webkit-print-color-adjust: exact !important;
+}
+
 /* Scale-resilient outer frame for the bookings grid. ReportSheet.tsx
    (~line 111) draws the grid with only per-cell bottom/right rules plus a
    1px border-t/border-l wrapper div to close the top and left of the

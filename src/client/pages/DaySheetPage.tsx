@@ -22,6 +22,7 @@ import {
   getDay,
   getMe,
   listBookingLines,
+  listDays,
   putDayNote,
   putIncomeCell,
   putVerify,
@@ -33,6 +34,7 @@ import { AmountInput } from "../components/AmountInput.tsx";
 import { DateBar } from "../components/DateBar.tsx";
 import { PrintableDaySummary } from "../components/PrintableDaySummary.tsx";
 import { PrintPortal } from "../components/PrintPortal.tsx";
+import { computeWeekWindow, weekWindowMonths, zeroFillWeek, type WeekDayIncome } from "../components/printWeekChart.ts";
 import { usePrintExport } from "../components/usePrintExport.ts";
 import { PropertyBadge } from "./PropertyBadge.tsx";
 
@@ -113,6 +115,13 @@ export function DaySheetPage({ property, date }: Props) {
   const [verifyBusy, setVerifyBusy] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
 
+  // ── Weekly income chart (print-only, PrintableDaySummary.tsx) ─────────
+  // null until loaded, and left null on any fetch failure — the chart
+  // section is purely decorative context, so a listDays() hiccup must never
+  // break this page or the rest of the print. See printWeekChart.ts for the
+  // pure week-window/zero-fill math.
+  const [weekDays, setWeekDays] = useState<WeekDayIncome[] | null>(null);
+
   // ── พิมพ์ / PDF — the day summary only (no booking grid), portrait ─────
   // Read-only actions: never gated on monthClosed — see usePrintExport.ts /
   // PrintableDaySummary.tsx.
@@ -158,6 +167,32 @@ export function DaySheetPage({ property, date }: Props) {
       .catch((err) => {
         if (cancelled) return;
         setLoadError(err instanceof Error ? err.message : "โหลดข้อมูลไม่สำเร็จ");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [property, date]);
+
+  // Independent of the main day load above: covers the Monday-start week
+  // containing `date`, fetching one listDays() call per calendar month the
+  // week touches (one, almost always — two only when the week straddles a
+  // month boundary). Never surfaces an error — see the field doc above.
+  useEffect(() => {
+    let cancelled = false;
+    setWeekDays(null);
+    const weekWindow = computeWeekWindow(date);
+    const months = weekWindowMonths(weekWindow);
+    Promise.all(months.map((month) => listDays(property, month)))
+      .then((results) => {
+        if (cancelled) return;
+        const incomeByDate = new Map<string, number>();
+        for (const res of results) {
+          for (const d of res.days) incomeByDate.set(d.date, d.incomeSatang);
+        }
+        setWeekDays(zeroFillWeek(weekWindow, incomeByDate));
+      })
+      .catch(() => {
+        if (!cancelled) setWeekDays(null);
       });
     return () => {
       cancelled = true;
@@ -1026,7 +1061,7 @@ export function DaySheetPage({ property, date }: Props) {
       <PrintPortal>
         <div className="print-stage">
           <div ref={printExport.nodeRef} style={printExport.sheetStyle}>
-            <PrintableDaySummary property={property} date={date} sheet={day} />
+            <PrintableDaySummary property={property} date={date} sheet={day} weekDays={weekDays ?? undefined} />
           </div>
         </div>
       </PrintPortal>

@@ -13,14 +13,25 @@ import {
 } from "../../shared/types.ts";
 import { CASH_BLOCK_FIELDS, PROVENANCE_LABELS_TH } from "../labels.ts";
 
-// Read-only report building blocks shared by the two printable renderings
-// of a day's data:
+// Read-only report building blocks shared by the printable renderings of a
+// day's data:
 //   - ReportSheet.tsx (full paper form: booking grid + this) — JPEG export
-//     (ReportPage.tsx) and BookingDayPage's "bookingsOnly" print/PDF.
+//     (ReportPage.tsx) and BookingDayPage's "bookingsOnly" print/PDF. Both
+//     of ReportSheet's income sections (IncomeExpenseSummaryCard,
+//     CashSummaryCard) come from here.
 //   - PrintableDaySummary.tsx (DaySheetPage's print/PDF — no booking grid).
-// One copy of each block so the two renderings can never drift into two
-// different figures or wordings for the same day (see CLAUDE.md: never
-// invent new wording for things that already have canonical strings).
+// One copy of each block so every rendering that DOES use it can never
+// drift into two different figures or wordings for the same day (see
+// CLAUDE.md: never invent new wording for things that already have
+// canonical strings). That guarantee no longer covers the income summary
+// itself: by owner decision, PrintableDaySummary.tsx's day-summary print
+// groups income by tender in its own layout (see printDayIncomeGrouping.ts)
+// instead of rendering IncomeExpenseSummaryCard below — the JPEG export and
+// the bookingsOnly print keep the classic flat-category form unchanged.
+// ReportFooter, ReportSheetTitle, the BOX/ROW_* primitives, and (via
+// labels.ts's CASH_BLOCK_FIELDS, read directly rather than through
+// CashSummaryCard) the **หมายเหตุ cash-block wording stay genuinely shared
+// across every rendering.
 
 export const BOX = "rounded-lg border border-line";
 export const BOX_HEAD = "border-b border-line bg-tint px-3 py-1.5 text-xs font-semibold text-ink";

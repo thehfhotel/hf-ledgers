@@ -1203,12 +1203,37 @@ export function deleteBookingLine(property: Property, id: number): boolean {
  * otherwise inserted via `createBookingLine()` with `source: 'pms'`,
  * `draft: false` (this is a confirmed received payment, not a draft
  * awaiting front-desk confirmation), `seq` allocated the same
- * `nextBookingLineSeq()` way every other insert path uses. Tenders: only
- * `deposit`/`cash`/`web` are populated from the candidate — credit/transfer
- * are deliberately left at 0 (the PMS never records the acquiring bank; see
- * `unplacedCreditSatang`/`unplacedTranSatang`, surfaced by the caller, never
- * written here). Refund filtering happens in the caller (server.ts) before
- * this is invoked — every candidate reaching here is assumed insertable.
+ * `nextBookingLineSeq()` way every other insert path uses.
+ *
+ * Tenders — AUTO-PLACEMENT POLICY (grep "AUTO-PLACEMENT POLICY" if this
+ * ever needs revisiting; evidence-based, set 2026-07-31, superseding the
+ * older "never guess the acquiring bank, leave credit/transfer at 0"
+ * rule for transfer specifically): `deposit`/`cash`/`web` always come
+ * straight from the candidate, unchanged.
+ *
+ * - `unplacedTranSatang` is now written into `transfer_kbank` for BOTH
+ *   properties. Across all 6,024 historical booking lines on hf AND
+ *   hfville, `t_transfer_icbc` is 0 in every single row — every transfer
+ *   this hotel group has ever recorded is โอน/กสิกร. This was previously
+ *   left unwritten under the old "never guess the acquiring bank" rule;
+ *   the evidence now empties that rule for transfers, and leaving it
+ *   unwritten was a confirmed production money bug (12 of 17 PMS-inserted
+ *   rows short by exactly their ledger_tran; 15,777 THB missing on hfville
+ *   2026-07-24 and 2026-07-30 — docs/plan-unify-exports-tender-split.md
+ *   item 4). If a real ICBC transfer ever shows up in the history (some
+ *   row's `t_transfer_icbc` becomes nonzero), this policy needs revisiting
+ *   — do not assume it still holds.
+ * - `unplacedCreditSatang` is written into `credit_kbank` ONLY when
+ *   `property === "hfville"` — hfville's entire credit-card history uses
+ *   `credit_kbank` exclusively (single bank in practice there). `"hf"`
+ *   genuinely uses both `credit_kbank` and `credit_icbc` historically, so
+ *   which bank a "hf" credit-card payment landed on cannot be inferred
+ *   from the PMS ledger; it stays unwritten (0) and is reported back to
+ *   the caller (server.ts's `unplaced`) for hand-placement, same as
+ *   before.
+ *
+ * Refund filtering happens in the caller (server.ts) before this is
+ * invoked — every candidate reaching here is assumed insertable.
  */
 export function insertPmsBookingLines(
   property: Property,
@@ -1247,6 +1272,9 @@ export function insertPmsBookingLines(
             deposit: candidate.depositSatang,
             cash: candidate.cashSatang,
             web: candidate.webSatang,
+            // See the AUTO-PLACEMENT POLICY note above the function.
+            transfer_kbank: candidate.unplacedTranSatang,
+            credit_kbank: property === "hfville" ? candidate.unplacedCreditSatang : 0,
           },
           source: "pms",
           draft: false,

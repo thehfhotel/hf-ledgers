@@ -468,7 +468,11 @@ thing still worth recording after a close.
     fetch on load, no polling). → 200
     `{ inserted: number, skipped: number, skippedRefunds: number,
     unplaced: Array<{ pmsRef: string, bookingNo: string | null,
-    creditSatang: number, tranSatang: number }> }`.
+    creditSatang: number, tranSatang: number }>,
+    autoPlaced: Array<{ pmsRef: string, bookingNo: string | null,
+    transferSatang: number, creditSatang: number }> }`.
+    `autoPlaced` is additive (added 2026-07-31) — existing consumers reading
+    only `inserted`/`skipped`/`skippedRefunds`/`unplaced` are unaffected.
 
     **Dark by default.** 503 (`{ error: "pms prefill not configured" }`)
     when this property's PMS env URL (`PMS_DB_URL_HF` / `PMS_DB_URL_HFVILLE`
@@ -495,18 +499,35 @@ thing still worth recording after a close.
     `grossRoomSatang`/`grossOtherSatang`. This endpoint trusts that
     dedup — it never re-sums tenders itself.
 
-    **What is never filled.** The five tender columns map only
-    `cash → t_cash`, `web → t_web`, `deposit → t_deposit`
-    (`insertPmsBookingLines()` in `db.ts`) — credit and transfer amounts are
-    NEVER written to a bank-specific column (`t_credit_kbank` /
-    `t_credit_icbc` / `t_transfer_kbank` / `t_transfer_icbc` all stay 0 on
-    a PMS-inserted row), because the PMS records no acquiring bank. Those
-    amounts are reported in `unplaced` instead (one entry per
-    inserted-or-skipped non-refund candidate with a nonzero
-    `unplacedCreditSatang`/`unplacedTranSatang`) for the operator to type
-    into the right bank column by hand. `discountSatang` is never filled
-    either — no discount column exists anywhere in the PMS folio/payment
-    data; it stays `0`, editable by hand as always.
+    **Auto-placement policy (evidence-based, set 2026-07-31 —
+    `insertPmsBookingLines()` in `db.ts`, grep "AUTO-PLACEMENT POLICY").**
+    `cash → t_cash`, `web → t_web`, `deposit → t_deposit` always map
+    directly. Credit and transfer used to be left entirely at 0 under a
+    "never guess the acquiring bank" rule — leaving them unwritten turned
+    out to be a confirmed production money bug (12 of 17 PMS-inserted rows
+    silently short by exactly their transfer amount; see
+    `docs/plan-unify-exports-tender-split.md` item 4). The rule is now
+    evidence-gated per tender:
+    - **Transfer → `t_transfer_kbank`, on BOTH properties.** Across all
+      6,024 historical booking lines on hf and hfville, `t_transfer_icbc`
+      is 0 in every row — every transfer this hotel group has ever
+      recorded is โอน/กสิกร. If a real ICBC transfer ever appears in the
+      history, this policy needs revisiting.
+    - **Credit → `t_credit_kbank`, ONLY on `hfville`.** hfville's
+      credit-card history uses `credit_kbank` exclusively (one bank in
+      practice). `hf` genuinely uses both `credit_kbank` and
+      `credit_icbc`, so which bank an `hf` credit-card payment landed on
+      cannot be inferred from the PMS ledger — it stays unwritten (0)
+      there, same as the old rule.
+    Amounts the server placed on a bank column are reported back in
+    `autoPlaced` (one entry per inserted-or-skipped non-refund candidate
+    with a nonzero placed transfer/hfville-credit amount) — a
+    verification note for the operator, since it's still an inference,
+    just an evidence-backed one now. Amounts that remain genuinely
+    unresolvable (hf credit only, going forward) are reported in
+    `unplaced`, same "type it in by hand" contract as before. `discountSatang`
+    is never filled either — no discount column exists anywhere in the PMS
+    folio/payment data; it stays `0`, editable by hand as always.
 
     **Refunds are reported, never inserted.** A candidate whose net tender
     total is negative (`isRefund: true`) is filtered out before insertion
@@ -530,7 +551,14 @@ thing still worth recording after a close.
     Client wrapper (`src/client/api.ts`):
     `pullFromPms(property: Property, date: string):
     Promise<{ inserted: number; skipped: number; skippedRefunds: number;
-    unplaced: PmsUnplacedTender[] }>`.
+    unplaced: PmsUnplacedTender[] }>`. NOTE (2026-07-31): the server
+    response now additionally carries `autoPlaced: PmsAutoPlacedTender[]`
+    (see above) — `api.ts`'s declared return type has not been updated to
+    include it yet (out of scope for the change that added the field;
+    `src/client/pages/BookingDayPage.tsx` widens the result locally with a
+    cast until `api.ts` catches up). A follow-up should add
+    `PmsAutoPlacedTender` and the `autoPlaced` field to `api.ts` itself so
+    the contract is typed at the source.
 
 ## Shared types (`src/shared/types.ts`, verbatim, READ-ONLY)
 

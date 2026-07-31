@@ -729,6 +729,7 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
   afterEach(() => {
     pmsPrefillInternal.setFetchDayPaymentsForTests(null);
     delete process.env.PMS_DB_URL_HF;
+    delete process.env.PMS_DB_URL_HFVILLE;
   });
 
   test("503 when the property's PMS env URL is unset", async () => {
@@ -738,7 +739,7 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     expect((res.body as { error: string }).error).toBe("pms prefill not configured");
   });
 
-  test("inserts two candidates: visible via GET bookings with correct seq continuation, tenders mapped, credit/transfer columns zero", async () => {
+  test("inserts two candidates: visible via GET bookings with correct seq continuation, tenders mapped, transfer_kbank auto-placed (hf credit stays unplaced)", async () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const DATE = "2026-08-02";
 
@@ -751,19 +752,31 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
         roomNo: "101",
         cashSatang: 100_000,
         depositSatang: 20_000,
+        unplacedTranSatang: 30_000,
+        unplacedCreditSatang: 12_000,
       }),
       pmsCandidate({ pmsRef: "R2608-0102", bookingNo: "CH26-000102", roomNo: "102", webSatang: 75_000 }),
     ]);
 
-    const pulled = await call<{ inserted: number; skipped: number; skippedRefunds: number; unplaced: unknown[] }>(
-      "POST",
-      `/${PROPERTY}/day/${DATE}/pull-from-pms`,
-    );
+    const pulled = await call<{
+      inserted: number;
+      skipped: number;
+      skippedRefunds: number;
+      unplaced: Array<{ pmsRef: string; bookingNo: string | null; creditSatang: number; tranSatang: number }>;
+      autoPlaced: Array<{ pmsRef: string; bookingNo: string | null; transferSatang: number; creditSatang: number }>;
+    }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
     expect(pulled.status).toBe(200);
     expect(pulled.body.inserted).toBe(2);
     expect(pulled.body.skipped).toBe(0);
     expect(pulled.body.skippedRefunds).toBe(0);
-    expect(pulled.body.unplaced).toEqual([]);
+    // hf: credit cannot be inferred (two banks in use there) — stays unplaced.
+    expect(pulled.body.unplaced).toEqual([
+      { pmsRef: "R2608-0101", bookingNo: "CH26-000101", creditSatang: 12_000, tranSatang: 0 },
+    ]);
+    // transfer is auto-placed for every property — reported for verification.
+    expect(pulled.body.autoPlaced).toEqual([
+      { pmsRef: "R2608-0101", bookingNo: "CH26-000101", transferSatang: 30_000, creditSatang: 0 },
+    ]);
 
     const bookings = await call<{
       lines: Array<{
@@ -781,9 +794,11 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     expect(first.draft).toBe(false);
     expect(first.tenders.cash).toBe(100_000);
     expect(first.tenders.deposit).toBe(20_000);
+    // transfer_kbank now carries the auto-placed amount (the fixed money bug).
+    expect(first.tenders.transfer_kbank).toBe(30_000);
+    // credit stays unwritten on "hf" — two credit banks in use, cannot be inferred.
     expect(first.tenders.credit_kbank).toBe(0);
     expect(first.tenders.credit_icbc).toBe(0);
-    expect(first.tenders.transfer_kbank).toBe(0);
     expect(first.tenders.transfer_icbc).toBe(0);
     expect(first.tenders.other).toBe(0);
 
@@ -791,6 +806,101 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     expect(second.tenders.web).toBe(75_000);
     expect(second.tenders.credit_kbank).toBe(0);
     expect(second.tenders.transfer_kbank).toBe(0);
+  });
+
+  test("credit_kbank is auto-placed for hfville (single credit bank in that property's history) — nothing left unplaced", async () => {
+    process.env.PMS_DB_URL_HFVILLE = "postgresql://readonly@fake-pms-test/hfville";
+    const HFVILLE = "hfville";
+    const DATE = "2026-08-02";
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
+      pmsCandidate({
+        pmsRef: "R2608-0501",
+        bookingNo: "CH26-000501",
+        cashSatang: 10_000,
+        unplacedCreditSatang: 18_000,
+        unplacedTranSatang: 5_000,
+      }),
+    ]);
+
+    const pulled = await call<{
+      inserted: number;
+      unplaced: unknown[];
+      autoPlaced: Array<{ pmsRef: string; bookingNo: string | null; transferSatang: number; creditSatang: number }>;
+    }>("POST", `/${HFVILLE}/day/${DATE}/pull-from-pms`);
+    expect(pulled.body.inserted).toBe(1);
+    expect(pulled.body.unplaced).toEqual([]);
+    expect(pulled.body.autoPlaced).toEqual([
+      { pmsRef: "R2608-0501", bookingNo: "CH26-000501", transferSatang: 5_000, creditSatang: 18_000 },
+    ]);
+
+    const bookings = await call<{ lines: Array<{ bookingNo: string | null; tenders: Record<Tender, number> }> }>(
+      "GET",
+      `/${HFVILLE}/day/${DATE}/bookings`,
+    );
+    const line = bookings.body.lines.find((l) => l.bookingNo === "CH26-000501")!;
+    expect(line.tenders.credit_kbank).toBe(18_000);
+    expect(line.tenders.transfer_kbank).toBe(5_000);
+    expect(line.tenders.credit_icbc).toBe(0);
+    expect(line.tenders.transfer_icbc).toBe(0);
+  });
+
+  test("hf credit stays unplaced and unwritten: two credit banks genuinely in use on that property, PMS records neither", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-08-08";
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
+      pmsCandidate({ pmsRef: "R2608-0601", bookingNo: "CH26-000601", cashSatang: 20_000, unplacedCreditSatang: 9_000 }),
+    ]);
+
+    const pulled = await call<{
+      unplaced: Array<{ pmsRef: string; bookingNo: string | null; creditSatang: number; tranSatang: number }>;
+      autoPlaced: unknown[];
+    }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    expect(pulled.body.unplaced).toEqual([
+      { pmsRef: "R2608-0601", bookingNo: "CH26-000601", creditSatang: 9_000, tranSatang: 0 },
+    ]);
+    // Nothing was auto-placed for this candidate — no transfer, and hf credit isn't auto-placed.
+    expect(pulled.body.autoPlaced).toEqual([]);
+
+    const bookings = await call<{ lines: Array<{ bookingNo: string | null; tenders: Record<Tender, number> }> }>(
+      "GET",
+      `/${PROPERTY}/day/${DATE}/bookings`,
+    );
+    const line = bookings.body.lines.find((l) => l.bookingNo === "CH26-000601")!;
+    expect(line.tenders.credit_kbank).toBe(0);
+  });
+
+  // Regression for the confirmed production money bug (2026-07-31): a real
+  // ประภัสสร-shaped hfville payment — ค่าห้อง 2,500, เงินสด 1,250, เงินโอน
+  // 1,250 — was previously inserted with only t_cash populated, silently
+  // dropping the 1,250 THB transfer (docs/plan-unify-exports-tender-split.md
+  // item 4). transfer_kbank must now carry it on every property.
+  test("regression: ประภัสสร-shaped candidate (cash 1,250 + transfer 1,250, gross 2,500) inserts with both t_cash and transfer_kbank populated", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const DATE = "2026-08-09";
+
+    pmsPrefillInternal.setFetchDayPaymentsForTests(async () => [
+      pmsCandidate({
+        pmsRef: "R2607-0701",
+        bookingNo: "CH26-000701",
+        grossRoomSatang: 250_000,
+        grossOtherSatang: 0,
+        cashSatang: 125_000,
+        unplacedTranSatang: 125_000,
+      }),
+    ]);
+
+    const pulled = await call<{ inserted: number }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
+    expect(pulled.body.inserted).toBe(1);
+
+    const bookings = await call<{ lines: Array<{ bookingNo: string | null; tenders: Record<Tender, number> }> }>(
+      "GET",
+      `/${PROPERTY}/day/${DATE}/bookings`,
+    );
+    const line = bookings.body.lines.find((l) => l.bookingNo === "CH26-000701")!;
+    expect(line.tenders.cash).toBe(125_000);
+    expect(line.tenders.transfer_kbank).toBe(125_000);
   });
 
   test("pressing pull-from-pms twice is idempotent: the second press skips every candidate, no duplicate rows", async () => {
@@ -845,7 +955,7 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
     expect(bookings.body.lines[0]?.bookingNo).toBe("CH26-000301");
   });
 
-  test("unplaced lists every candidate with a nonzero unplaced credit/transfer amount", async () => {
+  test("unplaced now lists only genuinely-unplaced hf credit; transfer is auto-placed and reported via autoPlaced instead", async () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     const DATE = "2026-08-05";
 
@@ -867,14 +977,16 @@ describe("PMS prefill: POST /:property/day/:date/pull-from-pms", () => {
 
     const pulled = await call<{
       unplaced: Array<{ pmsRef: string; bookingNo: string | null; creditSatang: number; tranSatang: number }>;
+      autoPlaced: Array<{ pmsRef: string; bookingNo: string | null; transferSatang: number; creditSatang: number }>;
     }>("POST", `/${PROPERTY}/day/${DATE}/pull-from-pms`);
-    expect(pulled.body.unplaced).toHaveLength(2);
-    expect(pulled.body.unplaced).toEqual(
-      expect.arrayContaining([
-        { pmsRef: "R2608-0401", bookingNo: "CH26-000401", creditSatang: 15_000, tranSatang: 0 },
-        { pmsRef: "R2608-0402", bookingNo: "CH26-000402", creditSatang: 0, tranSatang: 8_000 },
-      ]),
-    );
+    // Only the hf credit amount remains genuinely unplaced.
+    expect(pulled.body.unplaced).toEqual([
+      { pmsRef: "R2608-0401", bookingNo: "CH26-000401", creditSatang: 15_000, tranSatang: 0 },
+    ]);
+    // The transfer amount was auto-placed into transfer_kbank instead.
+    expect(pulled.body.autoPlaced).toEqual([
+      { pmsRef: "R2608-0402", bookingNo: "CH26-000402", transferSatang: 8_000, creditSatang: 0 },
+    ]);
   });
 
   test("409 when the month is closed", async () => {

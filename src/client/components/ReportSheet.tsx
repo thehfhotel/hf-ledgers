@@ -14,7 +14,8 @@ import {
   countText,
   moneyText,
 } from "./bookingGridFrame.tsx";
-import { CashSummaryCard, IncomeExpenseSummaryCard, ReportFooter, ReportSheetTitle } from "./reportSheetBlocks.tsx";
+import { DayTenderSummary, ReportFooter, ReportSheetTitle } from "./reportSheetBlocks.tsx";
+import type { WeekDayIncome } from "./printWeekChart.ts";
 
 // The printable day sheet — the filed paper (รายงานรายรับของโรงแรม) rather
 // than a phone-sized summary card. Rendered VISIBLE (never offscreen — see
@@ -33,10 +34,10 @@ import { CashSummaryCard, IncomeExpenseSummaryCard, ReportFooter, ReportSheetTit
 //      and totals row as the entry screen (components/bookingGridFrame.tsx —
 //      one copy, so the two can never drift) — ALWAYS rendered, "full" and
 //      "bookingsOnly" alike
-//   3. side by side: สรุปยอดรายรับโรงแรม (+ รายจ่าย) | **หมายเหตุ cash
-//      banking block (+ the itemised รายการอื่นๆ entries, when there are any)
-//      (reportSheetBlocks.tsx's IncomeExpenseSummaryCard / CashSummaryCard)
-//      — "full" variant only
+//   3. the SAME tender-grouped day summary PrintableDaySummary.tsx's
+//      print/PDF renders (reportSheetBlocks.tsx's DayTenderSummary — owner
+//      decision, 2026-07-31: ONE layout for all three exports, no expense
+//      section anywhere) — "full" variant only
 //   4. footer: provenance, sign-off, last editor, export stamp
 //      (reportSheetBlocks.tsx's ReportFooter) — "full" variant only
 //
@@ -67,27 +68,34 @@ interface ReportSheetProps {
   /** The day's booking rows, in seq order (drafts allowed — they are printed
    * as a footnote count, never as rows). */
   lines: BookingLine[];
-  /** "full" (default): grid + income/expense summary + cash-banking block +
-   * footer — the paper form's exact shape, what ReportPage/exportJpeg use
-   * for the JPEG share/download. "bookingsOnly": title + grid only, for
-   * BookingDayPage's print/PDF of just the booking sheet. */
+  /** "full" (default): grid + the tender-grouped day summary + footer — the
+   * paper form's exact shape, what ReportPage/exportJpeg use for the JPEG
+   * share/download. "bookingsOnly": title + grid only, for BookingDayPage's
+   * print/PDF of just the booking sheet. */
   variant?: "full" | "bookingsOnly";
   /** Marks the header "(ตัวอย่าง)" — see reportSheetBlocks.tsx's
    * ReportSheetTitle. */
   demo?: boolean;
-  /** One-line title instead of the paper form's 3 stacked lines — for
-   * print/PDF output only (see reportSheetBlocks.tsx's ReportSheetTitle).
-   * BookingDayPage's "bookingsOnly" print/PDF portal sets this; ReportPage's
-   * JPEG export passes nothing, keeping the familiar stacked look. */
+  /** No longer changes anything: ReportSheetTitle has only the one-line form
+   * now (owner decision, 2026-07-31 — see reportSheetBlocks.tsx), so every
+   * ReportSheet rendering is inline regardless of this flag. Kept in the
+   * prop type only because BookingDayPage.tsx's "bookingsOnly" print/PDF
+   * call site still passes it explicitly. */
   inlineTitle?: boolean;
+  /** The Monday-start calendar week containing `date`, zero-filled to
+   * exactly 7 entries — threaded straight through to DayTenderSummary's
+   * weekly chart (see DaySheetPage.tsx / printWeekChart.ts / ReportPage.tsx
+   * for how it's fetched). Absent (undefined) while loading or after a
+   * fetch failure — the chart section simply doesn't render. Unused by the
+   * "bookingsOnly" variant, which never renders DayTenderSummary. */
+  weekDays?: WeekDayIncome[];
 }
 
 export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function ReportSheet(
-  { property, date, sheet, lines, variant = "full", demo = false, inlineTitle = false },
+  { property, date, sheet, lines, variant = "full", demo = false, weekDays },
   ref,
 ) {
-  const { categories, income, expenses, totals, otherIncome, cashBlock, provenance, verifiedAt, verifiedBy, note, updatedBy } =
-    sheet;
+  const { provenance, verifiedAt, verifiedBy, updatedBy } = sheet;
 
   // Drafts are proposals, not income: computeBookingTotals() excludes them,
   // so the printed sheet excludes them too and footnotes the count instead.
@@ -103,7 +111,7 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
 
       <div className="py-6" style={{ paddingLeft: SHEET_PADDING, paddingRight: SHEET_PADDING }}>
         {/* 1. Title block — the way the workbook heads each sheet. */}
-        <ReportSheetTitle property={property} date={date} demo={demo} inline={inlineTitle} />
+        <ReportSheetTitle property={property} date={date} demo={demo} />
 
         {/* 2. The booking grid, read-only, same frame as the entry screen. */}
         <section className="mb-5">
@@ -163,14 +171,13 @@ export const ReportSheet = forwardRef<HTMLDivElement, ReportSheetProps>(function
           )}
         </section>
 
-        {/* 3. + 4. Summary categories | cash-banking block, and the
-            provenance footer — the "full" paper form only; BookingDayPage's
+        {/* 3. + 4. The tender-grouped day summary, and the provenance
+            footer — the "full" paper form only; BookingDayPage's
             "bookingsOnly" print/PDF stops at the grid above. */}
         {variant === "full" && (
           <>
-            <div className="flex items-start gap-4">
-              <IncomeExpenseSummaryCard categories={categories} income={income} expenses={expenses} totals={totals} />
-              <CashSummaryCard cashBlock={cashBlock} totals={totals} note={note} otherIncome={otherIncome} />
+            <div className="flex flex-col gap-4">
+              <DayTenderSummary date={date} sheet={sheet} weekDays={weekDays} />
             </div>
 
             <ReportFooter provenance={provenance} verifiedAt={verifiedAt} verifiedBy={verifiedBy} updatedBy={updatedBy} />

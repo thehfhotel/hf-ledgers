@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { navigate } from "../App.tsx";
-import { getDay, listBookingLines } from "../api.ts";
+import { getDay, listBookingLines, listDays } from "../api.ts";
 import { downloadReportJpeg, shareReportJpeg } from "../components/exportJpeg.ts";
+import { computeWeekWindow, weekWindowMonths, zeroFillWeek, type WeekDayIncome } from "../components/printWeekChart.ts";
 import { ReportSheet, REPORT_SHEET_WIDTH } from "../components/ReportSheet.tsx";
 import { FIXTURE_DATE, fixtureBookingLines, fixtureDaySheet } from "../fixtures.ts";
 import type { BookingLine, DaySheet, Property } from "../../shared/types.ts";
@@ -56,6 +57,39 @@ export function ReportPage({ property, date }: ReportPageProps) {
         if (!cancelled) {
           setState({ status: "error", message: err instanceof Error ? err.message : String(err) });
         }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isDemo, effectiveProperty, effectiveDate]);
+
+  // ── Weekly income chart (DayTenderSummary's chart section, see
+  //    reportSheetBlocks.tsx) ─────────────────────────────────────────────
+  // null until loaded, and left null on any fetch failure — the chart
+  // section is purely decorative context, so a listDays() hiccup must never
+  // break this page or the rest of the JPEG. Same fetch DaySheetPage.tsx
+  // does for PrintableDaySummary's identical chart — see printWeekChart.ts
+  // for the pure week-window/zero-fill math. Independent of the sheet/lines
+  // load above (own effect, own cancellation guard).
+  const [weekDays, setWeekDays] = useState<WeekDayIncome[] | null>(null);
+
+  useEffect(() => {
+    if (isDemo) return;
+    let cancelled = false;
+    setWeekDays(null);
+    const weekWindow = computeWeekWindow(effectiveDate);
+    const months = weekWindowMonths(weekWindow);
+    Promise.all(months.map((month) => listDays(effectiveProperty, month)))
+      .then((results) => {
+        if (cancelled) return;
+        const incomeByDate = new Map<string, number>();
+        for (const res of results) {
+          for (const d of res.days) incomeByDate.set(d.date, d.incomeSatang);
+        }
+        setWeekDays(zeroFillWeek(weekWindow, incomeByDate));
+      })
+      .catch(() => {
+        if (!cancelled) setWeekDays(null);
       });
     return () => {
       cancelled = true;
@@ -170,6 +204,7 @@ export function ReportPage({ property, date }: ReportPageProps) {
                 date={effectiveDate}
                 sheet={state.sheet}
                 lines={state.lines}
+                weekDays={weekDays ?? undefined}
               />
             </div>
           </div>

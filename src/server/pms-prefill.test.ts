@@ -101,8 +101,10 @@ function row(overrides: Partial<RawLedgerRow>): RawLedgerRow {
     ledger_tran: "0",
     ledger_web: "0",
     ledger_amount: "1000.00",
+    cust_title: "",
     cust_firstname: "สมชาย",
     cust_lastname: "ใจดี",
+    cust_name2: "",
     ...overrides,
   };
 }
@@ -297,6 +299,49 @@ describe("mapLedgerRows", () => {
     expect(c!.isRefund).toBe(true);
   });
 
+  test("a negative unplacedTranSatang with a larger positive cash nets non-negative but is still flagged as isRefund", () => {
+    // Regression: insertPmsBookingLines' AUTO-PLACEMENT POLICY (db.ts) now
+    // writes unplacedTranSatang into transfer_kbank — a CHECK(col >= 0)
+    // column — on every property. Before this guard covered it, a
+    // net-positive candidate with a negative ledger_tran (e.g. cash 2000,
+    // tran -500) would sail through as "not a refund" and then crash the
+    // insert transaction with SQLITE_CONSTRAINT on t_transfer_kbank.
+    const [c] = mapLedgerRows([
+      row({
+        ledger_legacy_id: 35,
+        ledger_pay_no: "R2604-0305",
+        ledger_cash: "2000.00",
+        ledger_tran: "-500.00",
+        ledger_amount: "1500.00",
+      }),
+    ]);
+    expect(c!.cashSatang).toBe(200_000);
+    expect(c!.unplacedTranSatang).toBe(-50_000);
+    expect(c!.isRefund).toBe(true);
+  });
+
+  test("a negative unplacedCreditSatang with a larger positive cash nets non-negative but is still flagged as isRefund", () => {
+    // Same shape, through credit: insertPmsBookingLines writes
+    // unplacedCreditSatang into credit_kbank (also CHECK(col >= 0)) on
+    // hfville. mapLedgerRows has no property to gate on here, so the guard
+    // applies unconditionally — a safe over-approximation (an hf candidate
+    // with negative credit is an anomaly either way, and is better counted
+    // in skippedRefunds than inserted with the negative amount silently
+    // dropped as unplaced).
+    const [c] = mapLedgerRows([
+      row({
+        ledger_legacy_id: 36,
+        ledger_pay_no: "R2604-0306",
+        ledger_cash: "2000.00",
+        ledger_credit: "-500.00",
+        ledger_amount: "1500.00",
+      }),
+    ]);
+    expect(c!.cashSatang).toBe(200_000);
+    expect(c!.unplacedCreditSatang).toBe(-50_000);
+    expect(c!.isRefund).toBe(true);
+  });
+
   test("mixed P001/non-P001 lines: room and other amounts aggregate independently", () => {
     const lines: RawLedgerRow[] = [
       row({ ledger_legacy_id: 40, ledger_pay_no: "R2604-0400", ledger_ds_id: "P001", ledger_amount: "1200.00" }),
@@ -328,6 +373,56 @@ describe("mapLedgerRows", () => {
     test("uses whichever half is present when the other is missing", () => {
       const [c] = mapLedgerRows([row({ cust_firstname: "สมชาย", cust_lastname: null })]);
       expect(c!.guestName).toBe("สมชาย");
+    });
+
+    test("prefix + first + last: prefix glued directly onto first (no space), one space before last", () => {
+      const [c] = mapLedgerRows([row({ cust_title: "นาย", cust_firstname: "สมชาย", cust_lastname: "ใจดี" })]);
+      expect(c!.guestName).toBe("นายสมชาย ใจดี");
+    });
+
+    test("prefix-only-with-first: prefix glues onto first with no trailing space when there is no last name", () => {
+      const [c] = mapLedgerRows([
+        row({ cust_title: "นาย", cust_firstname: "จักรพันธ์", cust_lastname: null, cust_name2: null }),
+      ]);
+      expect(c!.guestName).toBe("นายจักรพันธ์");
+    });
+
+    test("blank prefix: falls back to plain first + last with no leading artifact", () => {
+      const [c] = mapLedgerRows([row({ cust_title: "", cust_firstname: "สมชาย", cust_lastname: "ใจดี" })]);
+      expect(c!.guestName).toBe("สมชาย ใจดี");
+    });
+
+    test("all four fields blank/null -> null", () => {
+      const [c] = mapLedgerRows([
+        row({ cust_title: null, cust_firstname: "", cust_lastname: null, cust_name2: "" }),
+      ]);
+      expect(c!.guestName).toBeNull();
+    });
+
+    test("cust_lastname blank falls back to cust_name2 (the real hotelnew/HF pattern: the surname lives in name2, not lastname)", () => {
+      const [c] = mapLedgerRows([
+        row({ cust_title: "นาย", cust_firstname: "ธนัช", cust_lastname: "", cust_name2: "พลอาจ" }),
+      ]);
+      expect(c!.guestName).toBe("นายธนัช พลอาจ");
+    });
+
+    test("cust_lastname wins over cust_name2 when both are present (the real hotelville pattern, where name2 is usually just a mirror)", () => {
+      const [c] = mapLedgerRows([
+        row({ cust_title: "นาย", cust_firstname: "ชูเดช", cust_lastname: "แย้มสุคนธ์", cust_name2: "แย้มสุคนธ์" }),
+      ]);
+      expect(c!.guestName).toBe("นายชูเดช แย้มสุคนธ์");
+    });
+
+    test("English title glues directly onto first name too (mirrors the source; titles never carry their own trailing space)", () => {
+      const [c] = mapLedgerRows([
+        row({ cust_title: "Mr.", cust_firstname: "TAN YEOW CHONG", cust_lastname: null, cust_name2: null }),
+      ]);
+      expect(c!.guestName).toBe("Mr.TAN YEOW CHONG");
+    });
+
+    test("prefix present but every name field blank -> prefix alone, not null", () => {
+      const [c] = mapLedgerRows([row({ cust_title: "นาย", cust_firstname: "", cust_lastname: null, cust_name2: null })]);
+      expect(c!.guestName).toBe("นาย");
     });
   });
 

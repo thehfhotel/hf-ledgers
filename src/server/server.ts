@@ -900,9 +900,18 @@ export const api = new Elysia({ prefix: "/api" })
   // property's PMS env URL is unset; 409 when the month is closed; a PMS
   // query failure 502s with nothing inserted (fetchDayPayments throws
   // BEFORE anything is written). Refunds are split out and counted in
-  // `skippedRefunds`, never inserted. `unplaced` reports every
-  // inserted-or-skipped non-refund candidate that carries a nonzero
-  // credit/transfer amount the PMS gives no acquiring bank for.
+  // `skippedRefunds`, never inserted.
+  //
+  // Mirrors insertPmsBookingLines' AUTO-PLACEMENT POLICY (db.ts) exactly —
+  // do not let these two drift apart: transfer is auto-placed into
+  // transfer_kbank for BOTH properties (evidence: t_transfer_icbc is 0
+  // across all history, both properties); credit is auto-placed into
+  // credit_kbank ONLY for hfville (single bank there — "hf" genuinely uses
+  // two credit banks and cannot be inferred). `autoPlaced` reports every
+  // inserted-or-skipped non-refund candidate that had a nonzero
+  // credit/transfer amount actually written to a bank column, for the
+  // caller's verification note. `unplaced` now only ever holds the one
+  // genuinely-unresolvable case: hf credit.
   .post("/:property/day/:date/pull-from-pms", async ({ params, identity, status }) => {
     const { property, date } = params;
     if (!isProperty(property)) return status(400, { error: "invalid property" });
@@ -929,16 +938,25 @@ export const api = new Elysia({ prefix: "/api" })
       enqueueAnalyticsPush(property, date);
     }
 
+    const autoPlaced = nonRefunds
+      .filter((c) => c.unplacedTranSatang > 0 || (property === "hfville" && c.unplacedCreditSatang > 0))
+      .map((c) => ({
+        pmsRef: c.pmsRef,
+        bookingNo: c.bookingNo,
+        transferSatang: c.unplacedTranSatang,
+        creditSatang: property === "hfville" ? c.unplacedCreditSatang : 0,
+      }));
+
     const unplaced = nonRefunds
-      .filter((c) => c.unplacedCreditSatang > 0 || c.unplacedTranSatang > 0)
+      .filter((c) => property === "hf" && c.unplacedCreditSatang > 0)
       .map((c) => ({
         pmsRef: c.pmsRef,
         bookingNo: c.bookingNo,
         creditSatang: c.unplacedCreditSatang,
-        tranSatang: c.unplacedTranSatang,
+        tranSatang: 0,
       }));
 
-    return { inserted, skipped, skippedRefunds: refunds.length, unplaced };
+    return { inserted, skipped, skippedRefunds: refunds.length, unplaced, autoPlaced };
   });
 
 const apiFetch = (req: Request) => api.handle(req);

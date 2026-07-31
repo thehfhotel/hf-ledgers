@@ -70,21 +70,61 @@ function AmountInTextHint({ text, className = "" }: { text: string; className?: 
 }
 
 /**
+ * One payment whose credit/transfer amount the server auto-placed on a bank
+ * column (see db.ts `insertPmsBookingLines`'s AUTO-PLACEMENT POLICY:
+ * transfer -> transfer_kbank on every property; credit -> credit_kbank only
+ * on hfville, where it is the only credit bank in use). `src/client/api.ts`'s
+ * `pullFromPms()` return type does not carry this field yet — this repo's
+ * shared-tree edit lock for this change excludes api.ts, so the result is
+ * widened locally in `handlePullFromPms` (see `PmsPullResult` below) rather
+ * than there. Runtime shape matches `src/shared/api.md`'s documented
+ * contract for endpoint 26.
+ */
+interface PmsAutoPlacedTender {
+  pmsRef: string;
+  bookingNo: string | null;
+  transferSatang: number;
+  creditSatang: number;
+}
+
+/** Local widening of `pullFromPms()`'s return type to include `autoPlaced` —
+ * see `PmsAutoPlacedTender`'s note on why this isn't in api.ts yet. */
+type PmsPullResult = Awaited<ReturnType<typeof pullFromPms>> & {
+  autoPlaced: PmsAutoPlacedTender[];
+};
+
+/**
  * The ดึงข้อมูล button's result alert (docs/pms-prefill-plan.md's "UI"
  * section): inserted/skipped counts, the skipped-refund count when it's
- * non-zero, and — when the PMS reported credit/transfer amounts it could
- * not place on a bank column (it never records the acquiring bank) — one
- * line per payment for the operator to key in by hand.
+ * non-zero, then two possible listings —
+ * - `autoPlaced`: payments whose credit/transfer amount the server was able
+ *   to place on a bank column itself (transfer everywhere, credit only on
+ *   hfville) — shown as a verification note, since it is a bank-guess even
+ *   though it is now evidence-backed.
+ * - `unplaced`: payments where the amount is known but which bank it landed
+ *   on genuinely cannot be inferred (hf credit — two credit banks in use
+ *   there) — same "key it in by hand" instruction as before.
  */
 function formatPmsPullResult(result: {
   inserted: number;
   skipped: number;
   skippedRefunds: number;
   unplaced: PmsUnplacedTender[];
+  autoPlaced: PmsAutoPlacedTender[];
 }): string {
   const lines = [`เพิ่มรายการจาก PMS แล้ว ${result.inserted} รายการ ข้ามไป ${result.skipped} รายการ (มีอยู่แล้ว)`];
   if (result.skippedRefunds > 0) {
     lines.push(`ข้ามรายการคืนเงิน ${result.skippedRefunds} รายการ (ไม่นำเข้ารายการติดลบ)`);
+  }
+  if (result.autoPlaced.length > 0) {
+    lines.push("", "รายการที่ลงช่องธนาคารให้อัตโนมัติ — ตรวจสอบธนาคารด้วย:");
+    for (const row of result.autoPlaced) {
+      const parts: string[] = [];
+      if (row.transferSatang > 0) parts.push(`โอน/กสิกร ${formatSatang(row.transferSatang)} บาท`);
+      if (row.creditSatang > 0) parts.push(`บัตรเครดิต/กสิกร ${formatSatang(row.creditSatang)} บาท`);
+      const label = row.bookingNo ?? row.pmsRef;
+      lines.push(`เลขที่ ${label}: ลงช่อง ${parts.join(" / ")} ให้แล้ว — ตรวจสอบธนาคารด้วย`);
+    }
   }
   if (result.unplaced.length > 0) {
     lines.push("", "รายการที่ยังไม่ได้ระบุธนาคาร:");
@@ -229,7 +269,9 @@ export function BookingDayPage({ property, date }: Props) {
     if (isDemo || !pmsPull || monthClosed || pmsPulling) return;
     setPmsPulling(true);
     try {
-      const result = await pullFromPms(effectiveProperty, effectiveDate);
+      // Cast widens in the autoPlaced field the server now returns — see
+      // PmsPullResult's note above (api.ts is out of scope for this change).
+      const result = (await pullFromPms(effectiveProperty, effectiveDate)) as PmsPullResult;
       // New rows land through the same GET pair the page already loads
       // with — never hand-built from inserted/skipped counts.
       if (result.inserted > 0) await refetchLinesAndSheet();

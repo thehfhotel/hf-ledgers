@@ -48,7 +48,9 @@ export interface PrefillCandidate {
 
 /**
  * One line of `ht_payment_ledger`, LEFT JOINed to `ht_customers` for the
- * two name columns, typed as the columns actually SELECTed by
+ * guest-name columns (title/prefix, first, last, and the secondary/
+ * English-name column that doubles as a last-name fallback — see
+ * `buildGuestName`), typed as the columns actually SELECTed by
  * `LEDGER_QUERY` arrive from Bun's Postgres driver. NUMERIC columns come
  * back as strings (never trust driver auto-coercion to `number` for
  * money) — see `parseLedgerSatang` below. `ledger_legacy_id` is typed
@@ -76,8 +78,10 @@ export interface RawLedgerRow {
   ledger_tran: string | null;
   ledger_web: string | null;
   ledger_amount: string | null;
+  cust_title: string | null;
   cust_firstname: string | null;
   cust_lastname: string | null;
+  cust_name2: string | null;
 }
 
 /**
@@ -103,8 +107,10 @@ export const LEDGER_QUERY = `
     l.ledger_tran,
     l.ledger_web,
     l.ledger_amount,
+    c.cust_title,
     c.cust_firstname,
-    c.cust_lastname
+    c.cust_lastname,
+    c.cust_name2
   FROM ht_payment_ledger l
   LEFT JOIN ht_customers c
     -- ledger_cust_no is a C-prefixed string ('C22006'); legacy_id is the bare
@@ -184,14 +190,58 @@ function parseNights(raw: string | null | undefined): number | null {
   return Number.isFinite(n) ? Math.round(n) : null;
 }
 
-/** "first last", collapsing either half being blank/null; null when both
- * are blank (no join match, or a customer with no name on file). */
-function buildGuestName(first: string | null | undefined, last: string | null | undefined): string | null {
-  const name = [first, last]
-    .map((s) => (s ?? "").trim())
-    .filter((s) => s !== "")
-    .join(" ");
-  return name === "" ? null : name;
+/**
+ * Assembles the guest-facing name from `ht_customers`, per the real data
+ * shape (SSH-sampled 2026-07-31, both hotelnew and hotelville canonical
+ * Postgres, names/prefixes only, dozens of rows plus aggregate counts):
+ *
+ * - `cust_title` is a genuinely separate prefix column (นาย, น.ส., นาง,
+ *   Mr., Mrs., ...) and never carries its own leading/trailing whitespace
+ *   in either database (0 of ~25,000 rows) — so it is glued directly onto
+ *   the first name with NO inserted space. That matches Thai typographic
+ *   convention (นายสมชาย, not นาย สมชาย) and is simply mirroring what the
+ *   source itself stores rather than inventing spacing it doesn't have —
+ *   including for Latin titles ("Mr.สมชาย"-style gluing is what the raw
+ *   columns actually produce; there is nothing in the data to justify
+ *   treating Latin titles differently).
+ * - `cust_lastname` is the obvious "last name" column but is nearly DEAD
+ *   on the hotelnew (HF) property — 1 of 22,956 rows non-blank, and that
+ *   one is test junk ("ZZ"/"TEST"). HF's front desk instead routinely
+ *   types the real surname into `cust_name2` (~55% of rows populated
+ *   there), even though that column's original design intent was an
+ *   "English/secondary name" for FrmReportRR4 (see
+ *   sync/mappers/customer.rs). hotelville uses `cust_lastname` properly
+ *   (1,626 of 2,596 rows, ~63%) and its `cust_name2` is usually just a
+ *   mirror of it (1,240 of those 1,626 match exactly). So: prefer
+ *   `cust_lastname` when it has content, else fall back to `cust_name2`
+ *   — one rule that covers both properties' real behavior without
+ *   per-property branching.
+ * - Whitespace is collapsed and the whole string trimmed; null when
+ *   nothing at all is present (no join match, or a customer with no name
+ *   on file).
+ *
+ * Deliberately NOT attempted: unscrambling a first name that already
+ * embeds a full name alongside a lastname/name2 that repeats the surname
+ * (e.g. firstname "วิดาร์ ปัญญาวุธ" with lastname ALSO "ปัญญาวุธ", which
+ * would double up as "วิดาร์ ปัญญาวุธ ปัญญาวุธ") — that is pre-existing
+ * free-text mess in the legacy data (confirmed present in the sample),
+ * not something to paper over with guessy heuristics. Hand edits on the
+ * bookings sheet stay the correction path, same as every other prefilled
+ * field.
+ */
+function buildGuestName(
+  prefix: string | null | undefined,
+  first: string | null | undefined,
+  last: string | null | undefined,
+  name2: string | null | undefined,
+): string | null {
+  const p = (prefix ?? "").trim();
+  const f = (first ?? "").trim();
+  const lastTrimmed = (last ?? "").trim();
+  const l = lastTrimmed !== "" ? lastTrimmed : (name2 ?? "").trim();
+  const namePart = [f, l].filter((s) => s !== "").join(" ");
+  const full = `${p}${namePart}`.replace(/\s+/g, " ").trim();
+  return full === "" ? null : full;
 }
 
 /** COALESCE(NULLIF(pay_no, ''), 'lid:'||legacy_id) — the PMS's own
@@ -222,14 +272,17 @@ const DEPOSIT_MARKER = "เงินจอง";
  *   `unplacedCreditSatang`/`unplacedTranSatang` instead (amount known, bank
  *   unknown — the PMS records no acquiring bank at all);
  * - `isRefund` is true when the net of cash+web+deposit-or-unplaced totals
- *   is negative, OR when any one of cash/web/deposit is individually
- *   negative even while the net is not — those three are the columns
- *   `insertPmsBookingLines` actually writes (`t_cash`/`t_web`/`t_deposit`,
- *   each `CHECK (col IS NULL OR col >= 0)`), and iHOTEL can replicate a
- *   corrections/adjustment line that makes one tender negative while a
- *   larger positive one elsewhere nets the payment positive overall. Without
- *   this, such a candidate would sail through as "not a refund" and then
- *   crash the whole insert transaction on the CHECK constraint;
+ *   is negative, OR when any one of cash/web/deposit/unplacedTran/
+ *   unplacedCredit is individually negative even while the net is not —
+ *   those five are exactly the fields `insertPmsBookingLines` writes into
+ *   `CHECK (col IS NULL OR col >= 0)` DB columns (`t_cash`/`t_web`/
+ *   `t_deposit` always; `t_transfer_kbank` on every property and
+ *   `t_credit_kbank` on hfville, per its AUTO-PLACEMENT POLICY), and
+ *   iHOTEL can replicate a corrections/adjustment line that makes one
+ *   tender negative while a larger positive one elsewhere nets the payment
+ *   positive overall. Without this, such a candidate would sail through as
+ *   "not a refund" and then crash the whole insert transaction on a CHECK
+ *   constraint;
  * - room/nights fields come from the first `P001` line; `roomCount` is the
  *   number of distinct (trimmed, non-blank) `ds_label`s across all `P001`
  *   lines, or null when the payment has no room line at all.
@@ -274,10 +327,19 @@ export function mapLedgerRows(rows: RawLedgerRow[]): PrefillCandidate[] {
     const unplacedTranSatang = isDeposit ? 0 : tranSatang;
 
     const netTenderSatang = cashSatang + webSatang + depositSatang + unplacedCreditSatang + unplacedTranSatang;
-    // Any individually-negative WRITTEN column (cash/web/deposit) is treated
-    // as a refund-like anomaly even when the net is non-negative — those are
-    // the three fields insertPmsBookingLines writes into CHECK(>= 0) columns.
-    const anyWrittenTenderNegative = cashSatang < 0 || webSatang < 0 || depositSatang < 0;
+    // Any individually-negative WRITTEN column is treated as a refund-like
+    // anomaly even when the net is non-negative. This used to be just
+    // cash/web/deposit, but insertPmsBookingLines' AUTO-PLACEMENT POLICY
+    // (db.ts) now also writes unplacedTranSatang into transfer_kbank on
+    // every property, and unplacedCreditSatang into credit_kbank on
+    // hfville — both CHECK(col >= 0) columns, same as the original three.
+    // mapLedgerRows has no property here, so this can't gate credit by
+    // property; that's fine, a negative unplacedCreditSatang is an anomaly
+    // either way (hf never writes it, so this only ever changes behavior
+    // for hfville there) — safer to count it in skippedRefunds than to
+    // insert a row that silently drops the negative amount.
+    const anyWrittenTenderNegative =
+      cashSatang < 0 || webSatang < 0 || depositSatang < 0 || unplacedTranSatang < 0 || unplacedCreditSatang < 0;
 
     const roomLabels = new Set(
       roomLines.map((l) => (l.ledger_ds_label ?? "").trim()).filter((label) => label !== ""),
@@ -286,7 +348,7 @@ export function mapLedgerRows(rows: RawLedgerRow[]): PrefillCandidate[] {
     candidates.push({
       pmsRef,
       bookingNo: (first.ledger_cin_no ?? "").trim() || null,
-      guestName: buildGuestName(first.cust_firstname, first.cust_lastname),
+      guestName: buildGuestName(first.cust_title, first.cust_firstname, first.cust_lastname, first.cust_name2),
       roomNo: firstRoom ? (firstRoom.ledger_ds_label ?? "").trim() || null : null,
       roomCount: roomLines.length > 0 ? roomLabels.size : null,
       nights: firstRoom ? parseNights(firstRoom.ledger_ds_num) : null,

@@ -406,6 +406,51 @@ export interface DepositNote {
 }
 
 /**
+ * A deposit thread's (R-number's) lifecycle state — owner ask (2026-08-01,
+ * register mapability): the register must make a deposit's STATE
+ * unambiguous, not just its outstanding balance. Derived purely from a
+ * `DepositThread`'s own received/applied/refunded/outstanding figures
+ * (`deriveDepositThreadStatus()`, `src/server/deposit-register.ts`) —
+ * never a stored value, always recomputed from the same numbers the
+ * register already carries.
+ *
+ * - `"waitingCheckin"` — received only, nothing applied or refunded yet
+ *   (`outstandingSatang > 0`, `appliedSatang === 0`, `refundedSatang ===
+ *   0`). The register's aging list IS this bucket (`outstandingSatang >
+ *   0` is its filter) plus `"partial"` below.
+ * - `"partial"` — still holding a balance, but SOME of it has already
+ *   moved (`outstandingSatang > 0` with `appliedSatang > 0` or
+ *   `refundedSatang > 0`).
+ * - `"applied"` — fully absorbed into a stay (`outstandingSatang <= 0`,
+ *   `appliedSatang > 0`) — the ตัดยอดแล้ว case, including the R015834-style
+ *   over-applied mismatch (still separately flagged via
+ *   `buildDepositExceptions`; the two are complementary, not exclusive).
+ * - `"refunded"` — closed out purely by a refund, no application involved
+ *   (`outstandingSatang <= 0`, `refundedSatang > 0`, `appliedSatang ===
+ *   0`).
+ *
+ * Deliberately does NOT cover `voided` — that stays an event-level, greyed
+ * "ยกเลิก" treatment (see `DepositLedgerEvent.voided` /
+ * `VoidedDepositEventSummary`), never a thread-level status: a thread can
+ * hold a mix of voided and active events, and voiding one event never
+ * changes what the thread's ACTIVE money is doing.
+ */
+export type DepositThreadStatus = "waitingCheckin" | "applied" | "refunded" | "partial";
+
+/** Canonical Thai labels for `DepositThreadStatus` — the ONLY vocabulary
+ * the register UI may use for a thread's state. _Avoid_: "ใช้แล้ว" (used),
+ * "จ่ายแล้ว" (paid) — both are ambiguous about whether money moved or was
+ * merely applied, exactly the distinction this whole feature exists to
+ * make unambiguous. See CONTEXT.md's มัดจำล่วงหน้า entry for the full
+ * definitions. */
+export const DEPOSIT_THREAD_STATUS_LABELS_TH: Record<DepositThreadStatus, string> = {
+  waitingCheckin: "รอเช็คอิน",
+  applied: "ตัดยอดแล้ว",
+  refunded: "คืนเงินแล้ว",
+  partial: "บางส่วน",
+};
+
+/**
  * How a day's data came to exist. `"app"` = entered live in this app;
  * `"transcribed"` = the one-time Excel importer matched the paper exactly;
  * `"reconstructed"` = the importer had to infer/reconcile a mismatch;

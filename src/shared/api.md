@@ -797,9 +797,10 @@ endpoints below continue sequentially from 30.
     DepositAgingRow[], exceptions: { mismatched: MismatchedDepositException[],
     orphanApplied: OrphanAppliedDepositException[] }, unparsedAppliedRows:
     number, zeroTenderRows: number, blankBookingNoRows: number, undatedRows:
-    number, voided: VoidedDepositEventSummary[] }`. Same dark-by-default gate
-    as endpoint 26: **503** (`{ error: "pms prefill not configured" }`) when
-    this property's PMS env URL is unset, **502** on a live query failure,
+    number, voided: VoidedDepositEventSummary[], events:
+    DepositRegisterEvent[] }`. Same dark-by-default gate as endpoint 26:
+    **503** (`{ error: "pms prefill not configured" }`) when this
+    property's PMS env URL is unset, **502** on a live query failure,
     nothing returned on either. Queries the property's FULL
     `ht_payment_ledger` history (no date window, unlike every day-scoped
     endpoint above) for exactly the three deposit-lifecycle `ds_name`s —
@@ -869,6 +870,58 @@ endpoints below continue sequentially from 30.
       R-number, `null`/`null`/`null` when no note thread exists yet. A
       thread can appear in `aging` AND `exceptions` at once (still
       outstanding, but also mismatched) — the same note applies to both.
+    - **`events` (owner ask, 2026-08-01, register mapability) — additive.**
+      The FULL classified event list, every kind INCLUDING voided ones,
+      exposed straight off `DepositRegisterData.events` (no
+      recomputation) in chronological order (same order the underlying
+      query returns rows in). One entry per classified ledger row:
+      `{ dateBangkok: string | null, kind: "received" | "applied" |
+      "refunded", rNumber: string | null, pmsRef: string, tender:
+      DepositTender | null, amountSatang: number, voided: boolean, chRef:
+      string | null }`. `pmsRef` is the payment key
+      (`COALESCE(NULLIF(ledger_pay_no,''), 'lid:'||ledger_legacy_id)`) —
+      the office's own receipt/payment number. `tender` is which of the
+      four raw tender columns (cash/credit/transfer/web) carried the
+      money for a received/refunded event (the first non-zero one,
+      C0-verified single-line-group assumption) — `null` for `kind:
+      "applied"` (an accounting offset via `ledger_free`, no bank
+      movement) and `null` when a received/refunded row's tender columns
+      are genuinely all zero (the `zeroTenderRow` tripwire case). `chRef`
+      is the CH (check-in) number, populated for `kind: "applied"` events
+      ONLY — that ds_name's OWN `ledger_cin_no` holds the CH-number on
+      that scope of line (never the R-number, which is parsed from the
+      label suffix instead); `null` for received/refunded events (their
+      `ledger_cin_no` is already `rNumber`, never duplicated here) and for
+      an applied row whose `ledger_cin_no` is itself blank. The client
+      (`DepositRegisterPage.tsx`) filters this by `dateBangkok`'s
+      `"YYYY-MM"` prefix to drive สรุปรายเดือน's expandable per-month event
+      list, and separately by `kind === "applied" && !voided` for the
+      ตัดยอดแล้วล่าสุด section.
+    - **`receivedPmsRef`, `status`, `appliedChRef`, `appliedDateBangkok`
+      (owner ask, 2026-08-01) — additive fields on EVERY
+      `aging`/`exceptions.mismatched`/`exceptions.orphanApplied` row.**
+      `receivedPmsRef: string | null` is that thread's own received
+      event's `pmsRef` (voided excluded), `null` when none — lets the
+      office find the paper receipt behind an R-number without opening
+      the PMS (`orphanApplied` rows are always `null` here by
+      definition — no received event exists). `status:
+      DepositThreadStatus` (`"waitingCheckin" | "applied" | "refunded" |
+      "partial"`, shared/types.ts — see `DEPOSIT_THREAD_STATUS_LABELS_TH`
+      for the canonical รอเช็คอิน/ตัดยอดแล้ว/คืนเงินแล้ว/บางส่วน labels) is
+      derived PURELY from that thread's own received/applied/refunded/
+      outstanding figures via `deriveDepositThreadStatus()`
+      (`src/server/deposit-register.ts`) — never stored, always
+      recomputed. `appliedChRef`/`appliedDateBangkok: string | null` are
+      the CH ref + date of that thread's LATEST non-voided applied event
+      (`null`/`null` when it has none) — "where it went" for a
+      `"applied"`/`"partial"` status, so a used deposit is traceable
+      without opening the PMS. Note that a thread whose status is
+      `"applied"` (fully absorbed, `outstandingSatang <= 0`) or
+      `"refunded"` almost never appears in `aging` at all (that list
+      filters `outstandingSatang > 0`) — such threads are found instead
+      via `events` (a month's expandable row) or the client's
+      ตัดยอดแล้วล่าสุด section (built client-side by filtering `events`,
+      no separate endpoint).
 
 31. **`PUT /api/:property/deposits/:rNumber/note`** — body `{ note: string |
     null, resolved: boolean }` → `DepositNote`. `:rNumber` must match
@@ -975,7 +1028,39 @@ joins any thread) flattens the voided footnote data;
 `buildDepositRegisterData()` (the row-level entry point) computes
 `zeroTenderRows`/`blankBookingNoRows`/`undatedRows`/`voided` alongside
 `threads`/`monthly`/`unparsedAppliedRows` so the endpoint never has to
-re-derive any of them.
+re-derive any of them; it now also returns `events` (additive, 2026-08-01) —
+the exact flat `DepositLedgerEvent[]` list `threads`/`monthly`/`voided` were
+all already built from, exposed without recomputation so the endpoint can
+surface a flat, chronological feed. `DepositLedgerEvent` itself gained two
+fields the same wave: `tender: DepositTender | null` (via `dominantTender()`
+— the first non-zero of cash/credit/transfer/web on a received/refunded row,
+`null` for `applied` and for a genuinely all-zero row) and `chRef: string |
+null` (an applied row's OWN `ledger_cin_no`, trimmed — the CH-number, `null`
+for received/refunded since their `ledger_cin_no` is already `rNumber`).
+
+**Explicit deposit state** (owner ask, 2026-08-01 — `src/server/deposit-
+register.ts` + `src/shared/types.ts`): `DepositThread` gained a `status:
+DepositThreadStatus` field, computed inside `buildDepositThreads()` for
+every thread via `deriveDepositThreadStatus()` (PURE — no I/O, takes just
+the four received/applied/refunded/outstanding numbers `DepositThread`
+already carries). `DepositThreadStatus` (shared/types.ts) is `"waitingCheckin"
+| "applied" | "refunded" | "partial"`, labeled via
+`DEPOSIT_THREAD_STATUS_LABELS_TH` (รอเช็คอิน/ตัดยอดแล้ว/คืนเงินแล้ว/บางส่วน — the
+ONLY vocabulary the register UI may use for a thread's state; see
+CONTEXT.md's มัดจำล่วงหน้า entry for the full definitions and the terms to
+avoid). Priority order: `outstandingSatang > 0` with nothing yet applied/
+refunded → `waitingCheckin`; `outstandingSatang > 0` with some already moved
+→ `partial`; `outstandingSatang <= 0` (covers both the ordinary fully-applied
+case and the R015834-style over-applied mismatch — complementary to, never
+exclusive with, `buildDepositExceptions`) with `refundedSatang > 0` and
+nothing applied → `refunded`; `outstandingSatang <= 0` with `appliedSatang >
+0` → `applied` (covers the orphan-applied exception and a mixed applied+
+refund close-out too — a stay is the more informative "where it went" of the
+two). The route (`server.ts`) attaches `status` to every `aging`/
+`exceptions.mismatched`/`exceptions.orphanApplied` row from its thread,
+plus `appliedChRef`/`appliedDateBangkok` via a small `appliedMappingFor()`
+helper (the thread's own events, latest non-voided `applied` one, dateBangkok
+descending) — see endpoint 30's own field-by-field description above.
 
 **Re-pull diff flow** (`src/server/db.ts`): `candidateTenderPatch(property,
 candidate)` — the ONE place that decides where PMS money lands on the
@@ -1010,7 +1095,10 @@ category cell; `"other"` is deliberately absent — it becomes an itemized
 (now with `depositCashInSatang`/`depositCashOutSatang`, Wave C),
 `DepositEvent`, `DepositEventKind`, `DepositTender`, `DEPOSIT_TENDERS`,
 `DEPOSIT_TENDER_LABELS_TH` (Wave C), `DepositNote` and `DEPOSIT_NOTE_MAX_LEN`
-(Wave D — the office deposit register's note-thread contract), `DayProvenance`,
+(Wave D — the office deposit register's note-thread contract),
+`DepositThreadStatus` and `DEPOSIT_THREAD_STATUS_LABELS_TH` (2026-08-01 —
+the register's explicit-state chip vocabulary, see the Register query
+section above), `DayProvenance`,
 `DayTotals`, `BookingTotals`, `DaySheet`
 (see Wave 2 field additions above, plus `deposits: DepositEvent[]` Wave C),
 `DaySummary` (now with

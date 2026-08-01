@@ -17,7 +17,7 @@
 // same lesson as analytics-push.ts/pms-prefill.ts: never capture env at
 // import time.
 
-import type { Property } from "../shared/types.ts";
+import type { DepositThreadStatus, DepositTender, Property } from "../shared/types.ts";
 import { RECONCILE_TOLERANCE_SATANG } from "../shared/bookings.ts";
 import {
   DEPOSIT_APPLIED_PREFIX,
@@ -124,6 +124,25 @@ export interface DepositLedgerEvent {
    * `buildDepositThreads`/`buildMonthlyReconciliation`, but never dropped:
    * present in `DepositThread.events` for display. */
   voided: boolean;
+  /** Owner ask (2026-08-01, register mapability): which of the four raw
+   * tender columns actually carried the money, for received/refunded
+   * events only — `null` for `applied` (an accounting offset via
+   * `ledger_free`, no bank movement) and `null` when a received/refunded
+   * row's four tender columns are genuinely all zero (the `zeroTenderRow`
+   * case). Determined by `dominantTender()` below: the first non-zero of
+   * cash/credit/transfer/web on the row, mirroring `sumTenderColumns`'
+   * "single-line group, one non-zero column in practice" assumption
+   * (C0-verified) — never re-summed here, just identified. */
+  tender: DepositTender | null;
+  /** `ledger_cin_no`, trimmed, for `applied` events ONLY — that column
+   * holds the CH (check-in) number on an applied line (see
+   * pms-prefill.ts's `PrefillCandidate.appliedDepositBookingNos` doc
+   * comment: "the CH-number on this scope of line"), letting the office
+   * trace an applied line back to the actual stay's folio. `null` for
+   * received/refunded events (their `ledger_cin_no` is already the
+   * R-number, carried as `rNumber` — never duplicated here) and for an
+   * applied row whose `ledger_cin_no` is itself blank. */
+  chRef: string | null;
 }
 
 /** COALESCE(NULLIF(pay_no, ''), 'lid:'||legacy_id) — same payment-grouping
@@ -170,6 +189,31 @@ function sumTenderColumns(row: RawDepositLedgerRow): number {
     parseLedgerSatang(row.ledger_tran) +
     parseLedgerSatang(row.ledger_web)
   );
+}
+
+/** Same column set/order as `sumTenderColumns`, plus which `DepositTender`
+ * each one maps to (mirrors pms-prefill.ts's own, non-exported
+ * `DEPOSIT_TENDER_COLUMN` — kept as a separate literal here for the same
+ * reason `DEPOSIT_R_NUMBER_RE` is: this module may read from
+ * pms-prefill.ts, never the reverse). `"other"` (the fifth `DepositTender`)
+ * never appears — there is no raw ledger column for it. */
+const TENDER_COLUMNS: ReadonlyArray<{ tender: DepositTender; raw: keyof RawDepositLedgerRow }> = [
+  { tender: "cash", raw: "ledger_cash" },
+  { tender: "credit", raw: "ledger_credit" },
+  { tender: "transfer", raw: "ledger_tran" },
+  { tender: "web", raw: "ledger_web" },
+];
+
+/** The first non-zero tender column on a received/refunded row — `null`
+ * when all four are zero (the `zeroTenderRow` case; nothing to name).
+ * Trusts the same "single-line group, one non-zero column in practice"
+ * assumption `sumTenderColumns` already relies on (C0-verified) — this
+ * never re-sums, it only identifies which one. */
+function dominantTender(row: RawDepositLedgerRow): DepositTender | null {
+  for (const { tender, raw } of TENDER_COLUMNS) {
+    if (parseLedgerSatang(row[raw] as string | null) !== 0) return tender;
+  }
+  return null;
 }
 
 /** One classified row, plus tripwires the caller (`buildDepositRegisterData`)
@@ -233,8 +277,9 @@ export function classifyDepositRow(row: RawDepositLedgerRow): ClassifiedDepositR
     const rNumber = (row.ledger_cin_no ?? "").trim() || null;
     const amountSatang = Math.abs(sumTenderColumns(row));
     const zeroTenderRow = amountSatang === 0 && parseLedgerSatang(row.ledger_amount) !== 0;
+    const tender = dominantTender(row);
     return {
-      event: { legacyId: row.ledger_legacy_id, pmsRef, kind, rNumber, dateBangkok, amountSatang, voided },
+      event: { legacyId: row.ledger_legacy_id, pmsRef, kind, rNumber, dateBangkok, amountSatang, voided, tender, chRef: null },
       unparsedAppliedBookingNo: false,
       zeroTenderRow,
     };
@@ -243,8 +288,19 @@ export function classifyDepositRow(row: RawDepositLedgerRow): ClassifiedDepositR
   if (dsName.startsWith(DEPOSIT_APPLIED_PREFIX)) {
     const rNumber = parseAppliedBookingNo(dsName);
     const amountSatang = Math.abs(parseLedgerSatang(row.ledger_free));
+    const chRef = (row.ledger_cin_no ?? "").trim() || null;
     return {
-      event: { legacyId: row.ledger_legacy_id, pmsRef, kind: "applied", rNumber, dateBangkok, amountSatang, voided },
+      event: {
+        legacyId: row.ledger_legacy_id,
+        pmsRef,
+        kind: "applied",
+        rNumber,
+        dateBangkok,
+        amountSatang,
+        voided,
+        tender: null,
+        chRef,
+      },
       unparsedAppliedBookingNo: rNumber === null,
       zeroTenderRow: false,
     };
@@ -263,7 +319,10 @@ export function classifyDepositRow(row: RawDepositLedgerRow): ClassifiedDepositR
  * `firstEventDate` is the earliest ACTIVE (non-voided) event's date across
  * the whole thread, regardless of kind — the aging list's "oldest first"
  * anchor. `events` carries EVERY event for this R-number, voided included,
- * for display (never excluded from the array itself, only from the sums). */
+ * for display (never excluded from the array itself, only from the sums).
+ * `status` is the owner's explicit-state ask (2026-08-01) — see
+ * `DepositThreadStatus` (shared/types.ts) for the four values and
+ * `deriveDepositThreadStatus()` below for how it's computed. */
 export interface DepositThread {
   rNumber: string;
   receivedSatang: number;
@@ -272,6 +331,46 @@ export interface DepositThread {
   outstandingSatang: number;
   firstEventDate: string | null;
   events: DepositLedgerEvent[];
+  status: DepositThreadStatus;
+}
+
+/**
+ * Derives a thread's explicit lifecycle state from the same four figures
+ * `DepositThread` already carries — PURE, no I/O, see `DepositThreadStatus`
+ * (shared/types.ts) for the full definition of each value. Priority order,
+ * evaluated top to bottom:
+ *
+ * 1. `outstandingSatang > 0` with nothing yet applied/refunded ->
+ *    `"waitingCheckin"` — the common case, a receipt sitting untouched.
+ * 2. `outstandingSatang > 0` with SOME applied/refunded already ->
+ *    `"partial"` — still holding a balance, but no longer untouched.
+ * 3. `outstandingSatang <= 0` (fully or over-absorbed — the R015834-style
+ *    mismatch lands here too, `buildDepositExceptions` flags it
+ *    separately; the two are complementary, never exclusive) with
+ *    `refundedSatang > 0` and nothing applied -> `"refunded"` — closed out
+ *    purely by a refund.
+ * 4. `outstandingSatang <= 0` with `appliedSatang > 0` -> `"applied"` —
+ *    covers the ordinary fully-applied case, the orphan-applied exception
+ *    (received 0, applied > 0), and a mixed applied+refund close-out (a
+ *    stay is the more informative "where it went" of the two).
+ * 5. Anything else (a genuinely all-zero thread — never expected against
+ *    real data, since a thread only exists because at least one event
+ *    produced it) falls back to `"waitingCheckin"` as the safest, most
+ *    neutral default.
+ */
+export function deriveDepositThreadStatus(t: {
+  receivedSatang: number;
+  appliedSatang: number;
+  refundedSatang: number;
+  outstandingSatang: number;
+}): DepositThreadStatus {
+  const { appliedSatang, refundedSatang, outstandingSatang } = t;
+  if (outstandingSatang > 0) {
+    return appliedSatang > 0 || refundedSatang > 0 ? "partial" : "waitingCheckin";
+  }
+  if (refundedSatang > 0 && appliedSatang === 0) return "refunded";
+  if (appliedSatang > 0) return "applied";
+  return "waitingCheckin";
 }
 
 /**
@@ -310,14 +409,16 @@ export function buildDepositThreads(events: DepositLedgerEvent[]): DepositThread
       }
     }
 
+    const outstandingSatang = receivedSatang - appliedSatang - refundedSatang;
     threads.push({
       rNumber,
       receivedSatang,
       appliedSatang,
       refundedSatang,
-      outstandingSatang: receivedSatang - appliedSatang - refundedSatang,
+      outstandingSatang,
       firstEventDate,
       events: threadEvents,
+      status: deriveDepositThreadStatus({ receivedSatang, appliedSatang, refundedSatang, outstandingSatang }),
     });
   }
 
@@ -498,6 +599,16 @@ export interface DepositRegisterData {
   blankBookingNoRows: number;
   undatedRows: number;
   voided: VoidedDepositEventSummary[];
+  /** Owner ask (2026-08-01, register mapability): the FULL classified
+   * event list, every kind INCLUDING voided ones and events with no
+   * `rNumber` (unparseable applied label, blank `ledger_cin_no`) — the
+   * same list `threads`/`monthly`/`voided` are all already built from,
+   * exposed here without recomputation so the register endpoint
+   * (server.ts) can surface a flat, chronological `events` field a client
+   * can filter by month or by R-number. Never re-derive this from
+   * `threads` (that would silently drop null-rNumber events, the exact
+   * gap `collectVoidedEvents` was fixed for) — always this flat list. */
+  events: DepositLedgerEvent[];
 }
 
 export function buildDepositRegisterData(rows: RawDepositLedgerRow[]): DepositRegisterData {
@@ -526,6 +637,7 @@ export function buildDepositRegisterData(rows: RawDepositLedgerRow[]): DepositRe
     blankBookingNoRows,
     undatedRows,
     voided: collectVoidedEvents(events),
+    events,
   };
 }
 

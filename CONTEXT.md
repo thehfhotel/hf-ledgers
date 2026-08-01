@@ -20,6 +20,24 @@ it is not part of that day's รวมรายรับทั้งวัน.
 The moment a มัดจำล่วงหน้า is set against the stay it was taken for. Revenue is earned, but no
 money moves that day.
 
+**Deposit thread state** (the office deposit register's explicit-state vocabulary, added
+2026-08-01 so a มัดจำล่วงหน้า's status is never ambiguous — one R-number's whole history, from
+received through however it closed out). Exactly four states, canonical Thai labels:
+
+- **รอเช็คอิน** (waiting check-in): received, nothing applied or refunded yet — money the office
+  is still holding, untouched.
+- **บางส่วน** (partial): still holding a balance, but SOME of it has already moved (partially
+  applied or partially refunded).
+- **ตัดยอดแล้ว** (applied/used): fully absorbed into a stay — no balance left, and what's left is
+  accounted for by application, not refund. Always shown with WHERE it went — the CH (check-in)
+  ref and the applied date.
+- **คืนเงินแล้ว** (refunded): closed out purely by a refund, no application involved.
+
+_Avoid_: ใช้แล้ว ("used" — ambiguous between applied-to-a-stay and merely touched), จ่ายแล้ว
+("paid" — ambiguous about which direction money moved, and doesn't distinguish received from
+applied), "closed", "resolved" (those describe a note thread's own state, a separate axis from
+the deposit's own lifecycle — see the deposit register's note feature, keyed by resolvedAt).
+
 **Payment** (การชำระเงิน):
 Money settling charges for a stay that has happened or is happening — distinct from a
 มัดจำล่วงหน้า, which arrives before it.

@@ -13,6 +13,7 @@ import type {
   DepositEventKind,
   DepositNote,
   DepositTender,
+  DepositThreadStatus,
   ExpenseItem,
   Me,
   OtherIncomeItem,
@@ -479,26 +480,65 @@ export interface DepositMonthlyReconciliation {
   closingSatang: number;
 }
 
-export type DepositAgingRow = DepositNoteFields & {
-  rNumber: string;
-  receivedSatang: number;
-  appliedSatang: number;
-  refundedSatang: number;
-  outstandingSatang: number;
-  firstEventDate: string | null;
+/** Owner ask (2026-08-01, explicit deposit state): every thread-shaped row
+ * carries its `DepositThreadStatus` (shared/types.ts — รอเช็คอิน/ตัดยอดแล้ว/
+ * คืนเงินแล้ว/บางส่วน) plus, when it has one, its latest applied event's CH
+ * ref + date ("where it went") — `null`/`null` for a thread with no applied
+ * event at all. */
+type DepositStatusFields = {
+  status: DepositThreadStatus;
+  appliedChRef: string | null;
+  appliedDateBangkok: string | null;
 };
 
-export type DepositMismatchedException = DepositNoteFields & {
-  rNumber: string;
-  receivedSatang: number;
-  appliedSatang: number;
-  diffSatang: number;
-};
+export type DepositAgingRow = DepositNoteFields &
+  DepositStatusFields & {
+    rNumber: string;
+    receivedSatang: number;
+    appliedSatang: number;
+    refundedSatang: number;
+    outstandingSatang: number;
+    firstEventDate: string | null;
+    /** Owner ask (2026-08-01, register mapability): the pay_no of this
+     * thread's own received event (voided excluded), `null` when none —
+     * lets the office find the actual PMS receipt behind an R-number. */
+    receivedPmsRef: string | null;
+  };
 
-export type DepositOrphanAppliedException = DepositNoteFields & {
-  rNumber: string;
-  appliedSatang: number;
-};
+export type DepositMismatchedException = DepositNoteFields &
+  DepositStatusFields & {
+    rNumber: string;
+    receivedSatang: number;
+    appliedSatang: number;
+    diffSatang: number;
+    receivedPmsRef: string | null;
+  };
+
+export type DepositOrphanAppliedException = DepositNoteFields &
+  DepositStatusFields & {
+    rNumber: string;
+    appliedSatang: number;
+    receivedPmsRef: string | null;
+  };
+
+/** One classified deposit-lifecycle event, mirrors
+ * `src/server/deposit-register.ts`'s `DepositLedgerEvent` (trimmed to the
+ * wire fields — `legacyId` stays server-internal). `tender` is `null` for
+ * `kind: "applied"` (an accounting offset via `ledger_free`, no bank
+ * movement) and for a received/refunded row whose four tender columns are
+ * genuinely all zero. `chRef` (the CH/check-in number) is populated for
+ * `kind: "applied"` events only — received/refunded events already carry
+ * their R-number as `rNumber`, so it is never duplicated there. */
+export interface DepositRegisterEvent {
+  dateBangkok: string | null;
+  kind: "received" | "applied" | "refunded";
+  rNumber: string | null;
+  pmsRef: string;
+  tender: DepositTender | null;
+  amountSatang: number;
+  voided: boolean;
+  chRef: string | null;
+}
 
 /** `rNumber` is nullable (review fix): a voided row can itself carry an
  * unparseable/blank R-number, which never joins any aging/exceptions row —
@@ -531,6 +571,11 @@ export interface DepositRegisterResponse {
   blankBookingNoRows: number;
   undatedRows: number;
   voided: DepositVoidedEvent[];
+  /** Owner ask (2026-08-01, register mapability): the full classified event
+   * list, every kind INCLUDING voided ones, in chronological order — the
+   * สรุปรายเดือน page filters this by `dateBangkok`'s `"YYYY-MM"` prefix to
+   * show a month's events on expand. Additive. */
+  events: DepositRegisterEvent[];
 }
 
 // 30. GET /api/:property/deposits/register — 503 when this property's PMS

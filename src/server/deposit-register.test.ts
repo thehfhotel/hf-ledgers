@@ -21,6 +21,7 @@ import {
   buildMonthlyReconciliation,
   classifyDepositRow,
   collectVoidedEvents,
+  deriveDepositThreadStatus,
   type DepositLedgerEvent,
   type DepositThread,
   type RawDepositLedgerRow,
@@ -56,6 +57,8 @@ function event(overrides: Partial<DepositLedgerEvent>): DepositLedgerEvent {
     dateBangkok: "2026-08-15",
     amountSatang: 89_000,
     voided: false,
+    tender: "cash",
+    chRef: null,
     ...overrides,
   };
 }
@@ -86,6 +89,8 @@ describe("classifyDepositRow", () => {
       dateBangkok: "2026-08-15",
       amountSatang: 89_000,
       voided: false,
+      tender: "cash",
+      chRef: null,
     });
     expect(classified!.unparsedAppliedBookingNo).toBe(false);
     expect(classified!.zeroTenderRow).toBe(false);
@@ -105,7 +110,16 @@ describe("classifyDepositRow", () => {
     expect(classified!.event.kind).toBe("refunded");
     expect(classified!.event.amountSatang).toBe(39_500);
     expect(classified!.event.rNumber).toBe("R014843");
+    expect(classified!.event.tender).toBe("transfer");
+    expect(classified!.event.chRef).toBeNull();
     expect(classified!.zeroTenderRow).toBe(false);
+  });
+
+  test("tender is identified per the non-zero raw column: credit and web columns each resolve to their own DepositTender", () => {
+    const viaCredit = classifyDepositRow(row({ ledger_cash: "0", ledger_credit: "500.00", ledger_amount: "500.00" }))!;
+    expect(viaCredit.event.tender).toBe("credit");
+    const viaWeb = classifyDepositRow(row({ ledger_cash: "0", ledger_web: "500.00", ledger_amount: "500.00" }))!;
+    expect(viaWeb.event.tender).toBe("web");
   });
 
   // Review fix, tripwire gap (a): a received/refunded row whose tender
@@ -125,6 +139,7 @@ describe("classifyDepositRow", () => {
     );
     expect(classified!.event.amountSatang).toBe(0);
     expect(classified!.zeroTenderRow).toBe(true);
+    expect(classified!.event.tender).toBeNull();
   });
 
   test("received row with all tender columns AND ledger_amount zero: NOT flagged (genuinely a zero-money row)", () => {
@@ -164,6 +179,11 @@ describe("classifyDepositRow", () => {
     // money lives in ledger_free, never the tender columns, so this is
     // always false there regardless of what the tender columns hold.
     expect(classified!.zeroTenderRow).toBe(false);
+    // No bank tender moves on an applied line (it's an accounting offset);
+    // its OWN ledger_cin_no (the CH-number) is carried as chRef — distinct
+    // from, and never confused with, the R-number parsed from the label.
+    expect(classified!.event.tender).toBeNull();
+    expect(classified!.event.chRef).toBe("CH26-005269");
   });
 
   test("applied label with a trailing space (C0-observed) still parses", () => {
@@ -222,6 +242,8 @@ describe("buildDepositThreads", () => {
     // firstEventDate is the earliest ACTIVE event's date — the voided
     // 07-20 event (earlier than both active ones) must NOT anchor this.
     expect(thread.firstEventDate).toBe("2026-08-01");
+    // Owner ask (2026-08-01): fully applied, nothing outstanding -> ตัดยอดแล้ว.
+    expect(thread.status).toBe("applied");
   });
 
   test("the proven R015834 case: received 39_500, applied 79_000 -> outstanding is NEGATIVE (never appears in aging)", () => {
@@ -233,6 +255,9 @@ describe("buildDepositThreads", () => {
     expect(thread!.receivedSatang).toBe(39_500);
     expect(thread!.appliedSatang).toBe(79_000);
     expect(thread!.outstandingSatang).toBe(-39_500);
+    // Over-applied still reads as "applied" (ตัดยอดแล้ว) — the mismatch
+    // itself is a SEPARATE, complementary signal via buildDepositExceptions.
+    expect(thread!.status).toBe("applied");
   });
 
   test("events with rNumber null (unparseable applied label) are excluded from every thread", () => {
@@ -249,6 +274,60 @@ describe("buildDepositThreads", () => {
     const events: DepositLedgerEvent[] = [event({ rNumber: "R015834" }), event({ rNumber: "R014843" })];
     const threads = buildDepositThreads(events);
     expect(threads.map((t) => t.rNumber)).toEqual(["R014843", "R015834"]);
+  });
+});
+
+// Owner ask (2026-08-01): the register must make a deposit's STATE
+// unambiguous. These are the canonical Thai labels' derivation rules —
+// see DepositThreadStatus's doc comment (shared/types.ts) for the full
+// definitions.
+describe("deriveDepositThreadStatus", () => {
+  test("received only, nothing applied/refunded -> waitingCheckin (รอเช็คอิน)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 89_000, appliedSatang: 0, refundedSatang: 0, outstandingSatang: 89_000 }),
+    ).toBe("waitingCheckin");
+  });
+
+  test("still holding a balance but partially applied -> partial (บางส่วน)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 100_000, appliedSatang: 40_000, refundedSatang: 0, outstandingSatang: 60_000 }),
+    ).toBe("partial");
+  });
+
+  test("still holding a balance but partially refunded -> partial (บางส่วน)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 100_000, appliedSatang: 0, refundedSatang: 40_000, outstandingSatang: 60_000 }),
+    ).toBe("partial");
+  });
+
+  test("fully applied, outstanding zero -> applied (ตัดยอดแล้ว)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 89_000, appliedSatang: 89_000, refundedSatang: 0, outstandingSatang: 0 }),
+    ).toBe("applied");
+  });
+
+  test("over-applied (the R015834 mismatch shape), outstanding negative -> still applied (ตัดยอดแล้ว)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 39_500, appliedSatang: 79_000, refundedSatang: 0, outstandingSatang: -39_500 }),
+    ).toBe("applied");
+  });
+
+  test("orphanApplied shape (received 0, applied > 0) -> applied (ตัดยอดแล้ว)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 0, appliedSatang: 50_000, refundedSatang: 0, outstandingSatang: -50_000 }),
+    ).toBe("applied");
+  });
+
+  test("fully refunded, nothing applied -> refunded (คืนเงินแล้ว)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 39_500, appliedSatang: 0, refundedSatang: 39_500, outstandingSatang: 0 }),
+    ).toBe("refunded");
+  });
+
+  test("mixed applied + refunded close-out -> applied wins (a stay is the more informative outcome)", () => {
+    expect(
+      deriveDepositThreadStatus({ receivedSatang: 100_000, appliedSatang: 60_000, refundedSatang: 40_000, outstandingSatang: 0 }),
+    ).toBe("applied");
   });
 });
 
@@ -304,6 +383,7 @@ describe("buildDepositExceptions", () => {
         outstandingSatang: -39_500,
         firstEventDate: "2026-07-31",
         events: [],
+        status: "applied",
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -321,6 +401,7 @@ describe("buildDepositExceptions", () => {
         outstandingSatang: -50_000,
         firstEventDate: null,
         events: [],
+        status: "applied",
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -338,6 +419,7 @@ describe("buildDepositExceptions", () => {
         outstandingSatang: 89_000,
         firstEventDate: "2026-08-01",
         events: [],
+        status: "waitingCheckin",
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -355,6 +437,7 @@ describe("buildDepositExceptions", () => {
         outstandingSatang: -50,
         firstEventDate: "2026-08-01",
         events: [],
+        status: "applied",
       },
     ];
     const { mismatched } = buildDepositExceptions(threads);
@@ -450,6 +533,62 @@ describe("buildDepositRegisterData (row-level, end to end)", () => {
     ]);
   });
 
+  // Owner ask (2026-08-01, register mapability): `events` is the full flat
+  // classified list, exposed without recomputation — the received event
+  // carries its tender (`cash`, the one non-zero raw column) and `chRef:
+  // null` (its cin_no is already `rNumber`); the applied event carries
+  // `tender: null` (no bank movement) and `chRef` from its OWN
+  // `ledger_cin_no` (the CH/check-in number, distinct from the R-number
+  // parsed out of its ds_name label).
+  test("events: the full flat list, including tender for received and CH ref for applied", () => {
+    const rows: RawDepositLedgerRow[] = [
+      row({
+        ledger_legacy_id: 1,
+        ledger_pay_no: "R2607-9001",
+        ledger_ds_name: "จ่ายล่วงหน้า",
+        ledger_cin_no: "R015834",
+        ledger_pay_date: "2026-07-25T08:00:00.000Z",
+        ledger_cash: "395.00",
+        ledger_amount: "395.00",
+      }),
+      row({
+        ledger_legacy_id: 2,
+        ledger_pay_no: "R2608-9002",
+        ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R015834",
+        ledger_cin_no: "CH26-009000",
+        ledger_pay_date: "2026-08-01T08:00:00.000Z",
+        ledger_cash: "0",
+        ledger_amount: "790.00",
+        ledger_free: "790.00",
+      }),
+    ];
+    const data = buildDepositRegisterData(rows);
+    expect(data.events).toEqual([
+      {
+        legacyId: 1,
+        pmsRef: "R2607-9001",
+        kind: "received",
+        rNumber: "R015834",
+        dateBangkok: "2026-07-25",
+        amountSatang: 39_500,
+        voided: false,
+        tender: "cash",
+        chRef: null,
+      },
+      {
+        legacyId: 2,
+        pmsRef: "R2608-9002",
+        kind: "applied",
+        rNumber: "R015834",
+        dateBangkok: "2026-08-01",
+        amountSatang: 79_000,
+        voided: false,
+        tender: null,
+        chRef: "CH26-009000",
+      },
+    ]);
+  });
+
   // Review fix: three synthetic rows, one per tripwire gap, none of which
   // may silently vanish. Also confirms `voided` is now computed INSIDE
   // buildDepositRegisterData (walking events, not threads) rather than
@@ -520,6 +659,22 @@ describe("buildDepositRegisterData (row-level, end to end)", () => {
     expect(data.voided).toEqual(
       expect.arrayContaining([{ rNumber: null, kind: "applied", amountSatang: 70_000, dateBangkok: expect.any(String) }]),
     );
+    // Owner ask (2026-08-01): that same voided applied row is ALSO present
+    // in the flat `events` list, tagged `voided: true` (never dropped) and
+    // carrying its own CH ref (row 13's ledger_cin_no).
+    expect(data.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          legacyId: 13,
+          kind: "applied",
+          rNumber: null,
+          voided: true,
+          amountSatang: 70_000,
+          tender: null,
+          chRef: "CH26-999999",
+        }),
+      ]),
+    );
   });
 
   test("empty input yields empty everything", () => {
@@ -531,6 +686,7 @@ describe("buildDepositRegisterData (row-level, end to end)", () => {
       blankBookingNoRows: 0,
       undatedRows: 0,
       voided: [],
+      events: [],
     });
   });
 });

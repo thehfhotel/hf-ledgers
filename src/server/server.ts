@@ -1311,6 +1311,33 @@ export const api = new Elysia({ prefix: "/api" })
       return { note: note?.note ?? null, resolvedAt: note?.resolvedAt ?? null, resolvedBy: note?.resolvedBy ?? null };
     };
 
+    // Owner ask (2026-08-01, register mapability): "map-able" — an aging or
+    // exception row's only prior reference was its R-number, which never
+    // appears anywhere else in the office's paper trail. `receivedPmsRef`
+    // (the pay_no of that thread's own received event, voided excluded) is
+    // the PMS's own receipt/payment number, letting the office find the
+    // actual paper slip. `threadByR` is built from `register.threads` — the
+    // FULL, unfiltered thread list buildDepositExceptions already runs
+    // over — so this resolves for exceptions rows too, not just aging ones.
+    const threadByR = new Map(register.threads.map((t) => [t.rNumber, t]));
+    const receivedPmsRefFor = (rNumber: string): string | null => {
+      const events = threadByR.get(rNumber)?.events ?? [];
+      return events.find((e) => e.kind === "received" && !e.voided)?.pmsRef ?? null;
+    };
+    // Owner ask (2026-08-01, explicit deposit state): "where it went" for a
+    // thread whose status is applied/partial — the LATEST non-voided
+    // applied event's CH ref + date, so the ตัดยอดแล้ว/บางส่วน chip can show
+    // the actual stay next to it, not just a status word. `null`/`null`
+    // when the thread has no applied event at all (a pure รอเช็คอิน/
+    // คืนเงินแล้ว thread).
+    const appliedMappingFor = (rNumber: string): { appliedChRef: string | null; appliedDateBangkok: string | null } => {
+      const events = threadByR.get(rNumber)?.events ?? [];
+      const applied = events.filter((e) => e.kind === "applied" && !e.voided);
+      if (applied.length === 0) return { appliedChRef: null, appliedDateBangkok: null };
+      const latest = [...applied].sort((a, b) => (b.dateBangkok ?? "").localeCompare(a.dateBangkok ?? ""))[0]!;
+      return { appliedChRef: latest.chRef, appliedDateBangkok: latest.dateBangkok };
+    };
+
     const aging = register.threads
       .filter((t) => t.outstandingSatang > 0)
       .sort((a, b) => (a.firstEventDate ?? "").localeCompare(b.firstEventDate ?? ""))
@@ -1321,13 +1348,28 @@ export const api = new Elysia({ prefix: "/api" })
         refundedSatang: t.refundedSatang,
         outstandingSatang: t.outstandingSatang,
         firstEventDate: t.firstEventDate,
+        receivedPmsRef: receivedPmsRefFor(t.rNumber),
+        status: t.status,
+        ...appliedMappingFor(t.rNumber),
         ...noteFields(t.rNumber),
       }));
 
     const { mismatched, orphanApplied } = buildDepositExceptions(register.threads);
     const exceptions = {
-      mismatched: mismatched.map((m) => ({ ...m, ...noteFields(m.rNumber) })),
-      orphanApplied: orphanApplied.map((o) => ({ ...o, ...noteFields(o.rNumber) })),
+      mismatched: mismatched.map((m) => ({
+        ...m,
+        receivedPmsRef: receivedPmsRefFor(m.rNumber),
+        status: threadByR.get(m.rNumber)?.status ?? "waitingCheckin",
+        ...appliedMappingFor(m.rNumber),
+        ...noteFields(m.rNumber),
+      })),
+      orphanApplied: orphanApplied.map((o) => ({
+        ...o,
+        receivedPmsRef: receivedPmsRefFor(o.rNumber),
+        status: threadByR.get(o.rNumber)?.status ?? "waitingCheckin",
+        ...appliedMappingFor(o.rNumber),
+        ...noteFields(o.rNumber),
+      })),
     };
 
     return {
@@ -1348,6 +1390,23 @@ export const api = new Elysia({ prefix: "/api" })
       blankBookingNoRows: register.blankBookingNoRows,
       undatedRows: register.undatedRows,
       voided: register.voided,
+      // Owner ask (2026-08-01, register mapability): the full classified
+      // event list (every kind, INCLUDING voided, tagged) — a flat,
+      // chronological feed the client filters by month (สรุปรายเดือน's
+      // expandable rows) so a month's totals can be traced back to
+      // individual PMS transactions. Additive; existing consumers reading
+      // only the fields above are unaffected. Trimmed to the wire fields a
+      // client needs — `legacyId` stays server-internal.
+      events: register.events.map((e) => ({
+        dateBangkok: e.dateBangkok,
+        kind: e.kind,
+        rNumber: e.rNumber,
+        pmsRef: e.pmsRef,
+        tender: e.tender,
+        amountSatang: e.amountSatang,
+        voided: e.voided,
+        chRef: e.chRef,
+      })),
     };
   })
 

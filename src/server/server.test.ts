@@ -14,7 +14,7 @@ import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../client/ca
 import { DEPOSIT_NOTE_MAX_LEN, REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
 import type { CashBlock, Category, CategoryKey, Property, Tender } from "../shared/types.ts";
 import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
-import type { DepositRegisterData, DepositThread, MonthlyDepositReconciliation } from "./deposit-register.ts";
+import type { DepositLedgerEvent, DepositRegisterData, DepositThread, MonthlyDepositReconciliation } from "./deposit-register.ts";
 
 const { api } = await import("./server.ts");
 // server.ts already imported pms-prefill.ts above, so this re-import just
@@ -2040,6 +2040,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       outstandingSatang: 89_000,
       firstEventDate: "2026-08-01",
       events: [],
+      status: "waitingCheckin",
       ...overrides,
     };
   }
@@ -2082,6 +2083,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           appliedSatang: 79_000,
           outstandingSatang: -39_500,
           firstEventDate: "2026-07-31",
+          status: "applied",
         }),
         thread({
           rNumber: "R090003",
@@ -2089,6 +2091,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           appliedSatang: 30_000,
           outstandingSatang: -30_000,
           firstEventDate: null,
+          status: "applied",
         }),
       ],
       monthly,
@@ -2100,6 +2103,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       blankBookingNoRows: 1,
       undatedRows: 4,
       voided: [{ rNumber: null, kind: "applied" as const, amountSatang: 70_000, dateBangkok: "2026-06-01" }],
+      events: [],
     };
     depositRegisterInternal.setFetchDepositRegisterForTests(async () => register);
 
@@ -2107,7 +2111,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       property: string;
       generatedAt: string;
       monthly: unknown[];
-      aging: Array<{ rNumber: string }>;
+      aging: Array<{ rNumber: string; status: string; receivedPmsRef: string | null }>;
       exceptions: {
         mismatched: Array<{
           rNumber: string;
@@ -2117,6 +2121,10 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           note: string | null;
           resolvedAt: string | null;
           resolvedBy: string | null;
+          status: string;
+          receivedPmsRef: string | null;
+          appliedChRef: string | null;
+          appliedDateBangkok: string | null;
         }>;
         orphanApplied: Array<{
           rNumber: string;
@@ -2124,6 +2132,10 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           note: string | null;
           resolvedAt: string | null;
           resolvedBy: string | null;
+          status: string;
+          receivedPmsRef: string | null;
+          appliedChRef: string | null;
+          appliedDateBangkok: string | null;
         }>;
       };
       unparsedAppliedRows: number;
@@ -2131,6 +2143,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       blankBookingNoRows: number;
       undatedRows: number;
       voided: Array<{ rNumber: string | null; kind: string; amountSatang: number; dateBangkok: string | null }>;
+      events: unknown[];
     }>("GET", `/${PROPERTY}/deposits/register`);
 
     expect(res.status).toBe(200);
@@ -2138,6 +2151,9 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     expect(typeof res.body.generatedAt).toBe("string");
     expect(res.body.monthly).toEqual(monthly);
     expect(res.body.aging.map((r) => r.rNumber)).toEqual(["R090002", "R090001"]); // oldest first
+    // Owner ask (2026-08-01): both aging threads are receipts sitting
+    // untouched (no applied/refunded activity in this fixture) -> รอเช็คอิน.
+    expect(res.body.aging.every((r) => r.status === "waitingCheckin")).toBe(true);
     expect(res.body.exceptions.mismatched).toEqual([
       {
         rNumber: "R015834",
@@ -2147,10 +2163,24 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         note: null,
         resolvedAt: null,
         resolvedBy: null,
+        status: "applied",
+        receivedPmsRef: null,
+        appliedChRef: null,
+        appliedDateBangkok: null,
       },
     ]);
     expect(res.body.exceptions.orphanApplied).toEqual([
-      { rNumber: "R090003", appliedSatang: 30_000, note: null, resolvedAt: null, resolvedBy: null },
+      {
+        rNumber: "R090003",
+        appliedSatang: 30_000,
+        note: null,
+        resolvedAt: null,
+        resolvedBy: null,
+        status: "applied",
+        receivedPmsRef: null,
+        appliedChRef: null,
+        appliedDateBangkok: null,
+      },
     ]);
     expect(res.body.unparsedAppliedRows).toBe(2);
     // Review fix: each tripwire counter passes through independently.
@@ -2158,6 +2188,9 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     expect(res.body.blankBookingNoRows).toBe(1);
     expect(res.body.undatedRows).toBe(4);
     expect(res.body.voided).toEqual([{ rNumber: null, kind: "applied", amountSatang: 70_000, dateBangkok: "2026-06-01" }]);
+    // Additive: the flat events feed is always present (empty here since
+    // the fixture's threads carry no events).
+    expect(res.body.events).toEqual([]);
   });
 
   test("notes merge onto both aging rows and exception rows sharing the same rNumber", async () => {
@@ -2179,6 +2212,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       blankBookingNoRows: 0,
       undatedRows: 0,
       voided: [],
+      events: [],
     }));
 
     await call("PUT", `/${PROPERTY}/deposits/R090010/note`, { note: "รอตรวจสอบ", resolved: false });
@@ -2196,6 +2230,114 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     const mismatchedRow = res.body.exceptions.mismatched.find((r) => r.rNumber === "R090011")!;
     expect(mismatchedRow.note).toBe("ให้เหตุผลจากรีเซปชั่น");
     expect(mismatchedRow.resolvedAt).not.toBeNull();
+  });
+
+  // Owner ask (2026-08-01, register mapability + explicit deposit state):
+  // the top-level `events` field carries the register's full flat event
+  // list (additive), and `receivedPmsRef`/`status`/`appliedChRef`/
+  // `appliedDateBangkok` are correctly resolved from a thread's OWN
+  // `events` — a partially-applied thread (still in `aging`, since
+  // outstanding > 0) that HAS an applied event lets both the "where it
+  // received from" and "where it's partly gone to" mappings be asserted
+  // in the same row.
+  test("events passes through; receivedPmsRef/status/appliedChRef/appliedDateBangkok resolve from the thread's own events", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+
+    const receivedEvent: DepositLedgerEvent = {
+      legacyId: 1,
+      pmsRef: "R2608-0001",
+      kind: "received",
+      rNumber: "R090020",
+      dateBangkok: "2026-08-01",
+      amountSatang: 50_000,
+      voided: false,
+      tender: "cash",
+      chRef: null,
+    };
+    const appliedEvent: DepositLedgerEvent = {
+      legacyId: 2,
+      pmsRef: "R2608-0002",
+      kind: "applied",
+      rNumber: "R090020",
+      dateBangkok: "2026-08-10",
+      amountSatang: 20_000,
+      voided: false,
+      tender: null,
+      chRef: "CH26-005269",
+    };
+    const flatEvents = [receivedEvent, appliedEvent];
+
+    const register: DepositRegisterData = {
+      threads: [
+        thread({
+          rNumber: "R090020",
+          receivedSatang: 50_000,
+          appliedSatang: 20_000,
+          outstandingSatang: 30_000,
+          firstEventDate: "2026-08-01",
+          status: "partial",
+          events: flatEvents,
+        }),
+      ],
+      monthly: [],
+      unparsedAppliedRows: 0,
+      zeroTenderRows: 0,
+      blankBookingNoRows: 0,
+      undatedRows: 0,
+      voided: [],
+      events: flatEvents,
+    };
+    depositRegisterInternal.setFetchDepositRegisterForTests(async () => register);
+
+    const res = await call<{
+      aging: Array<{
+        rNumber: string;
+        status: string;
+        receivedPmsRef: string | null;
+        appliedChRef: string | null;
+        appliedDateBangkok: string | null;
+      }>;
+      events: Array<{
+        dateBangkok: string | null;
+        kind: string;
+        rNumber: string | null;
+        pmsRef: string;
+        tender: string | null;
+        amountSatang: number;
+        voided: boolean;
+        chRef: string | null;
+      }>;
+    }>("GET", `/${PROPERTY}/deposits/register`);
+
+    expect(res.status).toBe(200);
+    const agingRow = res.body.aging.find((r) => r.rNumber === "R090020")!;
+    expect(agingRow.status).toBe("partial");
+    expect(agingRow.receivedPmsRef).toBe("R2608-0001");
+    expect(agingRow.appliedChRef).toBe("CH26-005269");
+    expect(agingRow.appliedDateBangkok).toBe("2026-08-10");
+
+    expect(res.body.events).toEqual([
+      {
+        dateBangkok: "2026-08-01",
+        kind: "received",
+        rNumber: "R090020",
+        pmsRef: "R2608-0001",
+        tender: "cash",
+        amountSatang: 50_000,
+        voided: false,
+        chRef: null,
+      },
+      {
+        dateBangkok: "2026-08-10",
+        kind: "applied",
+        rNumber: "R090020",
+        pmsRef: "R2608-0002",
+        tender: null,
+        amountSatang: 20_000,
+        voided: false,
+        chRef: "CH26-005269",
+      },
+    ]);
   });
 });
 

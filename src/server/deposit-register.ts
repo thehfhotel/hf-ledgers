@@ -384,6 +384,24 @@ export interface DepositThread {
    * no event in the thread has a `guestName` (no `ht_customers` match
    * anywhere in the thread). */
   guestName: string | null;
+  /** Owner ask (2026-08-01, มัดจำ register tender visibility): "the unified
+   * thread table ... must show the METHOD OF PAYMENT (tender) of each
+   * deposit". See `deriveReceivedTenders()` below for the exact rule
+   * (non-voided RECEIVED events only, grouped by tender). Usually one
+   * entry; a genuine split receipt (two received events on the same
+   * R-number using different tenders) has two. Empty array when the thread
+   * has no non-voided received event with a known tender at all (the
+   * orphanApplied shape, or a `zeroTenderRow` where every received event's
+   * `tender` is `null`) — never `null`, so the client never has to
+   * null-check before checking `.length`. */
+  receivedTenders: ReceivedTenderAmount[];
+}
+
+/** One tender's total within a thread's non-voided RECEIVED events — see
+ * `deriveReceivedTenders()` below. */
+export interface ReceivedTenderAmount {
+  tender: DepositTender;
+  amountSatang: number;
 }
 
 /**
@@ -403,6 +421,32 @@ function deriveThreadGuestName(events: DepositLedgerEvent[]): string | null {
   if (received) return received.guestName;
   const any = events.find((e) => e.guestName !== null);
   return any ? any.guestName : null;
+}
+
+/**
+ * A thread's `receivedTenders` — every non-voided `kind: "received"` event
+ * in the thread, grouped by `tender` and summed (a genuine split receipt:
+ * two received events on the same R-number, one cash one transfer, produces
+ * two entries; two received events sharing the SAME tender collapse into
+ * one summed entry rather than two duplicate-labeled ones). Events with
+ * `tender: null` (the `zeroTenderRow` case — all four raw tender columns
+ * zero) contribute nothing: there is no tender to name. `applied`/`refunded`
+ * events are never read here — this is RECEIVED tender only, mirroring the
+ * money sums above (`receivedSatang` etc.) which are also received/applied/
+ * refunded-scoped rather than lumped together; a refund's own tender is
+ * already visible via the สรุปรายเดือน month-expansion event rows, out of
+ * scope for this thread-level view. Order is first-seen (a `Map` preserves
+ * insertion order) rather than alphabetical or `DEPOSIT_TENDERS` order —
+ * `threadEvents` arrives already date-ordered (the query's own `ORDER BY`),
+ * so this reads as "the order the money actually came in".
+ */
+function deriveReceivedTenders(events: DepositLedgerEvent[]): ReceivedTenderAmount[] {
+  const amountsByTender = new Map<DepositTender, number>();
+  for (const event of events) {
+    if (event.kind !== "received" || event.voided || event.tender === null) continue;
+    amountsByTender.set(event.tender, (amountsByTender.get(event.tender) ?? 0) + event.amountSatang);
+  }
+  return [...amountsByTender.entries()].map(([tender, amountSatang]) => ({ tender, amountSatang }));
 }
 
 /**
@@ -491,6 +535,7 @@ export function buildDepositThreads(events: DepositLedgerEvent[]): DepositThread
       events: threadEvents,
       status: deriveDepositThreadStatus({ receivedSatang, appliedSatang, refundedSatang, outstandingSatang }),
       guestName: deriveThreadGuestName(threadEvents),
+      receivedTenders: deriveReceivedTenders(threadEvents),
     });
   }
 

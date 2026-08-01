@@ -976,6 +976,24 @@ endpoints below continue sequentially from 30.
       (guest identity is a property of the person, not of whether that
       particular payment line was later cancelled, unlike the money sums).
       `null` whenever no event in scope has an `ht_customers` match.
+    - **`receivedTenders: { tender: DepositTender; amountSatang: number }[]`
+      (owner ask, 2026-08-01, มัดจำ register tender visibility) — additive,
+      on EVERY `aging`/`finished` row (NOT on `exceptions.*` rows — out of
+      scope for this ask).** That thread's non-voided `kind: "received"`
+      events, grouped by `tender` and summed
+      (`deriveReceivedTenders()`/`DepositThread.receivedTenders`,
+      `src/server/deposit-register.ts`) — usually one entry; a genuine split
+      receipt (two received events on the same R-number using different
+      tenders, e.g. part cash part transfer) produces two, each with its own
+      summed `amountSatang`. An event whose own `tender` is `null` (the
+      `zeroTenderRow` case: all four raw tender columns zero) contributes
+      nothing. Empty array (never `null`) when the thread has no such event
+      at all (e.g. every `orphanApplied`-shaped thread, which by definition
+      has no received event). Order is first-seen, not alphabetical.
+      `applied`/`refunded` events are never read here — RECEIVED tender
+      only; a refund's own tender is already visible via the `events` feed's
+      สรุปรายเดือน month-expansion rows, out of scope for this thread-level
+      field.
 
 31. **`PUT /api/:property/deposits/:rNumber/note`** — body `{ note: string |
     null, resolved: boolean }` → `DepositNote`. `:rNumber` must match

@@ -368,6 +368,53 @@ describe("buildDepositThreads", () => {
       expect(buildDepositThreads(events)[0]!.guestName).toBe("นายสมชาย ใจดี");
     });
   });
+
+  // Owner ask (2026-08-01, มัดจำ register tender visibility): "the unified
+  // thread table ... must show the method of payment (tender) of each
+  // deposit" — receivedTenders groups a thread's non-voided RECEIVED events
+  // by tender.
+  describe("receivedTenders derivation", () => {
+    test("single received event: one entry, its own tender and amount", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", tender: "cash", amountSatang: 89_000 }),
+      ];
+      expect(buildDepositThreads(events)[0]!.receivedTenders).toEqual([{ tender: "cash", amountSatang: 89_000 }]);
+    });
+
+    test("split-tender thread: two received events with different tenders -> two entries, each its own amount", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", tender: "cash", amountSatang: 20_000, dateBangkok: "2026-08-01" }),
+        event({ rNumber: "R014843", kind: "received", tender: "transfer", amountSatang: 19_500, dateBangkok: "2026-08-05" }),
+      ];
+      expect(buildDepositThreads(events)[0]!.receivedTenders).toEqual([
+        { tender: "cash", amountSatang: 20_000 },
+        { tender: "transfer", amountSatang: 19_500 },
+      ]);
+    });
+
+    test("a voided received event is excluded from receivedTenders", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", tender: "cash", amountSatang: 89_000 }),
+        // Voided on the SAME R-number, a DIFFERENT tender — must not appear.
+        event({ rNumber: "R014843", kind: "received", tender: "credit", amountSatang: 10_000, voided: true }),
+      ];
+      expect(buildDepositThreads(events)[0]!.receivedTenders).toEqual([{ tender: "cash", amountSatang: 89_000 }]);
+    });
+
+    test("no received event at all (orphanApplied shape): empty array, never null", () => {
+      const events: DepositLedgerEvent[] = [event({ rNumber: "R020000", kind: "applied", tender: null })];
+      expect(buildDepositThreads(events)[0]!.receivedTenders).toEqual([]);
+    });
+
+    test("applied/refunded events never contribute — RECEIVED tender only", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", tender: "cash", amountSatang: 89_000 }),
+        event({ rNumber: "R014843", kind: "applied", tender: null, amountSatang: 89_000 }),
+        event({ rNumber: "R014843", kind: "refunded", tender: "transfer", amountSatang: 5_000 }),
+      ];
+      expect(buildDepositThreads(events)[0]!.receivedTenders).toEqual([{ tender: "cash", amountSatang: 89_000 }]);
+    });
+  });
 });
 
 // Owner ask (2026-08-01): the register must make a deposit's STATE
@@ -478,6 +525,7 @@ describe("buildDepositExceptions", () => {
         events: [],
         status: "applied",
         guestName: null,
+        receivedTenders: [],
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -497,6 +545,7 @@ describe("buildDepositExceptions", () => {
         events: [],
         status: "applied",
         guestName: null,
+        receivedTenders: [],
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -516,6 +565,7 @@ describe("buildDepositExceptions", () => {
         events: [],
         status: "waitingCheckin",
         guestName: null,
+        receivedTenders: [],
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -535,6 +585,7 @@ describe("buildDepositExceptions", () => {
         events: [],
         status: "applied",
         guestName: null,
+        receivedTenders: [],
       },
     ];
     const { mismatched } = buildDepositExceptions(threads);

@@ -1370,6 +1370,11 @@ export const api = new Elysia({ prefix: "/api" })
         status: t.status,
         guestName: t.guestName,
         closedDateBangkok: null, // outstanding by definition — never closed
+        // Owner ask (2026-08-01, มัดจำ register tender visibility): straight
+        // pass-through of the thread's own `receivedTenders` — already
+        // computed in deposit-register.ts (`deriveReceivedTenders`), never
+        // recomputed here.
+        receivedTenders: t.receivedTenders,
         ...appliedMappingFor(t.rNumber),
         ...noteFields(t.rNumber),
       }));
@@ -1399,6 +1404,7 @@ export const api = new Elysia({ prefix: "/api" })
         status: t.status,
         guestName: t.guestName,
         closedDateBangkok,
+        receivedTenders: t.receivedTenders, // owner ask, 2026-08-01, tender visibility — pass-through, same as `aging`
         ...appliedMappingFor(t.rNumber),
         ...noteFields(t.rNumber),
       }));

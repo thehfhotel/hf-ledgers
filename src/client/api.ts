@@ -501,6 +501,16 @@ interface DepositGuestNameField {
   guestName: string | null;
 }
 
+/** One tender's total within a thread's non-voided RECEIVED events — mirrors
+ * `src/server/deposit-register.ts`'s `ReceivedTenderAmount` exactly (a
+ * separate literal, not a shared import — same "never invert the natural
+ * client/server dependency direction" reasoning `DEPOSIT_R_NUMBER_RE`
+ * already documents there). */
+export interface DepositReceivedTenderAmount {
+  tender: DepositTender;
+  amountSatang: number;
+}
+
 export type DepositAgingRow = DepositNoteFields &
   DepositStatusFields &
   DepositGuestNameField & {
@@ -525,6 +535,13 @@ export type DepositAgingRow = DepositNoteFields &
      * bucket: days from `firstEventDate` to this date, vs. the outstanding
      * bucket's own days-to-today. */
     closedDateBangkok: string | null;
+    /** Owner ask (2026-08-01, มัดจำ register tender visibility): the
+     * thread's `receivedTenders` (`deriveReceivedTenders()`,
+     * deposit-register.ts), passed through untouched — usually one entry,
+     * two for a genuine split receipt (two received events on the same
+     * R-number using different tenders). Empty array (never `null`) when
+     * the thread has no non-voided received event with a known tender. */
+    receivedTenders: DepositReceivedTenderAmount[];
   };
 
 export type DepositMismatchedException = DepositNoteFields &

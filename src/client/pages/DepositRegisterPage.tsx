@@ -14,11 +14,17 @@ import {
   type DepositMismatchedException,
   type DepositMonthlyReconciliation,
   type DepositOrphanAppliedException,
+  type DepositReceivedTenderAmount,
   type DepositRegisterEvent,
   type DepositRegisterResponse,
 } from "../api.ts";
 import { DepositNoteEditor } from "../components/DepositNoteEditor.tsx";
-import { depositFilterBucketForStatus, type DepositFilterBucket, matchesDepositFilter } from "./depositRegisterFilter.ts";
+import {
+  depositFilterBucketForStatus,
+  type DepositFilterBucket,
+  matchesDepositExceptionFilter,
+  matchesDepositFilter,
+} from "./depositRegisterFilter.ts";
 import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
@@ -117,20 +123,41 @@ const DEPOSIT_STATUS_CHIP_CLASS: Record<DepositThreadStatus, string> = {
   refunded: "bg-line text-ink-muted",
 };
 
+/** "โอน" / "เงินสด 200.00 · โอน 195.00" — a thread's METHOD OF PAYMENT text
+ * (owner ask, 2026-08-01, มัดจำ register tender visibility: "the unified
+ * thread table ... must show the method of payment (tender) of each
+ * deposit"). A single tender renders as its bare label — no amount, since
+ * the row's own รับ column already shows the total and repeating it here
+ * would be noise. A genuine split receipt (rare: two received events on the
+ * same R-number using different tenders) shows each tender's own amount so
+ * the split reads without opening the PMS. `receivedTenders` empty (the
+ * zeroTenderRow edge case, or an exceptions row that never carries this
+ * field at all) renders nothing. */
+function depositTenderSummaryLabel(receivedTenders: readonly DepositReceivedTenderAmount[]): string | null {
+  if (receivedTenders.length === 0) return null;
+  if (receivedTenders.length === 1) return DEPOSIT_TENDER_LABELS_TH[receivedTenders[0]!.tender];
+  return receivedTenders.map((t) => `${DEPOSIT_TENDER_LABELS_TH[t.tender]} ${formatSatang(t.amountSatang)}`).join(" · ");
+}
+
 /** Owner ask (2026-08-01, explicit deposit state): every thread-shaped row
  * shows its status via this chip — see `DepositThreadStatus`'s doc comment
  * (shared/types.ts) for the four values' exact definitions. When the
  * status is `"applied"`/`"partial"` and a mapping exists, shows "where it
  * went" (the CH ref + applied date) right next to the chip so a used
- * deposit is traceable without opening the PMS. */
+ * deposit is traceable without opening the PMS. `tenderLabel` (owner ask,
+ * 2026-08-01, tender visibility) — optional, only the register's unified
+ * thread table (`ThreadRow`) passes one; renders as a small muted chip/text
+ * right next to the state chip, in the SAME flex-wrap row. */
 function StatusChip({
   status,
   appliedChRef,
   appliedDateBangkok,
+  tenderLabel,
 }: {
   status: DepositThreadStatus;
   appliedChRef?: string | null;
   appliedDateBangkok?: string | null;
+  tenderLabel?: string | null;
 }) {
   return (
     <span className="flex flex-wrap items-center gap-1.5">
@@ -145,6 +172,7 @@ function StatusChip({
           {appliedDateBangkok && <> ({isoToBuddhist(appliedDateBangkok)})</>}
         </span>
       )}
+      {tenderLabel && <span className="text-[11px] text-ink-muted">{tenderLabel}</span>}
     </span>
   );
 }
@@ -191,10 +219,15 @@ function NoteBadge({ note, resolvedAt, onClick }: NoteFields & { onClick: () => 
  *   a separate, capped ตัดยอดแล้วล่าสุด event list that "เสร็จสิ้น" couldn't
  *   even populate) — a fully-applied/refunded deposit now has a real row in
  *   the SAME table, no hunting through months required. ข้อยกเว้น
- *   (mismatched, orphanApplied — these demand office action, so they never
- *   move to the other tab; a non-empty count still surfaces as a badge on
- *   this tab's label so it stays visible from สรุปรายเดือน) stays below it,
- *   never governed by the pill.
+ *   (mismatched, orphanApplied — these demand office action) stays below
+ *   it, never moving to the other tab, but AS OF 2026-08-01 it DOES share
+ *   this tab's ทั้งหมด/คงค้าง/เสร็จสิ้น pill: bucketed by each exception's own
+ *   note resolution (unresolved -> คงค้าง, keeps its warn styling; resolved
+ *   -> เสร็จสิ้น, calm/ok-toned) rather than by thread status — see the
+ *   ข้อยกเว้น section's own comment below for the full rule. The tab label's
+ *   count badge counts UNRESOLVED exceptions only, so it stays visible (and
+ *   accurate) from สรุปรายเดือน even though the list itself can be filtered
+ *   out of view on this tab.
  * - สรุปรายเดือน — the accounting view: the tripwire completeness lines,
  *   the monthly reconciliation table (newest first, each month expandable
  *   into its chronological event list — with the focus filter gone from
@@ -296,6 +329,27 @@ export function DepositRegisterPage({ property }: Props) {
     [register, filter],
   );
 
+  // Owner ask (2026-08-01, exceptions respect the focus filter once
+  // resolved): ข้อยกเว้น now shares the SAME ทั้งหมด/คงค้าง/เสร็จสิ้น pill as
+  // the unified thread table above, but bucketed by each exception's OWN
+  // note resolution (`matchesDepositExceptionFilter`, keyed off
+  // `resolvedAt`) rather than its thread's `DepositThreadStatus` — an
+  // unresolved exception must keep shouting under "คงค้าง" regardless of
+  // whether its thread already reads "ตัดยอดแล้ว" (the proven R015834
+  // shape), and a resolved one moves to "เสร็จสิ้น" the moment its note is
+  // saved with the resolved mark (no extra wiring needed: `applyNoteChange`
+  // already patches `resolvedAt` in place, so this filter re-evaluates on
+  // the very next render).
+  const filteredMismatched = useMemo(
+    () => (register ? register.exceptions.mismatched.filter((row) => matchesDepositExceptionFilter(row.resolvedAt, filter)) : []),
+    [register, filter],
+  );
+  const filteredOrphanApplied = useMemo(
+    () =>
+      register ? register.exceptions.orphanApplied.filter((row) => matchesDepositExceptionFilter(row.resolvedAt, filter)) : [],
+    [register, filter],
+  );
+
   function toggleAgingExpanded(rNumber: string) {
     setExpandedAgingR((prev) => {
       const next = new Set(prev);
@@ -345,11 +399,17 @@ export function DepositRegisterPage({ property }: Props) {
     );
   }
 
-  // Owner ask (2026-08-01, D5, exceptions badge): total across both
-  // exception lists — an exceptional deposit demands office action
-  // regardless of which list it's in, so the tab label doesn't distinguish
-  // mismatched from orphanApplied, just "there is something to look at".
-  const exceptionCount = register.exceptions.mismatched.length + register.exceptions.orphanApplied.length;
+  // Owner ask (2026-08-01, D5, exceptions badge; narrowed 2026-08-01,
+  // exceptions respect the focus filter once resolved): UNRESOLVED count
+  // only, across both exception lists — an exceptional deposit demands
+  // office action only until its note is explicitly marked resolved, so a
+  // resolved mismatch (now living under the เสร็จสิ้น filter, de-emphasized)
+  // must stop inflating this badge. The tab label still doesn't distinguish
+  // mismatched from orphanApplied, just "there is still something to look
+  // at".
+  const exceptionCount =
+    register.exceptions.mismatched.filter((e) => e.resolvedAt === null).length +
+    register.exceptions.orphanApplied.filter((e) => e.resolvedAt === null).length;
 
   return (
     <div className="flex flex-col gap-4 pb-10">
@@ -478,25 +538,34 @@ export function DepositRegisterPage({ property }: Props) {
             )}
           </section>
 
-          {/* ข้อยกเว้น — NEVER governed by the ทั้งหมด/คงค้าง/เสร็จสิ้น pill
-              above (owner ask, 2026-08-01, pill point 4): an exceptional
-              deposit needs attention regardless of lifecycle state — the
-              R015834 mismatch is state ตัดยอดแล้ว (bucket "finished") yet
-              must stay visible even under the default "คงค้าง" filter.
-              Stays on this tab only (D5, task point 4 — exceptions demand
-              action, so they live with the working view); the tab row
-              above carries a count badge so a non-empty list is never
-              silently missed while parked on สรุปรายเดือน. */}
+          {/* ข้อยกเว้น — UPDATED RULE (owner ask, 2026-08-01, exceptions
+              respect the focus filter once resolved): this section now
+              DOES share the ทั้งหมด/คงค้าง/เสร็จสิ้น pill above, but bucketed
+              by each exception's OWN note resolution
+              (`matchesDepositExceptionFilter`), never by its thread's
+              `DepositThreadStatus` — an UNRESOLVED exception always shows
+              under "คงค้าง"/"ทั้งหมด" regardless of lifecycle state (the
+              R015834 mismatch is thread-status ตัดยอดแล้ว yet stays visible
+              while unresolved, keeping its warn styling: "a waiting on
+              reception note must keep shouting"); once a note is saved WITH
+              the resolved mark, the row moves to "เสร็จสิ้น"/"ทั้งหมด" and
+              renders calm/ok-toned instead (`exceptionRowClass`,
+              `ResolvedByLine`). This SUPERSEDES the prior "never governed by
+              the pill" rule. Stays on this tab only (D5, task point 4 —
+              exceptions demand action, so they live with the working view);
+              the tab row above carries a count badge of UNRESOLVED
+              exceptions only, so a non-empty list is never silently missed
+              while parked on สรุปรายเดือน. */}
           <section className="overflow-hidden rounded-lg border border-line bg-panel">
             <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">ข้อยกเว้น</h2>
 
             <div className="flex flex-col gap-1 px-4 py-3">
               <h3 className="text-xs font-semibold text-ink-muted">ยอดตัดยอดไม่ตรงกับยอดรับ</h3>
-              {register.exceptions.mismatched.length === 0 ? (
+              {filteredMismatched.length === 0 ? (
                 <p className="text-sm text-ink-muted">ไม่มีรายการ</p>
               ) : (
                 <div className="flex flex-col gap-3">
-                  {register.exceptions.mismatched.map((row) => (
+                  {filteredMismatched.map((row) => (
                     <MismatchedRow
                       key={row.rNumber}
                       property={property}
@@ -510,11 +579,11 @@ export function DepositRegisterPage({ property }: Props) {
 
             <div className="flex flex-col gap-1 border-t border-line px-4 py-3">
               <h3 className="text-xs font-semibold text-ink-muted">ตัดยอดโดยไม่มีเงินรับ</h3>
-              {register.exceptions.orphanApplied.length === 0 ? (
+              {filteredOrphanApplied.length === 0 ? (
                 <p className="text-sm text-ink-muted">ไม่มีรายการ</p>
               ) : (
                 <div className="flex flex-col gap-3">
-                  {register.exceptions.orphanApplied.map((row) => (
+                  {filteredOrphanApplied.map((row) => (
                     <OrphanAppliedRow
                       key={row.rNumber}
                       property={property}
@@ -636,7 +705,12 @@ export function DepositRegisterPage({ property }: Props) {
  * `ht_customers` join found nothing anywhere in its events) — renders
  * EXACTLY today's ref-only layout in that case, never an empty name line.
  * `receivedPmsRef` is `null` for `OrphanAppliedRow` (no received event
- * exists by definition) — omitted from the secondary line in that case. */
+ * exists by definition) — omitted from the secondary line in that case.
+ * `tenderLabel` (owner ask, 2026-08-01, tender visibility) — optional,
+ * forwarded straight to `StatusChip`; only `ThreadRow` (the register's
+ * unified thread table, which alone carries `receivedTenders` on its row
+ * shape) passes one — the exceptions rows (`MismatchedRow`/
+ * `OrphanAppliedRow`) omit it, out of scope for this owner ask. */
 function RNumberRef({
   rNumber,
   receivedPmsRef,
@@ -644,6 +718,7 @@ function RNumberRef({
   appliedChRef,
   appliedDateBangkok,
   guestName,
+  tenderLabel,
 }: {
   rNumber: string;
   receivedPmsRef: string | null;
@@ -651,6 +726,7 @@ function RNumberRef({
   appliedChRef: string | null;
   appliedDateBangkok: string | null;
   guestName: string | null;
+  tenderLabel?: string | null;
 }) {
   const refs = receivedPmsRef ? `${rNumber} · ${receivedPmsRef}` : rNumber;
   return (
@@ -666,7 +742,7 @@ function RNumberRef({
           {receivedPmsRef && <span className="text-[11px] font-normal text-ink-muted">{receivedPmsRef}</span>}
         </>
       )}
-      <StatusChip status={status} appliedChRef={appliedChRef} appliedDateBangkok={appliedDateBangkok} />
+      <StatusChip status={status} appliedChRef={appliedChRef} appliedDateBangkok={appliedDateBangkok} tenderLabel={tenderLabel} />
     </span>
   );
 }
@@ -851,6 +927,8 @@ function ThreadRow({
     : row.firstEventDate
       ? daysBetween(row.firstEventDate, today)
       : null;
+  // Owner ask (2026-08-01, มัดจำ register tender visibility).
+  const tenderLabel = depositTenderSummaryLabel(row.receivedTenders);
   return (
     <>
       <tr>
@@ -862,6 +940,7 @@ function ThreadRow({
             appliedChRef={row.appliedChRef}
             appliedDateBangkok={row.appliedDateBangkok}
             guestName={row.guestName}
+            tenderLabel={tenderLabel}
           />
         </td>
         <td className="px-4 py-2 text-right tabular-nums text-ink">{formatSatang(row.receivedSatang)}</td>
@@ -893,6 +972,34 @@ function ThreadRow({
   );
 }
 
+/** Owner ask (2026-08-01, exceptions respect the focus filter once
+ * resolved): an exception row's wrapper tone — warn (existing gold/amber)
+ * while unresolved, so it keeps demanding attention; calm ok-toned once its
+ * note is saved with the resolved mark, mirroring `NoteBadge`'s own
+ * resolved/unresolved color split and `DEPOSIT_STATUS_CHIP_CLASS`'s applied
+ * (ok) tone. */
+function exceptionRowClass(resolvedAt: string | null): string {
+  return resolvedAt !== null ? "rounded-md border border-ok/30 bg-ok/5 p-3" : "rounded-md border border-warn/40 bg-gold-50 p-3";
+}
+
+/** "แก้ไขแล้วโดย ... (1/8/2569)" — shown above the note editor once an
+ * exception is resolved, so who/when is visible without expanding anything
+ * (the note TEXT itself is already visible inside the editor's own
+ * textarea, which seeds from `note` — never duplicated here). `null` for an
+ * unresolved row (renders nothing). `resolvedAt` is SQLite's
+ * `datetime('now')` TEXT column ("YYYY-MM-DD HH:MM:SS" — `db.ts`'s
+ * `upsertDepositNote`), NOT a JS `Date#toISOString()` string — `isoToBuddhist`
+ * only parses a bare "YYYY-MM-DD" (`parseIso`, shared/date.ts), hence the
+ * `.slice(0, 10)` before handing it off rather than passing the raw value. */
+function ResolvedByLine({ resolvedAt, resolvedBy }: { resolvedAt: string | null; resolvedBy: string | null }) {
+  if (resolvedAt === null) return null;
+  return (
+    <p className="mb-1.5 text-[11px] font-medium text-ok">
+      แก้ไขแล้วโดย {resolvedBy ?? "-"} ({isoToBuddhist(resolvedAt.slice(0, 10))})
+    </p>
+  );
+}
+
 function MismatchedRow({
   property,
   row,
@@ -902,8 +1009,9 @@ function MismatchedRow({
   row: DepositMismatchedException;
   onNoteSaved: (fields: NoteFields) => void;
 }) {
+  const resolved = row.resolvedAt !== null;
   return (
-    <div className="rounded-md border border-warn/40 bg-gold-50 p-3">
+    <div className={exceptionRowClass(row.resolvedAt)}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-sm">
         <RNumberRef
           rNumber={row.rNumber}
@@ -916,12 +1024,13 @@ function MismatchedRow({
         <div className="flex items-center gap-3 tabular-nums">
           <span className="text-ink-muted">รับ {formatSatang(row.receivedSatang)}</span>
           <span className="text-ink-muted">ตัด {formatSatang(row.appliedSatang)}</span>
-          <span className="font-semibold text-warn">
+          <span className={"font-semibold " + (resolved ? "text-ok" : "text-warn")}>
             ส่วนต่าง {row.diffSatang > 0 ? "+" : "-"}
             {formatSatang(Math.abs(row.diffSatang))}
           </span>
         </div>
       </div>
+      <ResolvedByLine resolvedAt={row.resolvedAt} resolvedBy={row.resolvedBy} />
       <DepositNoteEditor
         property={property}
         rNumber={row.rNumber}
@@ -942,8 +1051,9 @@ function OrphanAppliedRow({
   row: DepositOrphanAppliedException;
   onNoteSaved: (fields: NoteFields) => void;
 }) {
+  const resolved = row.resolvedAt !== null;
   return (
-    <div className="rounded-md border border-warn/40 bg-gold-50 p-3">
+    <div className={exceptionRowClass(row.resolvedAt)}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-sm">
         <RNumberRef
           rNumber={row.rNumber}
@@ -953,8 +1063,11 @@ function OrphanAppliedRow({
           appliedDateBangkok={row.appliedDateBangkok}
           guestName={row.guestName}
         />
-        <span className="font-semibold text-warn tabular-nums">ตัดยอด {formatSatang(row.appliedSatang)}</span>
+        <span className={"tabular-nums font-semibold " + (resolved ? "text-ok" : "text-warn")}>
+          ตัดยอด {formatSatang(row.appliedSatang)}
+        </span>
       </div>
+      <ResolvedByLine resolvedAt={row.resolvedAt} resolvedBy={row.resolvedBy} />
       <DepositNoteEditor
         property={property}
         rNumber={row.rNumber}

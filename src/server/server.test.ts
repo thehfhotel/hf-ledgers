@@ -2042,6 +2042,12 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       events: [],
       status: "waitingCheckin",
       guestName: null,
+      // Owner ask (2026-08-01, มัดจำ register tender visibility): empty by
+      // default (no events fixture -> nothing to derive), same
+      // "everything else zeroed" default philosophy the rest of this
+      // helper already uses — the receivedTenders-specific test overrides
+      // this explicitly.
+      receivedTenders: [],
       ...overrides,
     };
   }
@@ -2075,7 +2081,15 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     ];
     const register: DepositRegisterData = {
       threads: [
-        thread({ rNumber: "R090001", firstEventDate: "2026-08-05", outstandingSatang: 50_000 }),
+        thread({
+          rNumber: "R090001",
+          firstEventDate: "2026-08-05",
+          outstandingSatang: 50_000,
+          // Owner ask (2026-08-01, tender visibility): a distinct fixture
+          // value on the AGING side, so the assertion below can prove
+          // `receivedTenders` is the thread's own value, not a coincidence.
+          receivedTenders: [{ tender: "cash", amountSatang: 50_000 }],
+        }),
         thread({ rNumber: "R090002", firstEventDate: "2026-07-01", outstandingSatang: 20_000 }),
         // R015834: the proven mismatch case — outstanding goes negative, never aging.
         thread({
@@ -2085,6 +2099,10 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           outstandingSatang: -39_500,
           firstEventDate: "2026-07-31",
           status: "applied",
+          // Owner ask (2026-08-01, tender visibility): a FINISHED-side
+          // fixture value, so the same assertion proves the pass-through on
+          // both `aging` and `finished` rows independently.
+          receivedTenders: [{ tender: "transfer", amountSatang: 39_500 }],
         }),
         thread({
           rNumber: "R090003",
@@ -2118,8 +2136,14 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         receivedPmsRef: string | null;
         guestName: string | null;
         closedDateBangkok: string | null;
+        receivedTenders: Array<{ tender: string; amountSatang: number }>;
       }>;
-      finished: Array<{ rNumber: string; status: string; closedDateBangkok: string | null }>;
+      finished: Array<{
+        rNumber: string;
+        status: string;
+        closedDateBangkok: string | null;
+        receivedTenders: Array<{ tender: string; amountSatang: number }>;
+      }>;
       exceptions: {
         mismatched: Array<{
           rNumber: string;
@@ -2176,6 +2200,18 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     // `register.threads`' own order for a null/null tie).
     expect(res.body.finished.map((r) => r.rNumber)).toEqual(["R015834", "R090003"]);
     expect(res.body.finished.every((r) => r.status === "applied" && r.closedDateBangkok === null)).toBe(true);
+    // Owner ask (2026-08-01, มัดจำ register tender visibility): a straight
+    // pass-through of the thread's own `receivedTenders` onto BOTH aging
+    // and finished rows — never recomputed by the route.
+    expect(res.body.aging.find((r) => r.rNumber === "R090001")!.receivedTenders).toEqual([
+      { tender: "cash", amountSatang: 50_000 },
+    ]);
+    expect(res.body.finished.find((r) => r.rNumber === "R015834")!.receivedTenders).toEqual([
+      { tender: "transfer", amountSatang: 39_500 },
+    ]);
+    // A thread whose fixture never overrode receivedTenders passes through
+    // the `thread()` helper's own empty-array default.
+    expect(res.body.aging.find((r) => r.rNumber === "R090002")!.receivedTenders).toEqual([]);
     expect(res.body.exceptions.mismatched).toEqual([
       {
         rNumber: "R015834",

@@ -35,3 +35,28 @@ export function depositFilterBucketForStatus(status: DepositThreadStatus): Exclu
 export function matchesDepositFilter(status: DepositThreadStatus, filter: DepositFilterBucket): boolean {
   return filter === "all" || depositFilterBucketForStatus(status) === filter;
 }
+
+/**
+ * Which of the two real buckets an EXCEPTION (mismatched/orphanApplied)
+ * belongs to, per its own note's resolution state — owner ask (2026-08-01,
+ * exceptions respect the focus filter once resolved). Unresolved
+ * (`resolvedAt === null`) is "outstanding": a note saying "waiting on
+ * reception" must keep shouting in the working view until someone
+ * deliberately resolves it (the same `deposit_notes` "explained" convention
+ * CONTEXT.md documents). Resolved (`resolvedAt` non-null) is "finished".
+ * Deliberately a SEPARATE predicate from `depositFilterBucketForStatus` —
+ * an exception's own resolution is a different axis from its thread's
+ * received/applied/refunded status: the proven R015834 case is thread
+ * `status: "applied"` (bucket "finished" by THAT rule) yet can still be an
+ * unresolved exception that must show under "คงค้าง".
+ */
+export function depositExceptionBucketForResolved(resolvedAt: string | null): Exclude<DepositFilterBucket, "all"> {
+  return resolvedAt === null ? "outstanding" : "finished";
+}
+
+/** Whether an exception row passes the given pill selection, per
+ * `depositExceptionBucketForResolved` — the exceptions-section counterpart
+ * of `matchesDepositFilter` (which is keyed off thread status instead). */
+export function matchesDepositExceptionFilter(resolvedAt: string | null, filter: DepositFilterBucket): boolean {
+  return filter === "all" || depositExceptionBucketForResolved(resolvedAt) === filter;
+}

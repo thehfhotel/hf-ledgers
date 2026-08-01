@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { todayBangkok } from "../shared/date.ts";
 import { PROPERTIES, PROPERTY_LABELS, isProperty, type Property } from "../shared/types.ts";
+import { PROPERTY_BADGE_LABELS } from "./labels.ts";
 import { DaySheetPage } from "./pages/DaySheetPage.tsx";
 import { HistoryPage } from "./pages/HistoryPage.tsx";
 import { CategoriesPage } from "./pages/CategoriesPage.tsx";
@@ -81,13 +82,17 @@ export function navigate(path: string) {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-// Thai names come from PROPERTY_LABELS (src/shared/types.ts) ONLY — never
-// re-declare them here. That is the single source both this switcher and
-// every page-level PropertyBadge read from, so a wording change never needs
-// a second edit.
+// Chip labels come from PROPERTY_BADGE_LABELS (client/labels.ts) ONLY —
+// never re-declare them here. That is the single source both this switcher
+// and every page-level PropertyBadge read from, so a wording change never
+// needs a second edit. Owner ask (2026-08-01): compact Latin form ("HF"/
+// "HF Ville") rather than PROPERTY_LABELS[...].th's full Thai names — the
+// document.title effect below deliberately keeps reading PROPERTY_LABELS
+// directly (not this constant), since the owner's ask was scoped to the
+// switcher chip + PropertyBadge only.
 const PROPERTY_CHIPS: { id: Property; label: string }[] = PROPERTIES.map((id) => ({
   id,
-  label: PROPERTY_LABELS[id].th,
+  label: PROPERTY_BADGE_LABELS[id],
 }));
 
 // document.title's screen half, keyed by route kind — same names as

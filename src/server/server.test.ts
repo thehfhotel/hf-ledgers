@@ -2112,7 +2112,14 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       property: string;
       generatedAt: string;
       monthly: unknown[];
-      aging: Array<{ rNumber: string; status: string; receivedPmsRef: string | null; guestName: string | null }>;
+      aging: Array<{
+        rNumber: string;
+        status: string;
+        receivedPmsRef: string | null;
+        guestName: string | null;
+        closedDateBangkok: string | null;
+      }>;
+      finished: Array<{ rNumber: string; status: string; closedDateBangkok: string | null }>;
       exceptions: {
         mismatched: Array<{
           rNumber: string;
@@ -2157,6 +2164,18 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     // Owner ask (2026-08-01): both aging threads are receipts sitting
     // untouched (no applied/refunded activity in this fixture) -> รอเช็คอิน.
     expect(res.body.aging.every((r) => r.status === "waitingCheckin")).toBe(true);
+    // Owner ask (2026-08-01, unified มัดจำ table): an outstanding thread is
+    // never "closed" — closedDateBangkok is always null on aging rows.
+    expect(res.body.aging.every((r) => r.closedDateBangkok === null)).toBe(true);
+    // R015834 (mismatched, status "applied") and R090003 (orphanApplied,
+    // status "applied") are BOTH "finished"-bucket threads, additive
+    // alongside their own exceptions-list appearance — a thread's bucket
+    // (aging vs. finished) and its exception flags are independent axes.
+    // Neither fixture thread carries events, so closedDateFor has nothing
+    // to compute from -> both null (the stable-sort fallback preserves
+    // `register.threads`' own order for a null/null tie).
+    expect(res.body.finished.map((r) => r.rNumber)).toEqual(["R015834", "R090003"]);
+    expect(res.body.finished.every((r) => r.status === "applied" && r.closedDateBangkok === null)).toBe(true);
     expect(res.body.exceptions.mismatched).toEqual([
       {
         rNumber: "R015834",
@@ -2359,6 +2378,192 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         guestName: "นายสมชาย ใจดี",
       },
     ]);
+  });
+
+  // Owner ask (2026-08-01, unified มัดจำ table): `finished` carries every
+  // applied/refunded thread, each with `closedDateBangkok` — the latest
+  // non-voided applied OR refunded event's date, broader than
+  // `appliedDateBangkok` (which stays null for a thread closed purely by a
+  // refund). Three threads exercise the three closing shapes: applied-only,
+  // refunded-only (no applied event at all — `appliedDateBangkok` must stay
+  // null while `closedDateBangkok` is populated), and a voided-applied-event
+  // thread whose only ACTIVE closing event is an earlier refund (proving
+  // voided events are excluded from the "latest" pick, mirroring every other
+  // sum in this module).
+  test("finished: applied/refunded threads carry closedDateBangkok (latest non-voided applied|refunded event), sorted newest-closed-first", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+
+    const appliedOnlyEvents: DepositLedgerEvent[] = [
+      {
+        legacyId: 1,
+        pmsRef: "R2608-0010",
+        kind: "received",
+        rNumber: "R090030",
+        dateBangkok: "2026-08-01",
+        amountSatang: 50_000,
+        voided: false,
+        tender: "cash",
+        chRef: null,
+        guestName: null,
+      },
+      {
+        legacyId: 2,
+        pmsRef: "R2608-0011",
+        kind: "applied",
+        rNumber: "R090030",
+        dateBangkok: "2026-08-05",
+        amountSatang: 50_000,
+        voided: false,
+        tender: null,
+        chRef: "CH26-000001",
+        guestName: null,
+      },
+    ];
+    const refundedOnlyEvents: DepositLedgerEvent[] = [
+      {
+        legacyId: 3,
+        pmsRef: "R2608-0012",
+        kind: "received",
+        rNumber: "R090031",
+        dateBangkok: "2026-08-02",
+        amountSatang: 30_000,
+        voided: false,
+        tender: "transfer",
+        chRef: null,
+        guestName: null,
+      },
+      {
+        legacyId: 4,
+        pmsRef: "R2608-0013",
+        kind: "refunded",
+        rNumber: "R090031",
+        dateBangkok: "2026-08-09",
+        amountSatang: 30_000,
+        voided: false,
+        tender: "transfer",
+        chRef: null,
+        guestName: null,
+      },
+    ];
+    const voidedAppliedThenRefundedEvents: DepositLedgerEvent[] = [
+      {
+        legacyId: 5,
+        pmsRef: "R2608-0014",
+        kind: "received",
+        rNumber: "R090032",
+        dateBangkok: "2026-08-01",
+        amountSatang: 10_000,
+        voided: false,
+        tender: "cash",
+        chRef: null,
+        guestName: null,
+      },
+      // A later applied event that was subsequently voided — excluded from
+      // "latest active closing event", so it must NOT win over the earlier
+      // refund below despite its later date.
+      {
+        legacyId: 6,
+        pmsRef: "R2608-0015",
+        kind: "applied",
+        rNumber: "R090032",
+        dateBangkok: "2026-08-08",
+        amountSatang: 10_000,
+        voided: true,
+        tender: null,
+        chRef: "CH26-000002",
+        guestName: null,
+      },
+      {
+        legacyId: 7,
+        pmsRef: "R2608-0016",
+        kind: "refunded",
+        rNumber: "R090032",
+        dateBangkok: "2026-08-03",
+        amountSatang: 10_000,
+        voided: false,
+        tender: "cash",
+        chRef: null,
+        guestName: null,
+      },
+    ];
+    const flatEvents = [...appliedOnlyEvents, ...refundedOnlyEvents, ...voidedAppliedThenRefundedEvents];
+
+    const register: DepositRegisterData = {
+      threads: [
+        thread({
+          rNumber: "R090030",
+          receivedSatang: 50_000,
+          appliedSatang: 50_000,
+          outstandingSatang: 0,
+          firstEventDate: "2026-08-01",
+          status: "applied",
+          events: appliedOnlyEvents,
+        }),
+        thread({
+          rNumber: "R090031",
+          receivedSatang: 30_000,
+          refundedSatang: 30_000,
+          outstandingSatang: 0,
+          firstEventDate: "2026-08-02",
+          status: "refunded",
+          events: refundedOnlyEvents,
+        }),
+        thread({
+          rNumber: "R090032",
+          receivedSatang: 10_000,
+          refundedSatang: 10_000,
+          outstandingSatang: 0,
+          firstEventDate: "2026-08-01",
+          status: "refunded",
+          events: voidedAppliedThenRefundedEvents,
+        }),
+      ],
+      monthly: [],
+      unparsedAppliedRows: 0,
+      zeroTenderRows: 0,
+      blankBookingNoRows: 0,
+      undatedRows: 0,
+      voided: [],
+      events: flatEvents,
+    };
+    depositRegisterInternal.setFetchDepositRegisterForTests(async () => register);
+
+    const res = await call<{
+      aging: unknown[];
+      finished: Array<{
+        rNumber: string;
+        status: string;
+        closedDateBangkok: string | null;
+        appliedChRef: string | null;
+        appliedDateBangkok: string | null;
+      }>;
+    }>("GET", `/${PROPERTY}/deposits/register`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.aging).toEqual([]);
+    // Newest-closed-first by closedDateBangkok: R090031 (2026-08-09) >
+    // R090030 (2026-08-05) > R090032 (2026-08-03 — its later 08-08 applied
+    // event is voided, so the earlier ACTIVE refund wins).
+    expect(res.body.finished.map((r) => r.rNumber)).toEqual(["R090031", "R090030", "R090032"]);
+
+    const applied = res.body.finished.find((r) => r.rNumber === "R090030")!;
+    expect(applied.closedDateBangkok).toBe("2026-08-05");
+    expect(applied.appliedChRef).toBe("CH26-000001");
+    expect(applied.appliedDateBangkok).toBe("2026-08-05");
+
+    const refundedOnly = res.body.finished.find((r) => r.rNumber === "R090031")!;
+    expect(refundedOnly.closedDateBangkok).toBe("2026-08-09");
+    // No applied event at all -> appliedChRef/appliedDateBangkok stay null,
+    // even though the thread IS closed (closedDateBangkok is populated).
+    expect(refundedOnly.appliedChRef).toBeNull();
+    expect(refundedOnly.appliedDateBangkok).toBeNull();
+
+    const voidedApplied = res.body.finished.find((r) => r.rNumber === "R090032")!;
+    // The voided 08-08 applied event must not win: closedDateBangkok is the
+    // earlier, ACTIVE 08-03 refund.
+    expect(voidedApplied.closedDateBangkok).toBe("2026-08-03");
+    expect(voidedApplied.appliedChRef).toBeNull();
+    expect(voidedApplied.appliedDateBangkok).toBeNull();
   });
 });
 

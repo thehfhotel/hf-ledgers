@@ -1,4 +1,4 @@
-import type { CashAdjustmentAmounts, CashBlockAmounts, DayProvenance } from "../shared/types.ts";
+import type { CashAdjustmentAmounts, CashBlockAmounts, DayProvenance, Property } from "../shared/types.ts";
 
 // Thai display labels shared by more than one screen. Kept out of the pages
 // so the day sheet and the history month list can never drift into two
@@ -51,3 +51,25 @@ export const CASH_ADJUSTMENT_FIELDS: { key: keyof CashAdjustmentAmounts; label: 
   { key: "heldBackSatang", label: "เงินสดยังไม่ฝาก (เข้าตู้ไม่ได้)" },
   { key: "broughtForwardSatang", label: "เงินสดจากรอบก่อนที่เข้าตู้ไม่ได้" },
 ];
+
+/**
+ * Compact Latin display form for a property, owner ask (2026-08-01, มัดจำ
+ * page UI fix round): the property switcher (App.tsx) and PropertyBadge
+ * (every data-entry screen's header chip) are tight spaces where the full
+ * Thai names — `PROPERTY_LABELS[...].th` ("โรงแรม HF" / "HF วิลล์",
+ * shared/types.ts) — read as visually unbalanced. Deliberately a SEPARATE
+ * constant, never a change to `PROPERTY_LABELS` itself: that one is the
+ * locked contract's `th`/`en` pair, and the printed report title
+ * (`reportSheetBlocks.tsx`'s `shortPropertyLabel`/`ReportSheetTitle`) reads
+ * straight off `PROPERTY_LABELS[property].th`, so a change there would
+ * silently change what's on the printed sheet / JPEG export — the owner
+ * was explicit that printed output must stay byte-identical. Every other
+ * PROPERTY_LABELS.th render site (App.tsx's document.title, BookingDayPage's
+ * move-to-other-property prose) also keeps reading PROPERTY_LABELS directly
+ * — this constant is scoped to the switcher + badge only, the two sites the
+ * owner actually pointed at.
+ */
+export const PROPERTY_BADGE_LABELS: Record<Property, string> = {
+  hf: "HF",
+  hfville: "HF Ville",
+};

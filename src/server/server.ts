@@ -1290,7 +1290,10 @@ export const api = new Elysia({ prefix: "/api" })
   // returned on either. Notes (deposit_notes) are merged onto BOTH the
   // aging rows and the exceptions rows — a thread can be aging (still
   // outstanding) and flagged mismatched at once, and the office's note is
-  // the same conversation either way.
+  // the same conversation either way. `finished` (owner ask, 2026-08-01,
+  // unified มัดจำ table) is additive: same row shape as `aging`, one entry
+  // per closed-out (applied/refunded) thread — see its doc comment in
+  // client/api.ts.
   .get("/:property/deposits/register", async ({ params, status }) => {
     const { property } = params;
     if (!isProperty(property)) return status(400, { error: "invalid property" });
@@ -1338,6 +1341,21 @@ export const api = new Elysia({ prefix: "/api" })
       return { appliedChRef: latest.chRef, appliedDateBangkok: latest.dateBangkok };
     };
 
+    // Owner ask (2026-08-01, unified มัดจำ table): the latest non-voided
+    // applied OR refunded event's date for a thread — "when it closed".
+    // Broader than appliedMappingFor's applied-only date: a thread closed
+    // purely by a refund (status "refunded") has no applied event at all,
+    // so appliedDateBangkok alone can't answer "closed when" for it. Only
+    // ever computed for `finished`-bucket threads below — an aging
+    // (outstanding) row's `closedDateBangkok` is always `null` by
+    // definition (see DepositAgingRow's doc comment, client/api.ts).
+    const closedDateFor = (rNumber: string): string | null => {
+      const events = threadByR.get(rNumber)?.events ?? [];
+      const closing = events.filter((e) => (e.kind === "applied" || e.kind === "refunded") && !e.voided);
+      if (closing.length === 0) return null;
+      return [...closing].sort((a, b) => (b.dateBangkok ?? "").localeCompare(a.dateBangkok ?? ""))[0]!.dateBangkok;
+    };
+
     const aging = register.threads
       .filter((t) => t.outstandingSatang > 0)
       .sort((a, b) => (a.firstEventDate ?? "").localeCompare(b.firstEventDate ?? ""))
@@ -1351,6 +1369,36 @@ export const api = new Elysia({ prefix: "/api" })
         receivedPmsRef: receivedPmsRefFor(t.rNumber),
         status: t.status,
         guestName: t.guestName,
+        closedDateBangkok: null, // outstanding by definition — never closed
+        ...appliedMappingFor(t.rNumber),
+        ...noteFields(t.rNumber),
+      }));
+
+    // Owner ask (2026-08-01, unified มัดจำ table): every "finished" thread
+    // (status "applied" or "refunded" — the exact `depositFilterBucketForStatus`
+    // "finished" bucket, src/client/pages/depositRegisterFilter.ts; duplicated
+    // here as a literal status check rather than importing that CLIENT-side
+    // module, same "never invert the natural dependency direction" reasoning
+    // as DEPOSIT_R_NUMBER_RE in deposit-register.ts). Same row shape as
+    // `aging`, replacing the retired ตัดยอดแล้วล่าสุด section (see
+    // DepositRegisterResponse.finished's doc comment, client/api.ts, for why
+    // this is uncapped where that section capped at 20). Sorted
+    // newest-closed-first by `closedDateBangkok` (nulls sort last).
+    const finished = register.threads
+      .filter((t) => t.status === "applied" || t.status === "refunded")
+      .map((t) => ({ thread: t, closedDateBangkok: closedDateFor(t.rNumber) }))
+      .sort((a, b) => (b.closedDateBangkok ?? "").localeCompare(a.closedDateBangkok ?? ""))
+      .map(({ thread: t, closedDateBangkok }) => ({
+        rNumber: t.rNumber,
+        receivedSatang: t.receivedSatang,
+        appliedSatang: t.appliedSatang,
+        refundedSatang: t.refundedSatang,
+        outstandingSatang: t.outstandingSatang,
+        firstEventDate: t.firstEventDate,
+        receivedPmsRef: receivedPmsRefFor(t.rNumber),
+        status: t.status,
+        guestName: t.guestName,
+        closedDateBangkok,
         ...appliedMappingFor(t.rNumber),
         ...noteFields(t.rNumber),
       }));
@@ -1380,6 +1428,7 @@ export const api = new Elysia({ prefix: "/api" })
       generatedAt: new Date().toISOString(),
       monthly: register.monthly,
       aging,
+      finished,
       exceptions,
       unparsedAppliedRows: register.unparsedAppliedRows,
       // Review fix: three more tripwire counters alongside

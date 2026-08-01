@@ -794,11 +794,12 @@ endpoints below continue sequentially from 30.
 
 30. **`GET /api/:property/deposits/register`** → `{ property: Property,
     generatedAt: string, monthly: MonthlyDepositReconciliation[], aging:
-    DepositAgingRow[], exceptions: { mismatched: MismatchedDepositException[],
-    orphanApplied: OrphanAppliedDepositException[] }, unparsedAppliedRows:
-    number, zeroTenderRows: number, blankBookingNoRows: number, undatedRows:
-    number, voided: VoidedDepositEventSummary[], events:
-    DepositRegisterEvent[] }`. Same dark-by-default gate as endpoint 26:
+    DepositAgingRow[], finished: DepositAgingRow[], exceptions: { mismatched:
+    MismatchedDepositException[], orphanApplied:
+    OrphanAppliedDepositException[] }, unparsedAppliedRows: number,
+    zeroTenderRows: number, blankBookingNoRows: number, undatedRows: number,
+    voided: VoidedDepositEventSummary[], events: DepositRegisterEvent[] }`.
+    Same dark-by-default gate as endpoint 26:
     **503** (`{ error: "pms prefill not configured" }`) when this
     property's PMS env URL is unset, **502** on a live query failure,
     nothing returned on either. Queries the property's FULL
@@ -824,6 +825,31 @@ endpoints below continue sequentially from 30.
       R015834-style case (applied > received) makes `outstandingSatang`
       NEGATIVE, so it never appears here; it appears in `exceptions.mismatched`
       instead.
+    - **`finished` (owner ask, 2026-08-01, unified มัดจำ table) — additive,
+      SAME row shape as `aging`.** Every R-number thread whose `status` is
+      `"applied"` or `"refunded"` (the `depositFilterBucketForStatus`
+      "finished" bucket, `src/client/pages/depositRegisterFilter.ts`) —
+      i.e. every closed-out thread, uncapped. **Sorted newest-closed-first**
+      by `closedDateBangkok` (see below; a thread with no computable closing
+      date sorts last). Replaces the client's old ตัดยอดแล้วล่าสุด section,
+      which was built client-side from `events` filtered to
+      `kind === "applied" && !voided` and capped at the 20 most recent —
+      that capped, event-level (not thread-level) list is retired; the
+      client's register page now renders `aging` and `finished` through ONE
+      unified thread table, switching which array(s) feed it via the
+      ทั้งหมด/คงค้าง/เสร็จสิ้น pill.
+    - **`closedDateBangkok: string | null` (owner ask, 2026-08-01, unified
+      มัดจำ table) — additive, on EVERY `aging`/`finished` row.** The latest
+      non-voided `applied` OR `refunded` event's date for that thread —
+      broader than `appliedDateBangkok` below (which is `null` for a thread
+      closed purely by a refund, since it has no applied event at all).
+      Always `null` on an `aging` row (outstanding by definition, never
+      closed); on a `finished` row, `null` only in the defensive case where
+      its closing event's own date failed to parse. The client uses this to
+      compute the unified table's "ค้างมา (วัน)" column for a finished row —
+      `firstEventDate` -> `closedDateBangkok` (days the deposit sat before
+      being resolved) — instead of the outstanding bucket's own
+      `firstEventDate` -> today.
     - `exceptions.mismatched`: threads where `receivedSatang > 0 &&
       appliedSatang > 0 && |appliedSatang - receivedSatang| >
       RECONCILE_TOLERANCE_SATANG` (`shared/bookings.ts`, 100 satang / 1 THB —
@@ -864,12 +890,15 @@ endpoints below continue sequentially from 30.
       footnote, independent of which threads happen to also be outstanding
       or exceptional. `VoidedDepositEventSummary.rNumber` is nullable for
       exactly that reason.
-    - Every `aging`/`exceptions.mismatched`/`exceptions.orphanApplied` row
-      additionally carries `note: string | null`, `resolvedAt: string |
+    - Every `aging`/`finished`/`exceptions.mismatched`/`exceptions.orphanApplied`
+      row additionally carries `note: string | null`, `resolvedAt: string |
       null`, `resolvedBy: string | null` — merged from `deposit_notes` by
       R-number, `null`/`null`/`null` when no note thread exists yet. A
       thread can appear in `aging` AND `exceptions` at once (still
-      outstanding, but also mismatched) — the same note applies to both.
+      outstanding, but also mismatched) — the same note applies to both;
+      `finished` and `aging` are mutually exclusive (a thread's `status`
+      puts it in exactly one bucket), but a `finished` thread can likewise
+      also be an `exceptions.mismatched` row simultaneously.
     - **`events` (owner ask, 2026-08-01, register mapability) — additive.**
       The FULL classified event list, every kind INCLUDING voided ones,
       exposed straight off `DepositRegisterData.events` (no
@@ -896,11 +925,14 @@ endpoints below continue sequentially from 30.
       `guestName: string | null` (owner ask, 2026-08-01, guest name — see
       below). The client (`DepositRegisterPage.tsx`) filters this by
       `dateBangkok`'s `"YYYY-MM"` prefix to drive สรุปรายเดือน's expandable
-      per-month event list, and separately by `kind === "applied" &&
-      !voided` for the ตัดยอดแล้วล่าสุด section.
+      per-month event list. (It no longer filters this by
+      `kind === "applied" && !voided` for a ตัดยอดแล้วล่าสุด section — that
+      client-side derivation was retired 2026-08-01 in favor of the
+      `finished` field above.)
     - **`receivedPmsRef`, `status`, `appliedChRef`, `appliedDateBangkok`
       (owner ask, 2026-08-01) — additive fields on EVERY
-      `aging`/`exceptions.mismatched`/`exceptions.orphanApplied` row.**
+      `aging`/`finished`/`exceptions.mismatched`/`exceptions.orphanApplied`
+      row.**
       `receivedPmsRef: string | null` is that thread's own received
       event's `pmsRef` (voided excluded), `null` when none — lets the
       office find the paper receipt behind an R-number without opening
@@ -918,14 +950,13 @@ endpoints below continue sequentially from 30.
       `"applied"`/`"partial"` status, so a used deposit is traceable
       without opening the PMS. Note that a thread whose status is
       `"applied"` (fully absorbed, `outstandingSatang <= 0`) or
-      `"refunded"` almost never appears in `aging` at all (that list
-      filters `outstandingSatang > 0`) — such threads are found instead
-      via `events` (a month's expandable row) or the client's
-      ตัดยอดแล้วล่าสุด section (built client-side by filtering `events`,
-      no separate endpoint).
+      `"refunded"` never appears in `aging` at all (that list filters
+      `outstandingSatang > 0`) — it appears in `finished` instead (or
+      `events`, for a month's expandable row on สรุปรายเดือน).
     - **`guestName: string | null` (owner ask, 2026-08-01, deposit register
-      guest name) — additive, on EVERY `aging`/`exceptions.mismatched`/
-      `exceptions.orphanApplied` row AND on every `events` entry.**
+      guest name) — additive, on EVERY `aging`/`finished`/
+      `exceptions.mismatched`/`exceptions.orphanApplied` row AND on every
+      `events` entry.**
       `DEPOSIT_LEDGER_QUERY` gained the same `ht_customers` LEFT JOIN
       `pms-prefill.ts`'s `LEDGER_QUERY` already used (copied verbatim —
       the C-prefix join condition verified live 2026-07-30), selecting

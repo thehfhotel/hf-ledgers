@@ -514,6 +514,17 @@ export type DepositAgingRow = DepositNoteFields &
      * thread's own received event (voided excluded), `null` when none —
      * lets the office find the actual PMS receipt behind an R-number. */
     receivedPmsRef: string | null;
+    /** Owner ask (2026-08-01, unified มัดจำ table): the latest non-voided
+     * applied/refunded event's date — this thread's "when it closed" for a
+     * `finished` row (see `DepositRegisterResponse.finished`). Always
+     * `null` on an `aging` row (outstanding by definition, never closed);
+     * `null` on a `finished` row only in the defensive case where its
+     * closing event's date itself failed to parse. The register page uses
+     * this (rather than `appliedDateBangkok`, which is `null` for a
+     * refund-only close-out) to compute "ค้างมา (วัน)" for the finished
+     * bucket: days from `firstEventDate` to this date, vs. the outstanding
+     * bucket's own days-to-today. */
+    closedDateBangkok: string | null;
   };
 
 export type DepositMismatchedException = DepositNoteFields &
@@ -573,6 +584,19 @@ export interface DepositRegisterResponse {
   generatedAt: string;
   monthly: DepositMonthlyReconciliation[];
   aging: DepositAgingRow[];
+  /** Owner ask (2026-08-01, unified มัดจำ table): every thread whose
+   * `status` is `"applied"` or `"refunded"` (the `depositFilterBucketForStatus`
+   * "finished" bucket — depositRegisterFilter.ts) — the SAME row shape as
+   * `aging`, additive. Replaces the retired ตัดยอดแล้วล่าสุด section (which
+   * listed the most recent applied EVENTS, capped at 20, not threads): the
+   * register page now renders `aging` and `finished` through ONE unified
+   * table, switching which array(s) feed it via the ทั้งหมด/คงค้าง/เสร็จสิ้น
+   * pill (see `matchesDepositFilter`), so there is no cap here — the pill
+   * itself is the office's way to keep the view small. Unlike `aging`
+   * (sorted oldest-first by `firstEventDate`), `finished` is sorted
+   * NEWEST-CLOSED-FIRST by `closedDateBangkok` (nulls last), mirroring the
+   * retired section's own newest-first ordering. */
+  finished: DepositAgingRow[];
   exceptions: {
     mismatched: DepositMismatchedException[];
     orphanApplied: DepositOrphanAppliedException[];

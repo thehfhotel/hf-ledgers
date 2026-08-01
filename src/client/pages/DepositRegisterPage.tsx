@@ -25,6 +25,8 @@ import {
   type DepositFilterBucket,
   matchesDepositExceptionFilter,
   matchesDepositFilter,
+  matchesDepositSearch,
+  type DepositSearchRow,
 } from "./depositRegisterFilter.ts";
 import { PropertyBadge } from "./PropertyBadge.tsx";
 
@@ -59,6 +61,16 @@ const REGISTER_TABLE_EMPTY_TH: Record<DepositFilterBucket, string> = {
   outstanding: "ไม่มีมัดจำล่วงหน้าคงค้าง",
   finished: "ยังไม่มีมัดจำที่เสร็จสิ้น",
 };
+
+/** Owner ask (2026-08-01, มัดจำ register search bar): the standard muted
+ * empty line whenever the SEARCH box (not the ทั้งหมด/คงค้าง/เสร็จสิ้น pill)
+ * is the reason a bucket is showing nothing — takes over from
+ * `REGISTER_TABLE_EMPTY_TH[filter]`/the exceptions section's own "ไม่มี
+ * รายการ" whenever `search` is non-empty, everywhere search applies (the
+ * unified thread table AND all three exception buckets), so an office
+ * typing a wrong ref sees "not found" rather than a filter-specific message
+ * that reads like there is simply no data of that kind at all. */
+const DEPOSIT_SEARCH_EMPTY_TH = "ไม่พบรายการที่ค้นหา";
 
 /** The page's top-level tab (owner ask, 2026-08-01: "สรุปรายเดือน — move to
  * another pill as another page/tab"). `"register"` (default) is the office's
@@ -255,6 +267,14 @@ export function DepositRegisterPage({ property }: Props) {
   // bookmarkable link — see `matchesDepositFilter`'s doc comment
   // (depositRegisterFilter.ts) for the exact status -> bucket rule.
   const [filter, setFilter] = useState<DepositFilterBucket>("outstanding");
+  // Owner ask (2026-08-01, มัดจำ register search bar): "search for customer
+  // name, and ref like R015811." Component state, same per-visit-preference
+  // treatment as `filter` right above (not reset by the property-switch
+  // effect below) — the two compose as a plain AND at every call site that
+  // uses them (`matchesDepositSearch`/`matchesDepositFilter`), so they stay
+  // as two independent pieces of state rather than one combined filter
+  // object.
+  const [search, setSearch] = useState("");
   // Owner ask (2026-08-01, D5): top-level tab, component state, defaults to
   // the working view. Not reset by the property-switch effect below, same
   // as `filter` above — a per-visit view preference the office likely wants
@@ -319,6 +339,40 @@ export function DepositRegisterPage({ property }: Props) {
   const monthlyAscending = useMemo(() => register?.monthly ?? [], [register]);
   const today = todayBangkok();
 
+  // Owner ask (2026-08-01, มัดจำ register search bar): every non-voided
+  // RECEIVED/APPLIED event's own `pmsRef` (pay_no), grouped by `rNumber` —
+  // the raw material `matchesDepositSearch` needs for "every received/
+  // applied pmsRef" that no single aging/exception row field carries on its
+  // own (see `DepositSearchRow`'s doc comment, depositRegisterFilter.ts).
+  // Built once per register load from the full `register.events` feed
+  // (already fetched — this feature is client-only filtering, no new
+  // request). Voided excluded, same convention `receivedPmsRefFor`/
+  // `appliedMappingFor` already use server-side (server.ts) — a voided
+  // receipt's number isn't a real receipt to search for. REFUNDED events
+  // are deliberately excluded too, matching the task's own "received/
+  // applied pmsRef" scope — a refund is still findable via its thread's
+  // rNumber/guestName.
+  const pmsRefsByR = useMemo(() => {
+    const map = new Map<string, string[]>();
+    if (!register) return map;
+    for (const event of register.events) {
+      if (event.rNumber === null || event.voided) continue;
+      if (event.kind !== "received" && event.kind !== "applied") continue;
+      const existing = map.get(event.rNumber);
+      if (existing) existing.push(event.pmsRef);
+      else map.set(event.rNumber, [event.pmsRef]);
+    }
+    return map;
+  }, [register]);
+
+  /** Any thread-shaped row (aging/finished/mismatched/orphanApplied/
+   * overRefunded all carry these same three fields) -> the shape
+   * `matchesDepositSearch` matches against, filling in this thread's
+   * `pmsRefs` from `pmsRefsByR` above. */
+  function toSearchRow(row: { rNumber: string; guestName: string | null; appliedChRef: string | null }): DepositSearchRow {
+    return { rNumber: row.rNumber, guestName: row.guestName, appliedChRef: row.appliedChRef, pmsRefs: pmsRefsByR.get(row.rNumber) ?? [] };
+  }
+
   // Owner ask (2026-08-01, unified มัดจำ table): ONE thread list backs the
   // register's single table — `aging` (outstanding, server-sorted
   // oldest-first) and `finished` (closed-out, server-sorted
@@ -330,12 +384,17 @@ export function DepositRegisterPage({ property }: Props) {
   // `recentlyApplied` derivation — a fully-applied/refunded deposit now has
   // a real row in `finished` instead of a 20-item quick-scan list built
   // from raw events.
+  //
+  // Owner ask (2026-08-01, search bar): `matchesDepositSearch` composes as a
+  // plain AND with the pill filter above — a row must pass BOTH to show.
   const unifiedRows = useMemo(
     () =>
       register
-        ? [...register.aging, ...register.finished].filter((row) => matchesDepositFilter(row.status, filter))
+        ? [...register.aging, ...register.finished].filter(
+            (row) => matchesDepositFilter(row.status, filter) && matchesDepositSearch(search, toSearchRow(row)),
+          )
         : [],
-    [register, filter],
+    [register, filter, search, pmsRefsByR],
   );
 
   // Owner ask (2026-08-01, exceptions respect the focus filter once
@@ -349,23 +408,43 @@ export function DepositRegisterPage({ property }: Props) {
   // saved with the resolved mark (no extra wiring needed: `applyNoteChange`
   // already patches `resolvedAt` in place, so this filter re-evaluates on
   // the very next render).
+  //
+  // Owner ask (2026-08-01, search bar): the search box ALSO reaches ข้อยกเว้น
+  // (task point 3: "applies to ... all three exception buckets") — an
+  // exceptional row matching the query shows even if the office wasn't
+  // scanning that bucket for it. Same plain-AND composition as
+  // `unifiedRows` above, again independent of `matchesDepositExceptionFilter`.
   const filteredMismatched = useMemo(
-    () => (register ? register.exceptions.mismatched.filter((row) => matchesDepositExceptionFilter(row.resolvedAt, filter)) : []),
-    [register, filter],
+    () =>
+      register
+        ? register.exceptions.mismatched.filter(
+            (row) => matchesDepositExceptionFilter(row.resolvedAt, filter) && matchesDepositSearch(search, toSearchRow(row)),
+          )
+        : [],
+    [register, filter, search, pmsRefsByR],
   );
   const filteredOrphanApplied = useMemo(
     () =>
-      register ? register.exceptions.orphanApplied.filter((row) => matchesDepositExceptionFilter(row.resolvedAt, filter)) : [],
-    [register, filter],
+      register
+        ? register.exceptions.orphanApplied.filter(
+            (row) => matchesDepositExceptionFilter(row.resolvedAt, filter) && matchesDepositSearch(search, toSearchRow(row)),
+          )
+        : [],
+    [register, filter, search, pmsRefsByR],
   );
   // Owner fix round (2026-08-01, the R015832 case): the new overRefunded
   // bucket shares the SAME `matchesDepositExceptionFilter` predicate as the
   // two exception lists above — its own note's `resolvedAt`, never its
   // thread's `DepositThreadStatus`, same reasoning throughout this file.
+  // Search bar (2026-08-01): same plain-AND composition as its siblings.
   const filteredOverRefunded = useMemo(
     () =>
-      register ? register.exceptions.overRefunded.filter((row) => matchesDepositExceptionFilter(row.resolvedAt, filter)) : [],
-    [register, filter],
+      register
+        ? register.exceptions.overRefunded.filter(
+            (row) => matchesDepositExceptionFilter(row.resolvedAt, filter) && matchesDepositSearch(search, toSearchRow(row)),
+          )
+        : [],
+    [register, filter, search, pmsRefsByR],
   );
 
   function toggleAgingExpanded(rNumber: string) {
@@ -424,7 +503,13 @@ export function DepositRegisterPage({ property }: Props) {
   // resolved mismatch (now living under the เสร็จสิ้น filter, de-emphasized)
   // must stop inflating this badge. The tab label still doesn't distinguish
   // mismatched from orphanApplied, just "there is still something to look
-  // at".
+  // at". Deliberately computed from the UNFILTERED `register.exceptions.*`
+  // arrays, not `filteredMismatched`/`filteredOrphanApplied`/
+  // `filteredOverRefunded` (owner ask, 2026-08-01, search bar, task point
+  // 4) — this badge reflects REALITY ("is there still something to look
+  // at, anywhere in the register"), not the current view, so it must stay
+  // exactly as true whether or not a search query happens to currently be
+  // hiding those rows from view.
   const exceptionCount =
     register.exceptions.mismatched.filter((e) => e.resolvedAt === null).length +
     register.exceptions.orphanApplied.filter((e) => e.resolvedAt === null).length +
@@ -448,7 +533,7 @@ export function DepositRegisterPage({ property }: Props) {
           on the working tab (it demands action) but a non-empty count still
           surfaces as a badge on the tab label so it's visible while parked
           on สรุปรายเดือน. */}
-      <div className="flex flex-wrap items-center gap-3 self-start">
+      <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-0.5 rounded-full bg-brand-900 p-1 ring-1 ring-inset ring-brand-600">
           {DEPOSIT_TABS.map((tab) => (
             <button
@@ -501,6 +586,46 @@ export function DepositRegisterPage({ property }: Props) {
             </div>
           </div>
         )}
+
+        {/* Search bar (owner ask, 2026-08-01: "add search bar too. search
+            for customer name, and ref like R015811.") — same line as the
+            tab/status pills (`self-start` dropped off the wrapper above so
+            this row now stretches full width and `ml-auto` here can push
+            the box to the right edge); `flex-1` lets it GROW into whatever
+            width is left on a wide screen, `min-w-[11rem]`/`sm:max-w-xs`
+            keep it from either collapsing too small or ballooning past a
+            sane search-box width, and the shared `flex-wrap` on the parent
+            still drops it to its own row the moment the tab/status pills
+            don't leave enough room (narrow screens) — same "wrap, don't
+            stack by default" behavior the tab/status pair already uses.
+            Client-only substring filter (`matchesDepositSearch`,
+            depositRegisterFilter.ts) over data already fetched — no
+            request fires on typing. Only on the working tab: สรุปรายเดือน is
+            the accounting view and stays untouched by this feature. */}
+        {activeTab === "register" && (
+          <div className="ml-auto flex min-w-[11rem] flex-1 items-center sm:max-w-xs">
+            <div className="relative w-full">
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="ค้นหาชื่อลูกค้า / เลขที่ (R015811)"
+                aria-label="ค้นหามัดจำ"
+                className="w-full rounded-md border border-line-strong bg-panel py-1.5 pl-3 pr-7 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+              />
+              {search !== "" && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  aria-label="ล้างการค้นหา"
+                  className="absolute inset-y-0 right-1.5 flex items-center text-ink-muted hover:text-ink"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {activeTab === "register" ? (
@@ -524,7 +649,9 @@ export function DepositRegisterPage({ property }: Props) {
               {REGISTER_TABLE_HEADING_TH[filter]}
             </h2>
             {unifiedRows.length === 0 ? (
-              <p className="px-4 py-3 text-sm text-ink-muted">{REGISTER_TABLE_EMPTY_TH[filter]}</p>
+              <p className="px-4 py-3 text-sm text-ink-muted">
+                {search.trim() !== "" ? DEPOSIT_SEARCH_EMPTY_TH : REGISTER_TABLE_EMPTY_TH[filter]}
+              </p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[52rem] text-sm">
@@ -581,7 +708,7 @@ export function DepositRegisterPage({ property }: Props) {
             <div className="flex flex-col gap-1 px-4 py-3">
               <h3 className="text-xs font-semibold text-ink-muted">ยอดตัดยอดไม่ตรงกับยอดรับ</h3>
               {filteredMismatched.length === 0 ? (
-                <p className="text-sm text-ink-muted">ไม่มีรายการ</p>
+                <p className="text-sm text-ink-muted">{search.trim() !== "" ? DEPOSIT_SEARCH_EMPTY_TH : "ไม่มีรายการ"}</p>
               ) : (
                 <div className="flex flex-col gap-3">
                   {filteredMismatched.map((row) => (
@@ -599,7 +726,7 @@ export function DepositRegisterPage({ property }: Props) {
             <div className="flex flex-col gap-1 border-t border-line px-4 py-3">
               <h3 className="text-xs font-semibold text-ink-muted">ตัดยอดโดยไม่มีเงินรับ</h3>
               {filteredOrphanApplied.length === 0 ? (
-                <p className="text-sm text-ink-muted">ไม่มีรายการ</p>
+                <p className="text-sm text-ink-muted">{search.trim() !== "" ? DEPOSIT_SEARCH_EMPTY_TH : "ไม่มีรายการ"}</p>
               ) : (
                 <div className="flex flex-col gap-3">
                   {filteredOrphanApplied.map((row) => (
@@ -625,7 +752,7 @@ export function DepositRegisterPage({ property }: Props) {
             <div className="flex flex-col gap-1 border-t border-line px-4 py-3">
               <h3 className="text-xs font-semibold text-ink-muted">คืนเงินโดยไม่มียอดรับ (หรือคืนเกินยอดรับ)</h3>
               {filteredOverRefunded.length === 0 ? (
-                <p className="text-sm text-ink-muted">ไม่มีรายการ</p>
+                <p className="text-sm text-ink-muted">{search.trim() !== "" ? DEPOSIT_SEARCH_EMPTY_TH : "ไม่มีรายการ"}</p>
               ) : (
                 <div className="flex flex-col gap-3">
                   {filteredOverRefunded.map((row) => (

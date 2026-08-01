@@ -60,3 +60,44 @@ export function depositExceptionBucketForResolved(resolvedAt: string | null): Ex
 export function matchesDepositExceptionFilter(resolvedAt: string | null, filter: DepositFilterBucket): boolean {
   return filter === "all" || depositExceptionBucketForResolved(resolvedAt) === filter;
 }
+
+/**
+ * Search row shape consumed by `matchesDepositSearch` — owner ask
+ * (2026-08-01): "add search bar too. search for customer name, and ref like
+ * R015811." `guestName`/`rNumber`/`appliedChRef` are common to every
+ * thread-shaped row on the มัดจำ register (`DepositAgingRow`,
+ * `DepositMismatchedException`, `DepositOrphanAppliedException`,
+ * `DepositOverRefundedException` in client/api.ts all carry these three via
+ * `DepositGuestNameField`/`DepositStatusFields`). `pmsRefs` is the odd one
+ * out: NO row field carries more than one pmsRef — `receivedPmsRef` is only
+ * that thread's FIRST non-voided received event's pay_no
+ * (`receivedPmsRefFor`, server.ts), and `appliedChRef` is a CH/check-in ref,
+ * not a pmsRef at all. So "every received/applied pmsRef (receipt numbers)"
+ * is built by the caller (DepositRegisterPage.tsx) from the full
+ * `register.events` feed, filtered to this thread's own non-voided
+ * received/applied events' `pmsRef` (pay_no) values — a genuine split
+ * receipt or a partial-then-fully-applied thread can have more than one. */
+export interface DepositSearchRow {
+  guestName: string | null;
+  rNumber: string;
+  pmsRefs: readonly string[];
+  appliedChRef: string | null;
+}
+
+/**
+ * Case-insensitive substring match for the มัดจำ register's search box.
+ * Empty query (after trimming) always passes — "no search" means "show
+ * everything", never "show nothing". Otherwise true when the (lowercased)
+ * query is a substring of the row's guest name, R-number, any received/
+ * applied pmsRef, or its applied CH ref. Pure — no React, no fetch — so it
+ * unit-tests without a component harness (this repo has none), same
+ * reasoning as `matchesDepositFilter` above. Composes with that pill filter
+ * as a plain AND at the call site (DepositRegisterPage.tsx); this function
+ * only ever answers the search half of that question.
+ */
+export function matchesDepositSearch(query: string, row: DepositSearchRow): boolean {
+  const q = query.trim().toLowerCase();
+  if (q === "") return true;
+  const haystacks: readonly (string | null)[] = [row.guestName, row.rNumber, row.appliedChRef, ...row.pmsRefs];
+  return haystacks.some((h) => h !== null && h.toLowerCase().includes(q));
+}

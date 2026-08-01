@@ -4,8 +4,10 @@ import {
   DEPOSIT_FILTER_BUCKET_BY_STATUS,
   depositExceptionBucketForResolved,
   depositFilterBucketForStatus,
+  type DepositSearchRow,
   matchesDepositExceptionFilter,
   matchesDepositFilter,
+  matchesDepositSearch,
 } from "./depositRegisterFilter.ts";
 
 const ALL_STATUSES: DepositThreadStatus[] = ["waitingCheckin", "partial", "applied", "refunded"];
@@ -98,5 +100,59 @@ describe("depositExceptionBucketForResolved / matchesDepositExceptionFilter", ()
   test("an unresolved exception passes outstanding even when its thread's own status bucket is finished", () => {
     expect(depositFilterBucketForStatus("applied")).toBe("finished"); // the thread's own bucket
     expect(matchesDepositExceptionFilter(null, "outstanding")).toBe(true); // the exception's own bucket, independently
+  });
+});
+
+// Owner ask (2026-08-01, มัดจำ register search bar): "search for customer
+// name, and ref like R015811." `matchesDepositSearch`'s own predicate,
+// independent of the pill filters above — the page composes the two as a
+// plain AND (DepositRegisterPage.tsx), never tested here.
+describe("matchesDepositSearch", () => {
+  // A genuine split-receipt / partial-then-applied shape: two pmsRefs on
+  // one thread — proves "every" pmsRef is actually searched, not just the
+  // first (see DepositSearchRow's own doc comment for why pmsRefs is an
+  // array at all when no single API row field is).
+  const row: DepositSearchRow = {
+    guestName: "สมชาย ใจดี",
+    rNumber: "R015811",
+    pmsRefs: ["R2603-0140", "R2603-0199"],
+    appliedChRef: "CH26-005269",
+  };
+
+  test("matches a Thai guest name substring", () => {
+    expect(matchesDepositSearch("สมชาย", row)).toBe(true);
+    expect(matchesDepositSearch("ใจดี", row)).toBe(true);
+  });
+
+  test("matches a partial R-number (the owner's own R015811 example, narrowed to R0158)", () => {
+    expect(matchesDepositSearch("R0158", row)).toBe(true);
+  });
+
+  test("matches a pay_no (pmsRef) — including the SECOND entry, proving every pmsRef is searched", () => {
+    expect(matchesDepositSearch("R2603-0140", row)).toBe(true);
+    expect(matchesDepositSearch("0199", row)).toBe(true);
+  });
+
+  test("matches the applied CH ref", () => {
+    expect(matchesDepositSearch("CH26-005269", row)).toBe(true);
+    expect(matchesDepositSearch("005269", row)).toBe(true);
+  });
+
+  test("is case-insensitive for Latin characters (rNumber and CH ref)", () => {
+    expect(matchesDepositSearch("r015811", row)).toBe(true);
+    expect(matchesDepositSearch("ch26-005269", row)).toBe(true);
+  });
+
+  test("empty (or whitespace-only) query matches everything, including a row with no name/refs at all", () => {
+    const bareRow: DepositSearchRow = { guestName: null, rNumber: "R000001", pmsRefs: [], appliedChRef: null };
+    expect(matchesDepositSearch("", row)).toBe(true);
+    expect(matchesDepositSearch("   ", row)).toBe(true);
+    expect(matchesDepositSearch("", bareRow)).toBe(true);
+  });
+
+  test("no match returns false, including against a row with no name/refs at all", () => {
+    const bareRow: DepositSearchRow = { guestName: null, rNumber: "R000001", pmsRefs: [], appliedChRef: null };
+    expect(matchesDepositSearch("ไม่มีทางเจอ", row)).toBe(false);
+    expect(matchesDepositSearch("R015811", bareRow)).toBe(false);
   });
 });

@@ -1350,6 +1350,7 @@ export const api = new Elysia({ prefix: "/api" })
         firstEventDate: t.firstEventDate,
         receivedPmsRef: receivedPmsRefFor(t.rNumber),
         status: t.status,
+        guestName: t.guestName,
         ...appliedMappingFor(t.rNumber),
         ...noteFields(t.rNumber),
       }));
@@ -1360,6 +1361,7 @@ export const api = new Elysia({ prefix: "/api" })
         ...m,
         receivedPmsRef: receivedPmsRefFor(m.rNumber),
         status: threadByR.get(m.rNumber)?.status ?? "waitingCheckin",
+        guestName: threadByR.get(m.rNumber)?.guestName ?? null,
         ...appliedMappingFor(m.rNumber),
         ...noteFields(m.rNumber),
       })),
@@ -1367,6 +1369,7 @@ export const api = new Elysia({ prefix: "/api" })
         ...o,
         receivedPmsRef: receivedPmsRefFor(o.rNumber),
         status: threadByR.get(o.rNumber)?.status ?? "waitingCheckin",
+        guestName: threadByR.get(o.rNumber)?.guestName ?? null,
         ...appliedMappingFor(o.rNumber),
         ...noteFields(o.rNumber),
       })),
@@ -1406,6 +1409,7 @@ export const api = new Elysia({ prefix: "/api" })
         amountSatang: e.amountSatang,
         voided: e.voided,
         chRef: e.chRef,
+        guestName: e.guestName,
       })),
     };
   })

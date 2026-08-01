@@ -346,8 +346,13 @@ function parseNights(raw: string | null | undefined): number | null {
  * not something to paper over with guessy heuristics. Hand edits on the
  * bookings sheet stay the correction path, same as every other prefilled
  * field.
+ *
+ * Exported (owner ask, 2026-08-01, deposit register guest name):
+ * deposit-register.ts reuses this exact assembler for its own
+ * `ht_customers` join — one name-building rule for both modules, never a
+ * second copy that could drift.
  */
-function buildGuestName(
+export function buildGuestName(
   prefix: string | null | undefined,
   first: string | null | undefined,
   last: string | null | undefined,

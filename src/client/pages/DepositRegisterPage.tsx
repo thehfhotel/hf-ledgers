@@ -18,6 +18,7 @@ import {
   type DepositRegisterResponse,
 } from "../api.ts";
 import { DepositNoteEditor } from "../components/DepositNoteEditor.tsx";
+import { type DepositFilterBucket, matchesDepositFilter } from "./depositRegisterFilter.ts";
 import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
@@ -25,6 +26,15 @@ interface Props {
 }
 
 type NoteFields = { note: string | null; resolvedAt: string | null; resolvedBy: string | null };
+
+/** The ทั้งหมด/คงค้าง/เสร็จสิ้น pill's three options, in display order —
+ * owner ask (2026-08-01): "create a pill to select finished and
+ * outstanding so office can focus only on the outstanding". */
+const DEPOSIT_FILTER_OPTIONS: ReadonlyArray<{ value: DepositFilterBucket; label: string }> = [
+  { value: "all", label: "ทั้งหมด" },
+  { value: "outstanding", label: "คงค้าง" },
+  { value: "finished", label: "เสร็จสิ้น" },
+];
 
 /** รับ / ตัดยอด / คืนเงิน — the section's own wording for a deposit event's
  * kind. Shared by the voided footnote and the สรุปรายเดือน expandable event
@@ -42,6 +52,54 @@ function depositEventRefLabel(event: DepositRegisterEvent): string {
     (p): p is string => !!p,
   );
   return parts.join(" · ");
+}
+
+/** Guest name (when known) above the event's own `depositEventRefLabel`,
+ * demoted to a muted secondary line — owner ask (2026-08-01, guest name):
+ * "render the guest name wherever an R-number identifies a deposit". This
+ * is the EVENT-level counterpart of `RNumberRef`'s thread-level guest name
+ * (ตัดยอดแล้วล่าสุด and the expanded month event rows are both per-event,
+ * not per-thread, views — see `DepositLedgerEvent.guestName`'s doc comment
+ * in deposit-register.ts for why each event carries its own copy).
+ * `guestName` nullable -> renders exactly the refs alone, today's layout. */
+function EventGuestRef({ event }: { event: DepositRegisterEvent }) {
+  const refs = depositEventRefLabel(event);
+  if (!event.guestName) return <>{refs}</>;
+  return (
+    <span className="flex flex-col gap-0.5">
+      <span>{event.guestName}</span>
+      <span className="text-[11px] font-normal text-ink-muted">{refs}</span>
+    </span>
+  );
+}
+
+/**
+ * Whether an arbitrary EVENT's owning thread passes the current pill
+ * filter — used only to DIM (never remove) a สรุปรายเดือน expanded row
+ * (owner ask, 2026-08-01, pill point 3). The wire response carries a
+ * `DepositThreadStatus` only for threads that appear in `aging` or
+ * `exceptions` — an ordinary fully-applied, non-exception thread has no
+ * status field anywhere the client can see. Rather than duplicate
+ * `deriveDepositThreadStatus` on the client (a second copy that could
+ * drift from the server's), this leans on an exact identity instead:
+ * `aging` membership already IS `outstandingSatang > 0` (the server's own
+ * `aging` filter, which is exactly `deriveDepositThreadStatus`'s
+ * waitingCheckin/partial condition) — so "in `agingRNumbers`" and "in the
+ * outstanding bucket" are the same set, over data already fetched (no
+ * server change, task point 6). `rNumber === null` (an unparseable applied
+ * label, or a blank ledger_cin_no — never threaded at all) can't be
+ * classified either way, so it always matches — fails visible, never
+ * dimmed, same "never hide something we can't classify" instinct as this
+ * page's tripwire lines.
+ */
+function threadBucketMatchesFilter(
+  rNumber: string | null,
+  agingRNumbers: ReadonlySet<string>,
+  filter: DepositFilterBucket,
+): boolean {
+  if (filter === "all" || rNumber === null) return true;
+  const bucket: Exclude<DepositFilterBucket, "all"> = agingRNumbers.has(rNumber) ? "outstanding" : "finished";
+  return bucket === filter;
 }
 
 /** Chip tone per `DepositThreadStatus` — reuses the app's own ok/warn/stone
@@ -136,6 +194,16 @@ export function DepositRegisterPage({ property }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [expandedAgingR, setExpandedAgingR] = useState<Set<string>>(new Set());
   const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set());
+  // Owner ask (2026-08-01, ทั้งหมด/คงค้าง/เสร็จสิ้น pill): defaults to
+  // "outstanding", NOT "all" — the owner's stated purpose for this control
+  // is letting the office focus on what still needs attention ("so office
+  // can focus only on the outstanding"); opening on the full unfiltered
+  // register would bury that intent under every already-closed-out thread
+  // on day one. Component state only (no URL hash): the pill is a per-visit
+  // view preference, not something worth round-tripping through a
+  // bookmarkable link — see `matchesDepositFilter`'s doc comment
+  // (depositRegisterFilter.ts) for the exact status -> bucket rule.
+  const [filter, setFilter] = useState<DepositFilterBucket>("outstanding");
 
   useEffect(() => {
     let cancelled = false;
@@ -185,6 +253,26 @@ export function DepositRegisterPage({ property }: Props) {
 
   const monthlyNewestFirst = useMemo(() => (register ? [...register.monthly].reverse() : []), [register]);
   const today = todayBangkok();
+
+  // Owner ask (2026-08-01, pill): เงินมัดจำคงค้าง aging rows are ALWAYS the
+  // "outstanding" bucket by construction (the server's `aging` filter is
+  // `outstandingSatang > 0`, exactly `deriveDepositThreadStatus`'s
+  // waitingCheckin/partial condition) — filtered defensively through the
+  // same `matchesDepositFilter` predicate every bucketed row uses, rather
+  // than assuming that invariant holds forever.
+  const filteredAging = useMemo(
+    () => (register ? register.aging.filter((row) => matchesDepositFilter(row.status, filter)) : []),
+    [register, filter],
+  );
+
+  // The set of rNumbers currently in `aging` — membership there is exactly
+  // `outstandingSatang > 0` (the server's own aging filter), i.e. exactly
+  // the "outstanding" bucket. Used below to classify an arbitrary EVENT's
+  // owning thread for the month-expand dimming, without a second, DUPLICATE
+  // copy of deriveDepositThreadStatus on the client: membership in `aging`
+  // already IS that predicate, over data already fetched (task point 6 —
+  // pure client filtering, no server change).
+  const agingRNumbers = useMemo(() => new Set(register ? register.aging.map((r) => r.rNumber) : []), [register]);
 
   // Owner ask (2026-08-01): a fully-applied deposit never appears in
   // `aging` (outstanding <= 0 by definition) and only a `mismatched`
@@ -256,6 +344,36 @@ export function DepositRegisterPage({ property }: Props) {
   return (
     <div className="flex flex-col gap-4 pb-10">
       <PageHeader property={property} />
+
+      {/* ทั้งหมด/คงค้าง/เสร็จสิ้น pill (owner ask, 2026-08-01) — same
+          segmented-toggle shape as App.tsx's property switcher (dark
+          housing, one segment lit ivory), reused verbatim rather than the
+          gold nav-tab pill row: this picks a VIEW FILTER, the same kind of
+          question ("which subset am I looking at") the property switcher
+          answers, not a navigation target. Governs the เงินมัดจำคงค้าง aging
+          section, the ตัดยอดแล้วล่าสุด list, and (by dimming, not removing)
+          the expanded month event rows below — NEVER the สรุปรายเดือน
+          totals or the ข้อยกเว้น section (see those sections' own comments). */}
+      <div className="flex shrink-0 items-center gap-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">สถานะ</span>
+        <div className="flex items-center gap-0.5 rounded-full bg-brand-900 p-1 ring-1 ring-inset ring-brand-600">
+          {DEPOSIT_FILTER_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setFilter(opt.value)}
+              aria-pressed={filter === opt.value}
+              className={
+                "rounded-full px-3 py-1 text-xs font-semibold transition " +
+                (filter === opt.value ? "bg-shell text-brand-800 shadow-sm" : "text-brand-200 hover:text-white")
+              }
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="flex flex-col gap-1 text-xs text-ink-muted">
         <p>ข้อมูล ณ {new Date(register.generatedAt).toLocaleString("th-TH")}</p>
         {/* Tripwire lines — none of these ever invent or drop money; each
@@ -284,7 +402,10 @@ export function DepositRegisterPage({ property }: Props) {
         )}
       </div>
 
-      {/* สรุปรายเดือน */}
+      {/* สรุปรายเดือน — this row's own totals are NEVER governed by the pill
+          above (owner ask, 2026-08-01, pill point 4: accounting
+          completeness); only the expanded per-event list dims non-matching
+          rows (see MonthlyRow's doc comment). */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
         <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">สรุปรายเดือน</h2>
         {monthlyNewestFirst.length === 0 ? (
@@ -310,6 +431,8 @@ export function DepositRegisterPage({ property }: Props) {
                     events={register.events}
                     expanded={expandedMonths.has(row.month)}
                     onToggle={() => toggleMonthExpanded(row.month)}
+                    filter={filter}
+                    agingRNumbers={agingRNumbers}
                   />
                 ))}
               </tbody>
@@ -319,10 +442,19 @@ export function DepositRegisterPage({ property }: Props) {
       </section>
 
       {/* เงินมัดจำคงค้าง — explicitly the รอเช็คอิน/บางส่วน buckets (owner ask,
-          2026-08-01: the heading must say what state these rows are in). */}
+          2026-08-01: the heading must say what state these rows are in).
+          Pill governs this section (owner ask, 2026-08-01): every row here
+          is, by construction, the "outstanding" bucket (outstandingSatang >
+          0), so it can NEVER have anything to show under "เสร็จสิ้น" — a
+          one-line muted note replaces the table rather than leaving an
+          empty box. Under "ทั้งหมด"/"คงค้าง" it renders exactly as before. */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
         <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">เงินมัดจำคงค้าง (รอเช็คอิน)</h2>
-        {register.aging.length === 0 ? (
+        {filter === "finished" ? (
+          <p className="px-4 py-3 text-sm text-ink-muted">
+            ซ่อนอยู่ภายใต้ตัวกรอง “เสร็จสิ้น” — รายการคงค้างยังไม่เสร็จสิ้นเสมอ
+          </p>
+        ) : filteredAging.length === 0 ? (
           <p className="px-4 py-3 text-sm text-ink-muted">ไม่มีมัดจำล่วงหน้าคงค้าง</p>
         ) : (
           <div className="overflow-x-auto">
@@ -339,7 +471,7 @@ export function DepositRegisterPage({ property }: Props) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
-                {register.aging.map((row) => (
+                {filteredAging.map((row) => (
                   <AgingRow
                     key={row.rNumber}
                     property={property}
@@ -359,40 +491,57 @@ export function DepositRegisterPage({ property }: Props) {
       {/* ตัดยอดแล้วล่าสุด — owner ask (2026-08-01): a fully-applied deposit
           maps only here (or inside a month's expandable row) — it never
           appears in the aging list above, and only lands in ข้อยกเว้น when
-          the applied amount also fails the mismatch tolerance. */}
+          the applied amount also fails the mismatch tolerance. Pill governs
+          this section too (owner ask, 2026-08-01): every row here is an
+          applied/closed-out event, so it is hidden — same one-line muted
+          treatment as the aging section above — under "คงค้าง", the exact
+          opposite bucket. */}
       {recentlyApplied.length > 0 && (
         <section className="overflow-hidden rounded-lg border border-line bg-panel">
           <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">ตัดยอดแล้วล่าสุด</h2>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[42rem] text-sm">
-              <thead>
-                <tr className="border-b border-line bg-tint text-xs font-semibold text-ink-muted">
-                  <th className="px-4 py-2 text-left">วันที่</th>
-                  <th className="px-4 py-2 text-left">เลขที่ / อ้างอิง</th>
-                  <th className="px-4 py-2 text-right">จำนวนเงิน</th>
-                  <th className="px-4 py-2 text-left">สถานะ</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line">
-                {recentlyApplied.map((event, i) => (
-                  <tr key={`${event.pmsRef}-${i}`}>
-                    <td className="px-4 py-2 tabular-nums text-ink-muted">
-                      {event.dateBangkok ? isoToBuddhist(event.dateBangkok) : "-"}
-                    </td>
-                    <td className="px-4 py-2 text-ink">{depositEventRefLabel(event)}</td>
-                    <td className="px-4 py-2 text-right tabular-nums text-ink">{formatSatang(event.amountSatang)}</td>
-                    <td className="px-4 py-2">
-                      <StatusChip status="applied" />
-                    </td>
+          {filter === "outstanding" ? (
+            <p className="px-4 py-3 text-sm text-ink-muted">
+              ซ่อนอยู่ภายใต้ตัวกรอง “คงค้าง” — รายการตัดยอดแล้วเสร็จสิ้นเสมอ
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[42rem] text-sm">
+                <thead>
+                  <tr className="border-b border-line bg-tint text-xs font-semibold text-ink-muted">
+                    <th className="px-4 py-2 text-left">วันที่</th>
+                    <th className="px-4 py-2 text-left">เลขที่ / อ้างอิง</th>
+                    <th className="px-4 py-2 text-right">จำนวนเงิน</th>
+                    <th className="px-4 py-2 text-left">สถานะ</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {recentlyApplied.map((event, i) => (
+                    <tr key={`${event.pmsRef}-${i}`}>
+                      <td className="px-4 py-2 tabular-nums text-ink-muted">
+                        {event.dateBangkok ? isoToBuddhist(event.dateBangkok) : "-"}
+                      </td>
+                      <td className="px-4 py-2 text-ink">
+                        <EventGuestRef event={event} />
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-ink">{formatSatang(event.amountSatang)}</td>
+                      <td className="px-4 py-2">
+                        <StatusChip status="applied" />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
       )}
 
-      {/* ข้อยกเว้น */}
+      {/* ข้อยกเว้น — NEVER governed by the ทั้งหมด/คงค้าง/เสร็จสิ้น pill above
+          (owner ask, 2026-08-01, pill point 4): an exceptional deposit needs
+          attention regardless of lifecycle state — the R015834 mismatch is
+          state ตัดยอดแล้ว (bucket "finished") yet must stay visible even
+          under the default "คงค้าง" filter, same as สรุปรายเดือน's totals
+          above (accounting completeness) never being filtered either. */}
       <section className="overflow-hidden rounded-lg border border-line bg-panel">
         <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">ข้อยกเว้น</h2>
 
@@ -457,28 +606,43 @@ export function DepositRegisterPage({ property }: Props) {
   );
 }
 
-/** R-number + its received event's pay_no as secondary muted text, plus its
- * explicit `StatusChip` — owner ask (2026-08-01): "need some ref too so
- * it's map-able" (the pay_no) and an unambiguous state per thread (the
- * chip). `receivedPmsRef` is `null` for `OrphanAppliedRow` (no received
- * event exists by definition) — renders the R-number alone in that case. */
+/** Guest name (when known) as the primary line with the R-number + pay_no
+ * refs demoted to a muted secondary line, plus the thread's explicit
+ * `StatusChip` — owner ask (2026-08-01, guest name): "show the booking
+ * guest name ... full form". `guestName` is nullable (a thread whose
+ * `ht_customers` join found nothing anywhere in its events) — renders
+ * EXACTLY today's ref-only layout in that case, never an empty name line.
+ * `receivedPmsRef` is `null` for `OrphanAppliedRow` (no received event
+ * exists by definition) — omitted from the secondary line in that case. */
 function RNumberRef({
   rNumber,
   receivedPmsRef,
   status,
   appliedChRef,
   appliedDateBangkok,
+  guestName,
 }: {
   rNumber: string;
   receivedPmsRef: string | null;
   status: DepositThreadStatus;
   appliedChRef: string | null;
   appliedDateBangkok: string | null;
+  guestName: string | null;
 }) {
+  const refs = receivedPmsRef ? `${rNumber} · ${receivedPmsRef}` : rNumber;
   return (
     <span className="flex flex-col gap-1">
-      <span className="font-semibold text-ink">{rNumber}</span>
-      {receivedPmsRef && <span className="text-[11px] font-normal text-ink-muted">{receivedPmsRef}</span>}
+      {guestName ? (
+        <>
+          <span className="font-semibold text-ink">{guestName}</span>
+          <span className="text-[11px] font-normal text-ink-muted">{refs}</span>
+        </>
+      ) : (
+        <>
+          <span className="font-semibold text-ink">{rNumber}</span>
+          {receivedPmsRef && <span className="text-[11px] font-normal text-ink-muted">{receivedPmsRef}</span>}
+        </>
+      )}
       <StatusChip status={status} appliedChRef={appliedChRef} appliedDateBangkok={appliedDateBangkok} />
     </span>
   );
@@ -508,17 +672,30 @@ function PageHeader({ property }: { property: Property }) {
  * row. Voided events are included (greyed, "(ยกเลิก)") but never advance
  * the running balance — mirrors `buildMonthlyReconciliation`'s own
  * voided-excluded sums.
+ *
+ * Pill (owner ask, 2026-08-01): the ROW'S OWN totals are never touched by
+ * `filter` — the totals row above still shows every event this month,
+ * matching or not (accounting completeness, same rule as สรุปรายเดือน
+ * itself). Only the expanded per-event list dims (never removes) a row
+ * whose owning thread is outside the current filter, via `agingRNumbers`
+ * — see `threadBucketMatchesFilter`'s doc comment for why set-membership
+ * against `aging` is enough to classify a thread without a second,
+ * duplicated copy of `deriveDepositThreadStatus` on the client.
  */
 function MonthlyRow({
   row,
   events,
   expanded,
   onToggle,
+  filter,
+  agingRNumbers,
 }: {
   row: DepositMonthlyReconciliation;
   events: DepositRegisterEvent[];
   expanded: boolean;
   onToggle: () => void;
+  filter: DepositFilterBucket;
+  agingRNumbers: ReadonlySet<string>;
 }) {
   const monthEvents = useMemo(
     () =>
@@ -580,27 +757,38 @@ function MonthlyRow({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line/60">
-                  {eventRows.map(({ event, runningBalance: bal }, i) => (
-                    <tr
-                      key={`${event.pmsRef}-${event.kind}-${i}`}
-                      className={event.voided ? "text-ink-muted opacity-60" : "text-ink"}
-                    >
-                      <td className="py-1 pr-3 tabular-nums">
-                        {event.dateBangkok ? isoToBuddhist(event.dateBangkok) : "-"}
-                      </td>
-                      <td className="py-1 pr-3">
-                        {depositKindLabelTh(event.kind)}
-                        {event.voided && <span className="ml-1 text-[10px] font-semibold text-bad">(ยกเลิก)</span>}
-                      </td>
-                      <td className="py-1 pr-3">{depositEventRefLabel(event)}</td>
-                      <td className="py-1 pr-3">{event.tender ? DEPOSIT_TENDER_LABELS_TH[event.tender] : "-"}</td>
-                      <td className="py-1 pr-3 text-right tabular-nums">
-                        {event.kind === "received" ? "+" : "-"}
-                        {formatSatang(event.amountSatang)}
-                      </td>
-                      <td className="py-1 text-right tabular-nums">{bal !== null ? formatSatang(bal) : "-"}</td>
-                    </tr>
-                  ))}
+                  {eventRows.map(({ event, runningBalance: bal }, i) => {
+                    // Dim (never remove) an event whose owning thread falls
+                    // outside the current pill filter — removing it would
+                    // make this month's totals row above stop visibly
+                    // footing against the events actually listed.
+                    const dimmed = !threadBucketMatchesFilter(event.rNumber, agingRNumbers, filter);
+                    return (
+                      <tr
+                        key={`${event.pmsRef}-${event.kind}-${i}`}
+                        className={
+                          (event.voided ? "text-ink-muted opacity-60" : "text-ink") + (dimmed ? " opacity-40" : "")
+                        }
+                      >
+                        <td className="py-1 pr-3 tabular-nums">
+                          {event.dateBangkok ? isoToBuddhist(event.dateBangkok) : "-"}
+                        </td>
+                        <td className="py-1 pr-3">
+                          {depositKindLabelTh(event.kind)}
+                          {event.voided && <span className="ml-1 text-[10px] font-semibold text-bad">(ยกเลิก)</span>}
+                        </td>
+                        <td className="py-1 pr-3">
+                          <EventGuestRef event={event} />
+                        </td>
+                        <td className="py-1 pr-3">{event.tender ? DEPOSIT_TENDER_LABELS_TH[event.tender] : "-"}</td>
+                        <td className="py-1 pr-3 text-right tabular-nums">
+                          {event.kind === "received" ? "+" : "-"}
+                          {formatSatang(event.amountSatang)}
+                        </td>
+                        <td className="py-1 text-right tabular-nums">{bal !== null ? formatSatang(bal) : "-"}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -637,6 +825,7 @@ function AgingRow({
             status={row.status}
             appliedChRef={row.appliedChRef}
             appliedDateBangkok={row.appliedDateBangkok}
+            guestName={row.guestName}
           />
         </td>
         <td className="px-4 py-2 text-right tabular-nums text-ink">{formatSatang(row.receivedSatang)}</td>
@@ -685,6 +874,7 @@ function MismatchedRow({
           status={row.status}
           appliedChRef={row.appliedChRef}
           appliedDateBangkok={row.appliedDateBangkok}
+          guestName={row.guestName}
         />
         <div className="flex items-center gap-3 tabular-nums">
           <span className="text-ink-muted">รับ {formatSatang(row.receivedSatang)}</span>
@@ -724,6 +914,7 @@ function OrphanAppliedRow({
           status={row.status}
           appliedChRef={row.appliedChRef}
           appliedDateBangkok={row.appliedDateBangkok}
+          guestName={row.guestName}
         />
         <span className="font-semibold text-warn tabular-nums">ตัดยอด {formatSatang(row.appliedSatang)}</span>
       </div>

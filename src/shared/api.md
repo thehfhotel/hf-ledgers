@@ -892,11 +892,12 @@ endpoints below continue sequentially from 30.
       that scope of line (never the R-number, which is parsed from the
       label suffix instead); `null` for received/refunded events (their
       `ledger_cin_no` is already `rNumber`, never duplicated here) and for
-      an applied row whose `ledger_cin_no` is itself blank. The client
-      (`DepositRegisterPage.tsx`) filters this by `dateBangkok`'s
-      `"YYYY-MM"` prefix to drive สรุปรายเดือน's expandable per-month event
-      list, and separately by `kind === "applied" && !voided` for the
-      ตัดยอดแล้วล่าสุด section.
+      an applied row whose `ledger_cin_no` is itself blank. Also carries
+      `guestName: string | null` (owner ask, 2026-08-01, guest name — see
+      below). The client (`DepositRegisterPage.tsx`) filters this by
+      `dateBangkok`'s `"YYYY-MM"` prefix to drive สรุปรายเดือน's expandable
+      per-month event list, and separately by `kind === "applied" &&
+      !voided` for the ตัดยอดแล้วล่าสุด section.
     - **`receivedPmsRef`, `status`, `appliedChRef`, `appliedDateBangkok`
       (owner ask, 2026-08-01) — additive fields on EVERY
       `aging`/`exceptions.mismatched`/`exceptions.orphanApplied` row.**
@@ -922,6 +923,28 @@ endpoints below continue sequentially from 30.
       via `events` (a month's expandable row) or the client's
       ตัดยอดแล้วล่าสุด section (built client-side by filtering `events`,
       no separate endpoint).
+    - **`guestName: string | null` (owner ask, 2026-08-01, deposit register
+      guest name) — additive, on EVERY `aging`/`exceptions.mismatched`/
+      `exceptions.orphanApplied` row AND on every `events` entry.**
+      `DEPOSIT_LEDGER_QUERY` gained the same `ht_customers` LEFT JOIN
+      `pms-prefill.ts`'s `LEDGER_QUERY` already used (copied verbatim —
+      the C-prefix join condition verified live 2026-07-30), selecting
+      only `cust_title`/`cust_firstname`/`cust_lastname`/`cust_name2` (the
+      four columns the `ledger_ro` role is granted on `ht_customers`).
+      Assembled by the SAME `buildGuestName()` pms-prefill.ts uses
+      (exported, reused — never a second copy): title glued onto the
+      first name with no space, then the last name (preferring
+      `cust_lastname`, falling back to `cust_name2` when blank) — see
+      `buildGuestName`'s own doc comment for the full per-property data
+      shape this rule is based on. On `events`, `guestName` is that EVENT's
+      own join result. On `aging`/`exceptions.*` rows, `guestName` is the
+      THREAD's guest: the received event's guest wins; if it has none
+      (e.g. the orphanApplied shape, no received event at all), falls back
+      to any other event's guest in the thread (`deriveThreadGuestName()`,
+      `src/server/deposit-register.ts`) — deliberately NOT voided-aware
+      (guest identity is a property of the person, not of whether that
+      particular payment line was later cancelled, unlike the money sums).
+      `null` whenever no event in scope has an `ht_customers` match.
 
 31. **`PUT /api/:property/deposits/:rNumber/note`** — body `{ note: string |
     null, resolved: boolean }` → `DepositNote`. `:rNumber` must match

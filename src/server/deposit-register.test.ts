@@ -28,7 +28,9 @@ import {
 } from "./deposit-register.ts";
 
 /** Default row: a single-line จ่ายล่วงหน้า (received) payment, cash tender,
- * everything else zeroed. */
+ * everything else zeroed. `cust_*` default to `null` (no `ht_customers`
+ * match) — the guest-name-specific tests below override them explicitly,
+ * same "everything else zeroed" default philosophy as the money columns. */
 function row(overrides: Partial<RawDepositLedgerRow>): RawDepositLedgerRow {
   return {
     ledger_legacy_id: 1,
@@ -44,6 +46,10 @@ function row(overrides: Partial<RawDepositLedgerRow>): RawDepositLedgerRow {
     ledger_amount: "890.00",
     ledger_free: "0",
     ledger_note: null,
+    cust_title: null,
+    cust_firstname: null,
+    cust_lastname: null,
+    cust_name2: null,
     ...overrides,
   };
 }
@@ -59,6 +65,7 @@ function event(overrides: Partial<DepositLedgerEvent>): DepositLedgerEvent {
     voided: false,
     tender: "cash",
     chRef: null,
+    guestName: null,
     ...overrides,
   };
 }
@@ -91,9 +98,50 @@ describe("classifyDepositRow", () => {
       voided: false,
       tender: "cash",
       chRef: null,
+      guestName: null,
     });
     expect(classified!.unparsedAppliedBookingNo).toBe(false);
     expect(classified!.zeroTenderRow).toBe(false);
+  });
+
+  // Owner ask (2026-08-01, deposit register guest name): the SAME
+  // `buildGuestName` assembler pms-prefill.ts uses (exported, reused
+  // verbatim — never a second copy) — these mirror two of that module's
+  // own real-data rules (pms-prefill.test.ts) to prove the reuse actually
+  // wires through this module's own row shape.
+  describe("guestName (reused buildGuestName)", () => {
+    test("title glued onto firstname with no space, lastname appended with a space", () => {
+      const classified = classifyDepositRow(
+        row({ cust_title: "นาย", cust_firstname: "สมชาย", cust_lastname: "ใจดี", cust_name2: "" }),
+      );
+      expect(classified!.event.guestName).toBe("นายสมชาย ใจดี");
+    });
+
+    test("blank cust_lastname falls back to cust_name2 (the real hotelnew/HF pattern)", () => {
+      const classified = classifyDepositRow(
+        row({ cust_title: "นาย", cust_firstname: "ธนัช", cust_lastname: "", cust_name2: "พลอาจ" }),
+      );
+      expect(classified!.event.guestName).toBe("นายธนัช พลอาจ");
+    });
+
+    test("no ht_customers match at all (every cust_* column null): guestName null, event still fully classified", () => {
+      const classified = classifyDepositRow(row({}));
+      expect(classified!.event.guestName).toBeNull();
+    });
+
+    test("applied rows resolve guestName the same way as received/refunded rows", () => {
+      const classified = classifyDepositRow(
+        row({
+          ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R014843",
+          ledger_cin_no: "CH26-005269",
+          ledger_free: "890.00",
+          cust_title: "น.ส.",
+          cust_firstname: "แพรวา",
+          cust_lastname: "สุขใจ",
+        }),
+      );
+      expect(classified!.event.guestName).toBe("น.ส.แพรวา สุขใจ");
+    });
   });
 
   test("คืนเงินจองห้อง (refunded): amount is the abs of the summed tender columns (C0's negated-column finding)", () => {
@@ -275,6 +323,51 @@ describe("buildDepositThreads", () => {
     const threads = buildDepositThreads(events);
     expect(threads.map((t) => t.rNumber)).toEqual(["R014843", "R015834"]);
   });
+
+  // Owner ask (2026-08-01, deposit register guest name): "a thread's
+  // guestName = the received event's guest (fall back to any event's)".
+  describe("guestName derivation", () => {
+    test("the received event's guest wins even when a later applied event carries a different name", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", guestName: "นายสมชาย ใจดี" }),
+        // A mismatched customer join on the applied line must never override
+        // the received event's guest — received is the "who paid it" moment.
+        event({ rNumber: "R014843", kind: "applied", guestName: "นางสาวอื่น อื่น" }),
+      ];
+      expect(buildDepositThreads(events)[0]!.guestName).toBe("นายสมชาย ใจดี");
+    });
+
+    test("no received event (orphanApplied shape) falls back to any event's guest", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R020000", kind: "applied", guestName: "นายออร์เฟิน ตัดยอด" }),
+      ];
+      expect(buildDepositThreads(events)[0]!.guestName).toBe("นายออร์เฟิน ตัดยอด");
+    });
+
+    test("received event exists but its own guestName is null: falls back to another event's guest", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", guestName: null }),
+        event({ rNumber: "R014843", kind: "applied", guestName: "นายสมชาย ใจดี" }),
+      ];
+      expect(buildDepositThreads(events)[0]!.guestName).toBe("นายสมชาย ใจดี");
+    });
+
+    test("null-tolerant: no event in the thread has a guestName -> thread guestName null", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", guestName: null }),
+        event({ rNumber: "R014843", kind: "applied", guestName: null }),
+      ];
+      expect(buildDepositThreads(events)[0]!.guestName).toBeNull();
+    });
+
+    test("a voided event's guestName still counts toward the fallback (identity is not money)", () => {
+      const events: DepositLedgerEvent[] = [
+        event({ rNumber: "R014843", kind: "received", guestName: null, voided: true }),
+        event({ rNumber: "R014843", kind: "applied", guestName: "นายสมชาย ใจดี", voided: true }),
+      ];
+      expect(buildDepositThreads(events)[0]!.guestName).toBe("นายสมชาย ใจดี");
+    });
+  });
 });
 
 // Owner ask (2026-08-01): the register must make a deposit's STATE
@@ -384,6 +477,7 @@ describe("buildDepositExceptions", () => {
         firstEventDate: "2026-07-31",
         events: [],
         status: "applied",
+        guestName: null,
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -402,6 +496,7 @@ describe("buildDepositExceptions", () => {
         firstEventDate: null,
         events: [],
         status: "applied",
+        guestName: null,
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -420,6 +515,7 @@ describe("buildDepositExceptions", () => {
         firstEventDate: "2026-08-01",
         events: [],
         status: "waitingCheckin",
+        guestName: null,
       },
     ];
     const { mismatched, orphanApplied } = buildDepositExceptions(threads);
@@ -438,6 +534,7 @@ describe("buildDepositExceptions", () => {
         firstEventDate: "2026-08-01",
         events: [],
         status: "applied",
+        guestName: null,
       },
     ];
     const { mismatched } = buildDepositExceptions(threads);
@@ -574,6 +671,7 @@ describe("buildDepositRegisterData (row-level, end to end)", () => {
         voided: false,
         tender: "cash",
         chRef: null,
+        guestName: null,
       },
       {
         legacyId: 2,
@@ -585,6 +683,7 @@ describe("buildDepositRegisterData (row-level, end to end)", () => {
         voided: false,
         tender: null,
         chRef: "CH26-009000",
+        guestName: null,
       },
     ]);
   });

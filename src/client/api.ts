@@ -491,8 +491,19 @@ type DepositStatusFields = {
   appliedDateBangkok: string | null;
 };
 
+/** Owner ask (2026-08-01, deposit register guest name): the thread's guest
+ * — the received event's guest, falling back to any event's (see
+ * `deriveThreadGuestName` in `src/server/deposit-register.ts`) — `null`
+ * when no event in the thread has an `ht_customers` match. Carried on
+ * every thread-shaped row (aging + both exception buckets), same
+ * "additive" treatment as `receivedPmsRef`. */
+interface DepositGuestNameField {
+  guestName: string | null;
+}
+
 export type DepositAgingRow = DepositNoteFields &
-  DepositStatusFields & {
+  DepositStatusFields &
+  DepositGuestNameField & {
     rNumber: string;
     receivedSatang: number;
     appliedSatang: number;
@@ -506,7 +517,8 @@ export type DepositAgingRow = DepositNoteFields &
   };
 
 export type DepositMismatchedException = DepositNoteFields &
-  DepositStatusFields & {
+  DepositStatusFields &
+  DepositGuestNameField & {
     rNumber: string;
     receivedSatang: number;
     appliedSatang: number;
@@ -515,7 +527,8 @@ export type DepositMismatchedException = DepositNoteFields &
   };
 
 export type DepositOrphanAppliedException = DepositNoteFields &
-  DepositStatusFields & {
+  DepositStatusFields &
+  DepositGuestNameField & {
     rNumber: string;
     appliedSatang: number;
     receivedPmsRef: string | null;
@@ -538,6 +551,11 @@ export interface DepositRegisterEvent {
   amountSatang: number;
   voided: boolean;
   chRef: string | null;
+  /** Owner ask (2026-08-01, deposit register guest name): this event's own
+   * `ht_customers` join result, `null` when no match/no name on file. See
+   * `DepositAgingRow`'s `guestName` for the thread-level (rather than
+   * event-level) equivalent used on aging/exception rows. */
+  guestName: string | null;
 }
 
 /** `rNumber` is nullable (review fix): a voided row can itself carry an

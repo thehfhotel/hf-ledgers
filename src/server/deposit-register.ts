@@ -23,6 +23,7 @@ import {
   DEPOSIT_APPLIED_PREFIX,
   DS_NAME_DEPOSIT_RECEIVED,
   DS_NAME_DEPOSIT_REFUND,
+  buildGuestName,
   getPmsClient,
   parseAppliedBookingNo,
   parseLedgerSatang,
@@ -32,9 +33,12 @@ import {
 /**
  * One raw `ht_payment_ledger` row from the three deposit-lifecycle ds_names
  * only (see `DEPOSIT_LEDGER_QUERY`'s WHERE). Deliberately narrower than
- * pms-prefill.ts's `RawLedgerRow` — no customer join (guest name is not
- * part of this register per the plan), no `ledger_ds_label`/`ledger_ds_id`
- * (never read here). `ledger_pay_date` is typed defensively as
+ * pms-prefill.ts's `RawLedgerRow` in most respects — no `ledger_ds_label`/
+ * `ledger_ds_id` (never read here) — but DOES carry the same `ht_customers`
+ * join columns as `RawLedgerRow` (owner ask, 2026-08-01, deposit register
+ * guest name): `cust_title`/`cust_firstname`/`cust_lastname`/`cust_name2`,
+ * the exact four the `ledger_ro` role is granted on `ht_customers` — select
+ * nothing else from that table. `ledger_pay_date` is typed defensively as
  * `string | Date` — Bun's Postgres driver's exact return shape for a
  * TIMESTAMP column selected for the first time in this codebase is
  * unverified, so `paymentDateBangkok()` below accepts either.
@@ -53,6 +57,10 @@ export interface RawDepositLedgerRow {
   ledger_amount: string | null;
   ledger_free: string | null;
   ledger_note: string | null;
+  cust_title: string | null;
+  cust_firstname: string | null;
+  cust_lastname: string | null;
+  cust_name2: string | null;
 }
 
 /**
@@ -68,6 +76,12 @@ export interface RawDepositLedgerRow {
  * for completeness/future tripwires (mirrors `RawLedgerRow`'s full column
  * set) even though today's classification reads only `ledger_free` for an
  * applied line's amount (same V1 rule as pms-prefill.ts).
+ *
+ * The `ht_customers` LEFT JOIN (owner ask, 2026-08-01, deposit register
+ * guest name) is copied VERBATIM from pms-prefill.ts's `LEDGER_QUERY` — the
+ * same C-prefix join condition verified live 2026-07-30 (183/183 of a
+ * week's payments join) — never re-derived, so the two queries can never
+ * disagree on how a payment line finds its customer.
  */
 export const DEPOSIT_LEDGER_QUERY = `
   SELECT
@@ -83,8 +97,18 @@ export const DEPOSIT_LEDGER_QUERY = `
     l.ledger_web,
     l.ledger_amount,
     l.ledger_free,
-    l.ledger_note
+    l.ledger_note,
+    c.cust_title,
+    c.cust_firstname,
+    c.cust_lastname,
+    c.cust_name2
   FROM ht_payment_ledger l
+  LEFT JOIN ht_customers c
+    -- ledger_cust_no is a C-prefixed string ('C22006'); legacy_id is the bare
+    -- integer (22006). Verified against live data 2026-07-30 (183/183 of a
+    -- week's payments join); the naive equality is a type error in Postgres.
+    ON l.ledger_cust_no = 'C' || c.legacy_id::text
+    OR l.ledger_cust_no = c.legacy_id::text
   WHERE l.ledger_ds_name = '${DS_NAME_DEPOSIT_RECEIVED}'
      OR l.ledger_ds_name = '${DS_NAME_DEPOSIT_REFUND}'
      OR l.ledger_ds_name LIKE '${DEPOSIT_APPLIED_PREFIX}%'
@@ -143,6 +167,15 @@ export interface DepositLedgerEvent {
    * R-number, carried as `rNumber` — never duplicated here) and for an
    * applied row whose `ledger_cin_no` is itself blank. */
   chRef: string | null;
+  /** Owner ask (2026-08-01, deposit register guest name): this EVENT's own
+   * `ht_customers` join result, via the shared `buildGuestName` (reused
+   * verbatim from pms-prefill.ts — see `DEPOSIT_LEDGER_QUERY`'s doc
+   * comment). `null` when the join found no matching customer row or the
+   * customer has no name on file. Every event carries its own copy (rather
+   * than only the thread) because the ตัดยอดแล้วล่าสุด list and the
+   * expanded month event rows are event-level, not thread-level, views —
+   * see `DepositThread.guestName` for the thread-level derivation. */
+  guestName: string | null;
 }
 
 /** COALESCE(NULLIF(pay_no, ''), 'lid:'||legacy_id) — same payment-grouping
@@ -271,6 +304,7 @@ export function classifyDepositRow(row: RawDepositLedgerRow): ClassifiedDepositR
   const voided = (row.ledger_status ?? null) === "ยกเลิก";
   const dateBangkok = paymentDateBangkok(row.ledger_pay_date);
   const pmsRef = paymentKey(row);
+  const guestName = buildGuestName(row.cust_title, row.cust_firstname, row.cust_lastname, row.cust_name2);
 
   if (dsName === DS_NAME_DEPOSIT_RECEIVED || dsName === DS_NAME_DEPOSIT_REFUND) {
     const kind: DepositLedgerEventKind = dsName === DS_NAME_DEPOSIT_REFUND ? "refunded" : "received";
@@ -279,7 +313,18 @@ export function classifyDepositRow(row: RawDepositLedgerRow): ClassifiedDepositR
     const zeroTenderRow = amountSatang === 0 && parseLedgerSatang(row.ledger_amount) !== 0;
     const tender = dominantTender(row);
     return {
-      event: { legacyId: row.ledger_legacy_id, pmsRef, kind, rNumber, dateBangkok, amountSatang, voided, tender, chRef: null },
+      event: {
+        legacyId: row.ledger_legacy_id,
+        pmsRef,
+        kind,
+        rNumber,
+        dateBangkok,
+        amountSatang,
+        voided,
+        tender,
+        chRef: null,
+        guestName,
+      },
       unparsedAppliedBookingNo: false,
       zeroTenderRow,
     };
@@ -300,6 +345,7 @@ export function classifyDepositRow(row: RawDepositLedgerRow): ClassifiedDepositR
         voided,
         tender: null,
         chRef,
+        guestName,
       },
       unparsedAppliedBookingNo: rNumber === null,
       zeroTenderRow: false,
@@ -332,6 +378,31 @@ export interface DepositThread {
   firstEventDate: string | null;
   events: DepositLedgerEvent[];
   status: DepositThreadStatus;
+  /** Owner ask (2026-08-01, deposit register guest name): the thread's
+   * guest — see `deriveThreadGuestName()` below for the exact rule
+   * ("the received event's guest, fall back to any event's"). `null` when
+   * no event in the thread has a `guestName` (no `ht_customers` match
+   * anywhere in the thread). */
+  guestName: string | null;
+}
+
+/**
+ * A thread's guest, per the owner's rule: the RECEIVED event's guest wins
+ * (that is the deposit's "who paid it" moment); if no received event
+ * carries a name — the R014843-orphan-applied shape, or a received event
+ * whose own join simply found nothing — fall back to any other event's
+ * name in the thread (an applied/refunded line joins the SAME
+ * `ht_customers` row in practice, so this is very rarely a different
+ * person). Deliberately does not special-case `voided` — guest identity
+ * is a property of the PERSON, not of whether that particular payment line
+ * was later cancelled, unlike the money sums above which exclude voided
+ * events on purpose.
+ */
+function deriveThreadGuestName(events: DepositLedgerEvent[]): string | null {
+  const received = events.find((e) => e.kind === "received" && e.guestName !== null);
+  if (received) return received.guestName;
+  const any = events.find((e) => e.guestName !== null);
+  return any ? any.guestName : null;
 }
 
 /**
@@ -419,6 +490,7 @@ export function buildDepositThreads(events: DepositLedgerEvent[]): DepositThread
       firstEventDate,
       events: threadEvents,
       status: deriveDepositThreadStatus({ receivedSatang, appliedSatang, refundedSatang, outstandingSatang }),
+      guestName: deriveThreadGuestName(threadEvents),
     });
   }
 

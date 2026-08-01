@@ -2041,6 +2041,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       firstEventDate: "2026-08-01",
       events: [],
       status: "waitingCheckin",
+      guestName: null,
       ...overrides,
     };
   }
@@ -2111,7 +2112,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       property: string;
       generatedAt: string;
       monthly: unknown[];
-      aging: Array<{ rNumber: string; status: string; receivedPmsRef: string | null }>;
+      aging: Array<{ rNumber: string; status: string; receivedPmsRef: string | null; guestName: string | null }>;
       exceptions: {
         mismatched: Array<{
           rNumber: string;
@@ -2125,6 +2126,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           receivedPmsRef: string | null;
           appliedChRef: string | null;
           appliedDateBangkok: string | null;
+          guestName: string | null;
         }>;
         orphanApplied: Array<{
           rNumber: string;
@@ -2136,6 +2138,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           receivedPmsRef: string | null;
           appliedChRef: string | null;
           appliedDateBangkok: string | null;
+          guestName: string | null;
         }>;
       };
       unparsedAppliedRows: number;
@@ -2167,6 +2170,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         receivedPmsRef: null,
         appliedChRef: null,
         appliedDateBangkok: null,
+        guestName: null,
       },
     ]);
     expect(res.body.exceptions.orphanApplied).toEqual([
@@ -2180,6 +2184,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         receivedPmsRef: null,
         appliedChRef: null,
         appliedDateBangkok: null,
+        guestName: null,
       },
     ]);
     expect(res.body.unparsedAppliedRows).toBe(2);
@@ -2253,6 +2258,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       voided: false,
       tender: "cash",
       chRef: null,
+      guestName: "นายสมชาย ใจดี",
     };
     const appliedEvent: DepositLedgerEvent = {
       legacyId: 2,
@@ -2264,6 +2270,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
       voided: false,
       tender: null,
       chRef: "CH26-005269",
+      guestName: "นายสมชาย ใจดี",
     };
     const flatEvents = [receivedEvent, appliedEvent];
 
@@ -2277,6 +2284,12 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
           firstEventDate: "2026-08-01",
           status: "partial",
           events: flatEvents,
+          // Owner ask (2026-08-01): the thread-level guestName the route
+          // exposes on the aging row comes straight off the thread object
+          // (deriveThreadGuestName is exercised in deposit-register.test.ts;
+          // this fixture just supplies the already-derived value, same
+          // pattern every other thread field in this fixture already uses).
+          guestName: "นายสมชาย ใจดี",
         }),
       ],
       monthly: [],
@@ -2296,6 +2309,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         receivedPmsRef: string | null;
         appliedChRef: string | null;
         appliedDateBangkok: string | null;
+        guestName: string | null;
       }>;
       events: Array<{
         dateBangkok: string | null;
@@ -2306,6 +2320,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         amountSatang: number;
         voided: boolean;
         chRef: string | null;
+        guestName: string | null;
       }>;
     }>("GET", `/${PROPERTY}/deposits/register`);
 
@@ -2315,6 +2330,10 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     expect(agingRow.receivedPmsRef).toBe("R2608-0001");
     expect(agingRow.appliedChRef).toBe("CH26-005269");
     expect(agingRow.appliedDateBangkok).toBe("2026-08-10");
+    // Owner ask (2026-08-01, deposit register guest name): the aging row's
+    // guestName is the thread's own (already-derived) guestName field,
+    // passed through untouched.
+    expect(agingRow.guestName).toBe("นายสมชาย ใจดี");
 
     expect(res.body.events).toEqual([
       {
@@ -2326,6 +2345,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         amountSatang: 50_000,
         voided: false,
         chRef: null,
+        guestName: "นายสมชาย ใจดี",
       },
       {
         dateBangkok: "2026-08-10",
@@ -2336,6 +2356,7 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
         amountSatang: 20_000,
         voided: false,
         chRef: "CH26-005269",
+        guestName: "นายสมชาย ใจดี",
       },
     ]);
   });

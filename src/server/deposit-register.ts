@@ -568,8 +568,9 @@ export interface MonthlyDepositReconciliation {
  * a zero-activity month never breaks the opening/closing chain, since the
  * next month-with-data's opening is still exactly the prior data-month's
  * closing regardless of how many empty months sit between them. Returned in
- * CHRONOLOGICAL (ascending) order — reversing for "newest first" display is
- * the client's job (see api.md / DepositRegisterPage.tsx).
+ * CHRONOLOGICAL (ascending) order — the client renders สรุปรายเดือน in this
+ * SAME ascending order (owner ask, 2026-08-01, live-register fix round: was
+ * reversed client-side for newest-first; see api.md / DepositRegisterPage.tsx).
  */
 export function buildMonthlyReconciliation(events: DepositLedgerEvent[]): MonthlyDepositReconciliation[] {
   const byMonth = new Map<string, { received: number; applied: number; refunded: number }>();
@@ -616,13 +617,43 @@ export interface OrphanAppliedDepositException {
   appliedSatang: number;
 }
 
+/** A thread flagged `overRefunded` — `refunded > received` (beyond
+ * `RECONCILE_TOLERANCE_SATANG`), i.e. the register paid back more than it
+ * actively holds a receipt for. `diffSatang = receivedSatang - refundedSatang`
+ * — ALWAYS negative by construction (never abs'd, same signed convention as
+ * `MismatchedDepositException.diffSatang`; here the sign never actually
+ * varies, but the field name/shape stays consistent across both exception
+ * kinds rather than inventing an unsigned "excess" field). The live case,
+ * owner fix round 2026-08-01, R015832: the received row was VOIDED
+ * (`ledger_status = 'ยกเลิก'`, correctly excluded from `receivedSatang`,
+ * which lands at exactly 0) while its คืนเงินจองห้อง refund row stayed
+ * ACTIVE and correctly subtracted 39_500 satang (395.00) — one cancellation
+ * reversing the money twice, closing the month 395.00 low with no signal
+ * anywhere until now. `refunded > received` implies
+ * `outstandingSatang = received - applied - refunded < 0` REGARDLESS of
+ * `appliedSatang` (subtracting a further `applied >= 0` only makes it more
+ * negative) — so an `overRefunded` thread can never also appear in `aging`
+ * (`outstandingSatang > 0`), the same "complementary, never exclusive"
+ * relationship `mismatched` already has with `aging`. NOT mutually exclusive
+ * with `mismatched`/`orphanApplied` either — a thread with a small early
+ * over-refund AND a later mismatched application is a real (if rare) shape,
+ * so this bucket is computed independently below, never as an `else` branch
+ * off the other two. */
+export interface OverRefundedDepositException {
+  rNumber: string;
+  receivedSatang: number;
+  refundedSatang: number;
+  diffSatang: number;
+}
+
 export interface DepositExceptions {
   mismatched: MismatchedDepositException[];
   orphanApplied: OrphanAppliedDepositException[];
+  overRefunded: OverRefundedDepositException[];
 }
 
 /**
- * Classifies every thread into the two exception buckets. Runs over ALL
+ * Classifies every thread into the three exception buckets. Runs over ALL
  * threads (not just the aging-filtered outstanding>0 subset, which the
  * endpoint computes separately) — a `mismatched` thread commonly has
  * applied > received, which makes `outstandingSatang` NEGATIVE and so it
@@ -630,13 +661,18 @@ export interface DepositExceptions {
  * without ever being "outstanding" in the aging sense. Deliberately does
  * NOT special-case "applied is anomalously small vs. anomalously large" —
  * both directions trip the same `|diff| > tolerance` rule, per the plan.
+ * `overRefunded` (owner fix round, 2026-08-01, the R015832 case) is checked
+ * independently of the `mismatched`/`orphanApplied` if/else — see
+ * `OverRefundedDepositException`'s doc comment for why it must stay additive
+ * rather than folded into that chain.
  */
 export function buildDepositExceptions(threads: DepositThread[]): DepositExceptions {
   const mismatched: MismatchedDepositException[] = [];
   const orphanApplied: OrphanAppliedDepositException[] = [];
+  const overRefunded: OverRefundedDepositException[] = [];
 
   for (const thread of threads) {
-    const { rNumber, receivedSatang, appliedSatang } = thread;
+    const { rNumber, receivedSatang, appliedSatang, refundedSatang } = thread;
     if (receivedSatang > 0 && appliedSatang > 0) {
       const diffSatang = appliedSatang - receivedSatang;
       if (Math.abs(diffSatang) > RECONCILE_TOLERANCE_SATANG) {
@@ -645,9 +681,13 @@ export function buildDepositExceptions(threads: DepositThread[]): DepositExcepti
     } else if (appliedSatang > 0 && receivedSatang === 0) {
       orphanApplied.push({ rNumber, appliedSatang });
     }
+
+    if (refundedSatang - receivedSatang > RECONCILE_TOLERANCE_SATANG) {
+      overRefunded.push({ rNumber, receivedSatang, refundedSatang, diffSatang: receivedSatang - refundedSatang });
+    }
   }
 
-  return { mismatched, orphanApplied };
+  return { mismatched, orphanApplied, overRefunded };
 }
 
 /** One voided event, for the register page's collapsed "ไม่รวมในยอดข้างต้น"

@@ -470,8 +470,9 @@ interface DepositNoteFields {
 }
 
 export interface DepositMonthlyReconciliation {
-  /** Bangkok "YYYY-MM". Returned CHRONOLOGICAL (ascending) — reversing for
-   * "newest first" display (สรุปรายเดือน) is this page's own job. */
+  /** Bangkok "YYYY-MM". Returned CHRONOLOGICAL (ascending) — สรุปรายเดือน
+   * renders this SAME ascending order (owner ask, 2026-08-01, live-register
+   * fix round: was reversed to newest-first in DepositRegisterPage.tsx). */
   month: string;
   openingSatang: number;
   receivedSatang: number;
@@ -562,6 +563,30 @@ export type DepositOrphanAppliedException = DepositNoteFields &
     receivedPmsRef: string | null;
   };
 
+/** Owner fix round (2026-08-01, the R015832 case — see
+ * `src/server/deposit-register.ts`'s `OverRefundedDepositException` doc
+ * comment for the full live shape): a thread whose refund exceeded its own
+ * active receipt (`refundedSatang > receivedSatang`, beyond
+ * `RECONCILE_TOLERANCE_SATANG`) — most commonly because the receipt itself
+ * was voided while its refund stayed active, reversing the same cancellation
+ * twice. `diffSatang = receivedSatang - refundedSatang`, ALWAYS negative by
+ * construction (the excess refunded, never abs'd — same signed field shape
+ * as `DepositMismatchedException.diffSatang`). Carries `receivedTenders` —
+ * unlike `DepositMismatchedException`/`DepositOrphanAppliedException` above
+ * — because this bucket's whole point is "what (if anything) was actually,
+ * actively received", which the other two exception kinds don't need to
+ * ask. */
+export type DepositOverRefundedException = DepositNoteFields &
+  DepositStatusFields &
+  DepositGuestNameField & {
+    rNumber: string;
+    receivedSatang: number;
+    refundedSatang: number;
+    diffSatang: number;
+    receivedPmsRef: string | null;
+    receivedTenders: DepositReceivedTenderAmount[];
+  };
+
 /** One classified deposit-lifecycle event, mirrors
  * `src/server/deposit-register.ts`'s `DepositLedgerEvent` (trimmed to the
  * wire fields — `legacyId` stays server-internal). `tender` is `null` for
@@ -617,6 +642,9 @@ export interface DepositRegisterResponse {
   exceptions: {
     mismatched: DepositMismatchedException[];
     orphanApplied: DepositOrphanAppliedException[];
+    /** Owner fix round (2026-08-01, the R015832 case) — additive, see
+     * `DepositOverRefundedException`'s own doc comment. */
+    overRefunded: DepositOverRefundedException[];
   };
   unparsedAppliedRows: number;
   /** Review fix: three more tripwire counters, none of which invent or drop

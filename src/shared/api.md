@@ -796,7 +796,8 @@ endpoints below continue sequentially from 30.
     generatedAt: string, monthly: MonthlyDepositReconciliation[], aging:
     DepositAgingRow[], finished: DepositAgingRow[], exceptions: { mismatched:
     MismatchedDepositException[], orphanApplied:
-    OrphanAppliedDepositException[] }, unparsedAppliedRows: number,
+    OrphanAppliedDepositException[], overRefunded:
+    OverRefundedDepositException[] }, unparsedAppliedRows: number,
     zeroTenderRows: number, blankBookingNoRows: number, undatedRows: number,
     voided: VoidedDepositEventSummary[], events: DepositRegisterEvent[] }`.
     Same dark-by-default gate as endpoint 26:
@@ -812,9 +813,11 @@ endpoints below continue sequentially from 30.
 
     - `monthly` is the opening/received/applied/refunded/closing
       reconciliation, ONE ROW PER Bangkok month that has at least one active
-      (non-voided) event — **returned CHRONOLOGICAL (ascending)**; reversing
-      for the client's "newest first" สรุปรายเดือน table
-      (`DepositRegisterPage.tsx`) is the client's own job. The first month
+      (non-voided) event — **returned CHRONOLOGICAL (ascending)**, and the
+      client's สรุปรายเดือน table (`DepositRegisterPage.tsx`) renders it in
+      this SAME ascending (oldest-first) order (owner ask, 2026-08-01, live
+      มัดจำ register fix round — was reversed client-side to newest-first).
+      The first month
       with any activity opens at `0` (OWNER-DECIDED, plan D-open-items:
       pre-feature มัดจำ history is out of scope, hfville's first deposit-
       lifecycle month is 2026-03, hf's is 2026-04); every later month's
@@ -860,6 +863,36 @@ endpoints below continue sequentially from 30.
     - `exceptions.orphanApplied`: threads where `appliedSatang > 0 &&
       receivedSatang === 0` — money applied against an R-number with no
       recorded receipt at all.
+    - **`exceptions.overRefunded` (owner fix round, 2026-08-01, live
+      มัดจำ register, real data — the R015832 case) — additive, a THIRD
+      exception bucket.** Threads where `refundedSatang - receivedSatang >
+      RECONCILE_TOLERANCE_SATANG` — the register paid back more than it
+      actively holds a receipt for. The proven live case, R015832: the
+      received row was VOIDED (`ledger_status = 'ยกเลิก'`, correctly excluded
+      from sums — `receivedSatang` lands at exactly `0`) while its
+      คืนเงินจองห้อง refund row (`R2607-0480`) stayed ACTIVE and correctly
+      subtracted 39_500 satang (395.00) — one cancellation reversing the
+      money TWICE, closing the month 395.00 low with no signal anywhere
+      until this fix. `diffSatang = receivedSatang - refundedSatang` —
+      ALWAYS negative by construction (the excess refunded, never abs'd —
+      same signed-field convention as `mismatched.diffSatang`, R015832 ->
+      `diffSatang: -39_500`). Checked INDEPENDENTLY of the
+      `mismatched`/`orphanApplied` branching (never an `else` off that
+      chain) — a thread can appear in `overRefunded` AND `mismatched` at
+      once (a small early over-refund plus a later, separately-mismatched
+      application is a real, if rare, shape). `refundedSatang > receivedSatang`
+      forces `outstandingSatang = receivedSatang - appliedSatang -
+      refundedSatang` NEGATIVE regardless of `appliedSatang` (subtracting a
+      further `appliedSatang >= 0` only makes it more negative) — so an
+      `overRefunded` thread can never appear in `aging` either (confirmed:
+      `aging`'s own `outstandingSatang > 0` filter already excludes it, no
+      change needed there). This row shape carries the SAME enrichment as
+      `mismatched`/`orphanApplied` below (`receivedPmsRef`/`status`/
+      `guestName`/`appliedChRef`/`appliedDateBangkok`/note fields) **PLUS**
+      `receivedTenders` (see that field's own doc further down) — unlike the
+      other two exception kinds, this bucket's whole point is "what (if
+      anything) was actually, actively received", so showing it here is in
+      scope where it wasn't for `mismatched`/`orphanApplied`.
     - `unparsedAppliedRows` is a tripwire count: an applied
       (`ตัดยอดล่วงหน้า Booking No:…`) row whose R-number suffix doesn't match
       `R\d{6}` is still classified and counted toward `monthly`, just
@@ -890,15 +923,20 @@ endpoints below continue sequentially from 30.
       footnote, independent of which threads happen to also be outstanding
       or exceptional. `VoidedDepositEventSummary.rNumber` is nullable for
       exactly that reason.
-    - Every `aging`/`finished`/`exceptions.mismatched`/`exceptions.orphanApplied`
-      row additionally carries `note: string | null`, `resolvedAt: string |
-      null`, `resolvedBy: string | null` — merged from `deposit_notes` by
+    - Every `aging`/`finished`/`exceptions.mismatched`/
+      `exceptions.orphanApplied`/`exceptions.overRefunded` row additionally
+      carries `note: string | null`, `resolvedAt: string | null`,
+      `resolvedBy: string | null` — merged from `deposit_notes` by
       R-number, `null`/`null`/`null` when no note thread exists yet. A
       thread can appear in `aging` AND `exceptions` at once (still
       outstanding, but also mismatched) — the same note applies to both;
       `finished` and `aging` are mutually exclusive (a thread's `status`
       puts it in exactly one bucket), but a `finished` thread can likewise
-      also be an `exceptions.mismatched` row simultaneously.
+      also be an `exceptions.mismatched`/`exceptions.overRefunded` row
+      simultaneously (an `overRefunded` thread's `status` is almost always
+      `"refunded"`, `finished`-bucketed, per `deriveDepositThreadStatus` —
+      see `OverRefundedDepositException`'s own doc comment,
+      `src/server/deposit-register.ts`).
     - **`events` (owner ask, 2026-08-01, register mapability) — additive.**
       The FULL classified event list, every kind INCLUDING voided ones,
       exposed straight off `DepositRegisterData.events` (no
@@ -931,8 +969,8 @@ endpoints below continue sequentially from 30.
       `finished` field above.)
     - **`receivedPmsRef`, `status`, `appliedChRef`, `appliedDateBangkok`
       (owner ask, 2026-08-01) — additive fields on EVERY
-      `aging`/`finished`/`exceptions.mismatched`/`exceptions.orphanApplied`
-      row.**
+      `aging`/`finished`/`exceptions.mismatched`/`exceptions.orphanApplied`/
+      `exceptions.overRefunded` row.**
       `receivedPmsRef: string | null` is that thread's own received
       event's `pmsRef` (voided excluded), `null` when none — lets the
       office find the paper receipt behind an R-number without opening
@@ -955,8 +993,8 @@ endpoints below continue sequentially from 30.
       `events`, for a month's expandable row on สรุปรายเดือน).
     - **`guestName: string | null` (owner ask, 2026-08-01, deposit register
       guest name) — additive, on EVERY `aging`/`finished`/
-      `exceptions.mismatched`/`exceptions.orphanApplied` row AND on every
-      `events` entry.**
+      `exceptions.mismatched`/`exceptions.orphanApplied`/
+      `exceptions.overRefunded` row AND on every `events` entry.**
       `DEPOSIT_LEDGER_QUERY` gained the same `ht_customers` LEFT JOIN
       `pms-prefill.ts`'s `LEDGER_QUERY` already used (copied verbatim —
       the C-prefix join condition verified live 2026-07-30), selecting
@@ -978,8 +1016,15 @@ endpoints below continue sequentially from 30.
       `null` whenever no event in scope has an `ht_customers` match.
     - **`receivedTenders: { tender: DepositTender; amountSatang: number }[]`
       (owner ask, 2026-08-01, มัดจำ register tender visibility) — additive,
-      on EVERY `aging`/`finished` row (NOT on `exceptions.*` rows — out of
-      scope for this ask).** That thread's non-voided `kind: "received"`
+      on EVERY `aging`/`finished` row (NOT on `exceptions.mismatched`/
+      `exceptions.orphanApplied` — out of scope for THAT ask). Owner fix
+      round, 2026-08-01, the R015832 case: ALSO on `exceptions.overRefunded`
+      rows — that bucket's whole point is "what was actually, actively
+      received", so the tender breakdown is directly relevant there in a way
+      it wasn't for the other two exception kinds (usually empty in
+      practice: the R015832 shape's triggering condition is exactly a
+      receipt that's been voided, leaving no active received event to
+      derive a tender from).** That thread's non-voided `kind: "received"`
       events, grouped by `tender` and summed
       (`deriveReceivedTenders()`/`DepositThread.receivedTenders`,
       `src/server/deposit-register.ts`) — usually one entry; a genuine split
@@ -1092,7 +1137,9 @@ from the ds_name's own system-templated suffix via the SAME
 when unparseable (`zeroTenderRow` is always `false` on this branch — that
 tripwire is received/refunded-only). `buildDepositThreads()` groups by
 R-number; `buildMonthlyReconciliation()` builds the opening/closing table;
-`buildDepositExceptions()` derives `mismatched`/`orphanApplied` from threads;
+`buildDepositExceptions()` derives `mismatched`/`orphanApplied`/`overRefunded`
+(owner fix round, 2026-08-01, the R015832 case — see endpoint 30's own
+`exceptions.overRefunded` doc above) from threads;
 `collectVoidedEvents()` (review fix: takes the flat `DepositLedgerEvent[]`
 list, NOT `DepositThread[]` — the threads-based version silently dropped a
 voided event whose R-number was unparseable/blank, since such an event never
@@ -1129,10 +1176,15 @@ nothing applied → `refunded`; `outstandingSatang <= 0` with `appliedSatang >
 0` → `applied` (covers the orphan-applied exception and a mixed applied+
 refund close-out too — a stay is the more informative "where it went" of the
 two). The route (`server.ts`) attaches `status` to every `aging`/
-`exceptions.mismatched`/`exceptions.orphanApplied` row from its thread,
-plus `appliedChRef`/`appliedDateBangkok` via a small `appliedMappingFor()`
-helper (the thread's own events, latest non-voided `applied` one, dateBangkok
-descending) — see endpoint 30's own field-by-field description above.
+`exceptions.mismatched`/`exceptions.orphanApplied`/`exceptions.overRefunded`
+row from its thread, plus `appliedChRef`/`appliedDateBangkok` via a small
+`appliedMappingFor()` helper (the thread's own events, latest non-voided
+`applied` one, dateBangkok descending) — see endpoint 30's own field-by-field
+description above. An `overRefunded` thread's `status` is almost always
+`"refunded"` (no application involved by construction) — `outstandingSatang
+<= 0` is guaranteed whenever `refundedSatang > receivedSatang`, so it always
+lands in the `refunded`/`applied` branches above, never `waitingCheckin`/
+`partial`.
 
 **Re-pull diff flow** (`src/server/db.ts`): `candidateTenderPatch(property,
 candidate)` — the ONE place that decides where PMS money lands on the

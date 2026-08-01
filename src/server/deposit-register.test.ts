@@ -591,6 +591,121 @@ describe("buildDepositExceptions", () => {
     const { mismatched } = buildDepositExceptions(threads);
     expect(mismatched).toEqual([]);
   });
+
+  // Owner fix round (2026-08-01, live มัดจำ register, real data): a refund
+  // reversed money that was never actively received (most commonly because
+  // the received row was voided while its refund stayed active — the exact
+  // R015832 shape). This bucket had no coverage before this fix round.
+  describe("overRefunded (the R015832 case)", () => {
+    test("the proven R015832 shape: receipt voided (receivedSatang lands at 0), refund active -> diffSatang -39_500", () => {
+      const threads: DepositThread[] = [
+        {
+          rNumber: "R015832",
+          receivedSatang: 0, // the received row was voided, excluded here
+          appliedSatang: 0,
+          refundedSatang: 39_500, // the คืนเงินจองห้อง row stayed active
+          outstandingSatang: -39_500,
+          firstEventDate: "2026-07-20",
+          events: [],
+          status: "refunded",
+          guestName: null,
+          receivedTenders: [],
+        },
+      ];
+      const { overRefunded, mismatched, orphanApplied } = buildDepositExceptions(threads);
+      expect(overRefunded).toEqual([
+        { rNumber: "R015832", receivedSatang: 0, refundedSatang: 39_500, diffSatang: -39_500 },
+      ]);
+      // Neither of the other two buckets fires — appliedSatang is 0
+      // throughout, so this thread can never be mismatched/orphanApplied.
+      expect(mismatched).toEqual([]);
+      expect(orphanApplied).toEqual([]);
+    });
+
+    test("partial case: received 50_000 active, refunded 70_000 -> diffSatang -20_000", () => {
+      const threads: DepositThread[] = [
+        {
+          rNumber: "R050010",
+          receivedSatang: 50_000,
+          appliedSatang: 0,
+          refundedSatang: 70_000,
+          outstandingSatang: -20_000,
+          firstEventDate: "2026-08-01",
+          events: [],
+          status: "refunded",
+          guestName: null,
+          receivedTenders: [],
+        },
+      ];
+      const { overRefunded } = buildDepositExceptions(threads);
+      expect(overRefunded).toEqual([
+        { rNumber: "R050010", receivedSatang: 50_000, refundedSatang: 70_000, diffSatang: -20_000 },
+      ]);
+    });
+
+    test("refunded within tolerance of received: NOT flagged", () => {
+      const threads: DepositThread[] = [
+        {
+          rNumber: "R050011",
+          receivedSatang: 50_000,
+          appliedSatang: 0,
+          refundedSatang: 50_050, // 50 satang over — under RECONCILE_TOLERANCE_SATANG (100)
+          outstandingSatang: -50,
+          firstEventDate: "2026-08-01",
+          events: [],
+          status: "refunded",
+          guestName: null,
+          receivedTenders: [],
+        },
+      ];
+      expect(buildDepositExceptions(threads).overRefunded).toEqual([]);
+    });
+
+    test("refunded <= received: never flagged (the ordinary, fully-refunded close-out)", () => {
+      const threads: DepositThread[] = [
+        {
+          rNumber: "R050012",
+          receivedSatang: 89_000,
+          appliedSatang: 0,
+          refundedSatang: 89_000,
+          outstandingSatang: 0,
+          firstEventDate: "2026-08-01",
+          events: [],
+          status: "refunded",
+          guestName: null,
+          receivedTenders: [],
+        },
+      ];
+      expect(buildDepositExceptions(threads).overRefunded).toEqual([]);
+    });
+
+    // Design decision (see OverRefundedDepositException's doc comment):
+    // overRefunded is checked independently of the mismatched/orphanApplied
+    // if/else chain, so a thread can land in BOTH buckets at once — a small
+    // early over-refund plus a later, separately-mismatched application is a
+    // real (if rare) shape, and neither signal should suppress the other.
+    test("a thread can be BOTH mismatched AND overRefunded at once", () => {
+      const threads: DepositThread[] = [
+        {
+          rNumber: "R050013",
+          receivedSatang: 100_000,
+          appliedSatang: 5_000, // small application -> received/applied mismatch
+          refundedSatang: 120_000, // refund alone already exceeds received
+          outstandingSatang: 100_000 - 5_000 - 120_000,
+          firstEventDate: "2026-08-01",
+          events: [],
+          status: "applied",
+          guestName: null,
+          receivedTenders: [],
+        },
+      ];
+      const { mismatched, overRefunded } = buildDepositExceptions(threads);
+      expect(mismatched).toEqual([{ rNumber: "R050013", receivedSatang: 100_000, appliedSatang: 5_000, diffSatang: -95_000 }]);
+      expect(overRefunded).toEqual([
+        { rNumber: "R050013", receivedSatang: 100_000, refundedSatang: 120_000, diffSatang: -20_000 },
+      ]);
+    });
+  });
 });
 
 describe("collectVoidedEvents (review fix: walks events, not threads)", () => {
@@ -825,6 +940,68 @@ describe("buildDepositRegisterData (row-level, end to end)", () => {
         }),
       ]),
     );
+  });
+
+  // Owner fix round (2026-08-01, live มัดจำ register, real data): the exact
+  // R015832 shape built straight from raw rows — a จ่ายล่วงหน้า row VOIDED
+  // (status ยกเลิก) and its own คืนเงินจองห้อง refund row left ACTIVE. Proves,
+  // end to end: (1) the voided receipt is excluded from receivedSatang (it
+  // lands at exactly 0), (2) the active refund still subtracts from
+  // `monthly` exactly as it always did — the fix is purely additive
+  // flagging, never a change to the money totals — and (3) the resulting
+  // thread's outstandingSatang is negative, so it can never appear in the
+  // server route's `aging` list (`threads.filter(t => t.outstandingSatang >
+  // 0)`, server.ts) — only in `buildDepositExceptions`' new `overRefunded`
+  // bucket.
+  test("the R015832 shape end to end: voided receipt + active refund -> overRefunded, absent from aging-eligible threads, monthly totals faithful", () => {
+    const rows: RawDepositLedgerRow[] = [
+      row({
+        ledger_legacy_id: 20,
+        ledger_pay_no: "R2607-9020",
+        ledger_ds_name: "จ่ายล่วงหน้า",
+        ledger_cin_no: "R015832",
+        ledger_pay_date: "2026-07-20T08:00:00.000Z",
+        ledger_status: "ยกเลิก",
+        ledger_cash: "395.00",
+        ledger_amount: "395.00",
+      }),
+      row({
+        ledger_legacy_id: 21,
+        ledger_pay_no: "R2607-0480",
+        ledger_ds_name: "คืนเงินจองห้อง",
+        ledger_cin_no: "R015832",
+        ledger_pay_date: "2026-07-21T08:00:00.000Z",
+        ledger_status: null,
+        ledger_cash: "0",
+        ledger_tran: "-395.00",
+        ledger_amount: "-395.00",
+      }),
+    ];
+
+    const data = buildDepositRegisterData(rows);
+    const thread = data.threads.find((t) => t.rNumber === "R015832")!;
+    expect(thread.receivedSatang).toBe(0); // the voided receipt contributes nothing
+    expect(thread.refundedSatang).toBe(39_500);
+    expect(thread.appliedSatang).toBe(0);
+    expect(thread.outstandingSatang).toBe(-39_500);
+    expect(thread.status).toBe("refunded");
+
+    // (3) never aging-eligible — same `outstandingSatang > 0` predicate the
+    // route (server.ts) filters `aging` with.
+    expect(data.threads.filter((t) => t.outstandingSatang > 0).map((t) => t.rNumber)).not.toContain("R015832");
+
+    // (2) monthly totals are exactly what the refund alone always produced
+    // — voided events were already excluded from `monthly` before this fix;
+    // nothing about that math changes here.
+    expect(data.monthly).toEqual([
+      { month: "2026-07", openingSatang: 0, receivedSatang: 0, appliedSatang: 0, refundedSatang: 39_500, closingSatang: -39_500 },
+    ]);
+
+    // The new signal: this thread — and ONLY this thread — is flagged.
+    const { overRefunded } = buildDepositExceptions(data.threads);
+    expect(overRefunded).toEqual([
+      { rNumber: "R015832", receivedSatang: 0, refundedSatang: 39_500, diffSatang: -39_500 },
+    ]);
   });
 
   test("empty input yields empty everything", () => {

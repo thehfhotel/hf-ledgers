@@ -1409,7 +1409,7 @@ export const api = new Elysia({ prefix: "/api" })
         ...noteFields(t.rNumber),
       }));
 
-    const { mismatched, orphanApplied } = buildDepositExceptions(register.threads);
+    const { mismatched, orphanApplied, overRefunded } = buildDepositExceptions(register.threads);
     const exceptions = {
       mismatched: mismatched.map((m) => ({
         ...m,
@@ -1424,6 +1424,22 @@ export const api = new Elysia({ prefix: "/api" })
         receivedPmsRef: receivedPmsRefFor(o.rNumber),
         status: threadByR.get(o.rNumber)?.status ?? "waitingCheckin",
         guestName: threadByR.get(o.rNumber)?.guestName ?? null,
+        ...appliedMappingFor(o.rNumber),
+        ...noteFields(o.rNumber),
+      })),
+      // Owner fix round (2026-08-01, the R015832 case): same enrichment
+      // pipeline as `mismatched`/`orphanApplied` above (receivedPmsRef/
+      // status/guestName/appliedMappingFor/noteFields), PLUS `receivedTenders`
+      // — this bucket's whole point is a refund that outran its own receipt,
+      // so showing what (if anything) was actually received in what tender
+      // is directly useful here, unlike the other two exception kinds where
+      // it was out of scope (see api.md's `receivedTenders` doc).
+      overRefunded: overRefunded.map((o) => ({
+        ...o,
+        receivedPmsRef: receivedPmsRefFor(o.rNumber),
+        status: threadByR.get(o.rNumber)?.status ?? "waitingCheckin",
+        guestName: threadByR.get(o.rNumber)?.guestName ?? null,
+        receivedTenders: threadByR.get(o.rNumber)?.receivedTenders ?? [],
         ...appliedMappingFor(o.rNumber),
         ...noteFields(o.rNumber),
       })),

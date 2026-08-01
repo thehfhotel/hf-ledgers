@@ -14,6 +14,7 @@ import {
   type DepositMismatchedException,
   type DepositMonthlyReconciliation,
   type DepositOrphanAppliedException,
+  type DepositOverRefundedException,
   type DepositReceivedTenderAmount,
   type DepositRegisterEvent,
   type DepositRegisterResponse,
@@ -229,10 +230,11 @@ function NoteBadge({ note, resolvedAt, onClick }: NoteFields & { onClick: () => 
  *   accurate) from สรุปรายเดือน even though the list itself can be filtered
  *   out of view on this tab.
  * - สรุปรายเดือน — the accounting view: the tripwire completeness lines,
- *   the monthly reconciliation table (newest first, each month expandable
- *   into its chronological event list — with the focus filter gone from
- *   this tab, every expanded event renders undimmed), and the collapsed,
- *   greyed voided footnote.
+ *   the monthly reconciliation table (owner ask, 2026-08-01, live-register
+ *   fix round: oldest first / ascending — was newest-first, each month
+ *   expandable into its chronological event list — with the focus filter
+ *   gone from this tab, every expanded event renders undimmed), and the
+ *   collapsed, greyed voided footnote.
  *
  * Desktop-wide layout, same shell width convention as HistoryPage.tsx (this
  * office runs on one desktop PC, not a thumb-optimised second layout).
@@ -302,12 +304,19 @@ export function DepositRegisterPage({ property }: Props) {
         exceptions: {
           mismatched: patchRow(prev.exceptions.mismatched),
           orphanApplied: patchRow(prev.exceptions.orphanApplied),
+          overRefunded: patchRow(prev.exceptions.overRefunded),
         },
       };
     });
   }
 
-  const monthlyNewestFirst = useMemo(() => (register ? [...register.monthly].reverse() : []), [register]);
+  // Owner ask (2026-08-01, live มัดจำ register fix round): render ascending
+  // (oldest first) — was newest-first via `.reverse()`. `register.monthly`
+  // already arrives in chronological order (buildMonthlyReconciliation,
+  // deposit-register.ts), so this is now a direct pass-through; kept as its
+  // own `useMemo`'d binding (rather than reading `register.monthly` inline
+  // below) so a future re-sort has one place to change.
+  const monthlyAscending = useMemo(() => register?.monthly ?? [], [register]);
   const today = todayBangkok();
 
   // Owner ask (2026-08-01, unified มัดจำ table): ONE thread list backs the
@@ -347,6 +356,15 @@ export function DepositRegisterPage({ property }: Props) {
   const filteredOrphanApplied = useMemo(
     () =>
       register ? register.exceptions.orphanApplied.filter((row) => matchesDepositExceptionFilter(row.resolvedAt, filter)) : [],
+    [register, filter],
+  );
+  // Owner fix round (2026-08-01, the R015832 case): the new overRefunded
+  // bucket shares the SAME `matchesDepositExceptionFilter` predicate as the
+  // two exception lists above — its own note's `resolvedAt`, never its
+  // thread's `DepositThreadStatus`, same reasoning throughout this file.
+  const filteredOverRefunded = useMemo(
+    () =>
+      register ? register.exceptions.overRefunded.filter((row) => matchesDepositExceptionFilter(row.resolvedAt, filter)) : [],
     [register, filter],
   );
 
@@ -409,7 +427,8 @@ export function DepositRegisterPage({ property }: Props) {
   // at".
   const exceptionCount =
     register.exceptions.mismatched.filter((e) => e.resolvedAt === null).length +
-    register.exceptions.orphanApplied.filter((e) => e.resolvedAt === null).length;
+    register.exceptions.orphanApplied.filter((e) => e.resolvedAt === null).length +
+    register.exceptions.overRefunded.filter((e) => e.resolvedAt === null).length;
 
   return (
     <div className="flex flex-col gap-4 pb-10">
@@ -594,6 +613,32 @@ export function DepositRegisterPage({ property }: Props) {
                 </div>
               )}
             </div>
+
+            {/* Owner fix round (2026-08-01, the R015832 case): a third
+                exception kind — a refund with no active receipt behind it
+                (or a refund exceeding what's still actively received). Same
+                note/resolve workflow, same ทั้หมด/คงค้าง/เสร็จสิ้น filter
+                (`filteredOverRefunded`, `matchesDepositExceptionFilter`),
+                same unresolved-count contribution to the tab badge
+                (`exceptionCount` above) as the two exception kinds already
+                in this section. */}
+            <div className="flex flex-col gap-1 border-t border-line px-4 py-3">
+              <h3 className="text-xs font-semibold text-ink-muted">คืนเงินโดยไม่มียอดรับ (หรือคืนเกินยอดรับ)</h3>
+              {filteredOverRefunded.length === 0 ? (
+                <p className="text-sm text-ink-muted">ไม่มีรายการ</p>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {filteredOverRefunded.map((row) => (
+                    <OverRefundedRow
+                      key={row.rNumber}
+                      property={property}
+                      row={row}
+                      onNoteSaved={(fields) => applyNoteChange(row.rNumber, fields)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
           </section>
         </>
       ) : (
@@ -637,7 +682,7 @@ export function DepositRegisterPage({ property }: Props) {
               in an expanded month renders undimmed. */}
           <section className="overflow-hidden rounded-lg border border-line bg-panel">
             <h2 className="border-b border-line px-4 py-2.5 text-sm font-semibold text-ink">สรุปรายเดือน</h2>
-            {monthlyNewestFirst.length === 0 ? (
+            {monthlyAscending.length === 0 ? (
               <p className="px-4 py-3 text-sm text-ink-muted">ยังไม่มีข้อมูลมัดจำล่วงหน้า</p>
             ) : (
               <div className="overflow-x-auto">
@@ -653,7 +698,7 @@ export function DepositRegisterPage({ property }: Props) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-line">
-                    {monthlyNewestFirst.map((row) => (
+                    {monthlyAscending.map((row) => (
                       <MonthlyRow
                         key={row.month}
                         row={row}
@@ -788,12 +833,23 @@ function MonthlyRow({
   expanded: boolean;
   onToggle: () => void;
 }) {
+  // Owner ask (2026-08-01, live มัดจำ register fix round): chronological
+  // within the month means pay_date THEN pay_no, not pay_date alone —
+  // events sharing a `dateBangkok` used to fall back on `Array#sort`'s
+  // stability (i.e. whatever order `events` happened to arrive in), which
+  // only accidentally matched the PMS's own row order; `pmsRef` (the
+  // payment key — `pay_no`, or `lid:<legacy_id>` when `pay_no` is blank) is
+  // now an explicit tiebreaker so the display order is deterministic and
+  // documented, not incidental.
   const monthEvents = useMemo(
     () =>
       events
         .filter((e) => e.dateBangkok !== null && e.dateBangkok.slice(0, 7) === row.month)
         .slice()
-        .sort((a, b) => (a.dateBangkok ?? "").localeCompare(b.dateBangkok ?? "")),
+        .sort((a, b) => {
+          const byDate = (a.dateBangkok ?? "").localeCompare(b.dateBangkok ?? "");
+          return byDate !== 0 ? byDate : a.pmsRef.localeCompare(b.pmsRef);
+        }),
     [events, row.month],
   );
 
@@ -844,7 +900,14 @@ function MonthlyRow({
                     <th className="py-1 pr-3">เลขที่ / อ้างอิง</th>
                     <th className="py-1 pr-3">ช่องทาง</th>
                     <th className="py-1 pr-3 text-right">จำนวนเงิน</th>
-                    <th className="py-1 text-right">ยอดคงเหลือ</th>
+                    {/* Owner ask (2026-08-01, live มัดจำ register fix round):
+                        explicit header naming this the month's own running
+                        net (seeded from ยอดยกมา, never reset within the
+                        month) — was the more generic "ยอดคงเหลือ"
+                        ("remaining balance"), easily misread as this EVENT's
+                        own balance rather than the month's accumulating
+                        total. */}
+                    <th className="py-1 text-right">ยอดสะสม</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line/60">
@@ -1067,6 +1130,64 @@ function OrphanAppliedRow({
           ตัดยอด {formatSatang(row.appliedSatang)}
         </span>
       </div>
+      <ResolvedByLine resolvedAt={row.resolvedAt} resolvedBy={row.resolvedBy} />
+      <DepositNoteEditor
+        property={property}
+        rNumber={row.rNumber}
+        note={row.note}
+        resolvedAt={row.resolvedAt}
+        onSaved={onNoteSaved}
+      />
+    </div>
+  );
+}
+
+/** Owner fix round (2026-08-01, the R015832 case): a refund that outran its
+ * own active receipt — `row.diffSatang` is always negative (the excess
+ * refunded), same signed convention `MismatchedRow` already uses for its own
+ * `diffSatang`, so this reuses "-" + abs rather than the "+/-" toggle that
+ * row needs (that one's diff can go either direction; this one's can't).
+ * Below the amounts, a muted helper line names the LIKELY cause + fix
+ * (owner ask: "suggest the likely cause") — the R015832 shape specifically:
+ * a voided receipt whose refund was never itself voided — so the office
+ * knows exactly what to check in iHOTEL without re-deriving it from the
+ * numbers alone. Same note/resolve workflow (`DepositNoteEditor`,
+ * `ResolvedByLine`, `exceptionRowClass`) as `MismatchedRow`/
+ * `OrphanAppliedRow`. */
+function OverRefundedRow({
+  property,
+  row,
+  onNoteSaved,
+}: {
+  property: Property;
+  row: DepositOverRefundedException;
+  onNoteSaved: (fields: NoteFields) => void;
+}) {
+  const resolved = row.resolvedAt !== null;
+  const tenderLabel = depositTenderSummaryLabel(row.receivedTenders);
+  return (
+    <div className={exceptionRowClass(row.resolvedAt)}>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-sm">
+        <RNumberRef
+          rNumber={row.rNumber}
+          receivedPmsRef={row.receivedPmsRef}
+          status={row.status}
+          appliedChRef={row.appliedChRef}
+          appliedDateBangkok={row.appliedDateBangkok}
+          guestName={row.guestName}
+          tenderLabel={tenderLabel}
+        />
+        <div className="flex items-center gap-3 tabular-nums">
+          <span className="text-ink-muted">รับ {formatSatang(row.receivedSatang)}</span>
+          <span className="text-ink-muted">คืน {formatSatang(row.refundedSatang)}</span>
+          <span className={"font-semibold " + (resolved ? "text-ok" : "text-warn")}>
+            เกิน {formatSatang(Math.abs(row.diffSatang))}
+          </span>
+        </div>
+      </div>
+      <p className="mb-1.5 text-[11px] text-ink-muted">
+        ใบรับถูกยกเลิกแต่รายการคืนเงินยังไม่ถูกยกเลิก — ตรวจสอบใน iHOTEL
+      </p>
       <ResolvedByLine resolvedAt={row.resolvedAt} resolvedBy={row.resolvedBy} />
       <DepositNoteEditor
         property={property}

@@ -2292,6 +2292,96 @@ describe("Wave D: the office deposit register (GET /:property/deposits/register)
     expect(mismatchedRow.resolvedAt).not.toBeNull();
   });
 
+  // Owner fix round (2026-08-01, the R015832 case): the third exception
+  // bucket, wired end to end through the route. The fixture thread mirrors
+  // R015832 exactly (receivedSatang 0 — the receipt was voided — with an
+  // active refund exceeding it), proving: absent from `aging` (negative
+  // outstanding), present in `finished` (status "refunded"), and carries the
+  // SAME enrichment pipeline (`receivedPmsRef`/`status`/`guestName`/
+  // `appliedChRef`/`appliedDateBangkok`/note fields) as `mismatched`/
+  // `orphanApplied` PLUS the additive `receivedTenders` pass-through this
+  // bucket alone gets. A note saved against the R-number merges onto it the
+  // same way it already does for the other two exception lists.
+  test("exceptions.overRefunded: the R015832 shape — absent from aging, present in finished, full enrichment + receivedTenders, notes merge", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    depositRegisterInternal.setFetchDepositRegisterForTests(async () => ({
+      threads: [
+        thread({
+          rNumber: "R090040",
+          receivedSatang: 0,
+          appliedSatang: 0,
+          refundedSatang: 39_500,
+          outstandingSatang: -39_500,
+          firstEventDate: "2026-07-20",
+          status: "refunded",
+          guestName: "นายทดสอบ คืนเงิน",
+          receivedTenders: [], // no active received event — nothing to name
+        }),
+      ],
+      monthly: [],
+      unparsedAppliedRows: 0,
+      zeroTenderRows: 0,
+      blankBookingNoRows: 0,
+      undatedRows: 0,
+      voided: [],
+      events: [],
+    }));
+
+    const before = await call<{
+      aging: Array<{ rNumber: string }>;
+      finished: Array<{ rNumber: string; status: string }>;
+      exceptions: {
+        overRefunded: Array<{
+          rNumber: string;
+          receivedSatang: number;
+          refundedSatang: number;
+          diffSatang: number;
+          status: string;
+          guestName: string | null;
+          receivedPmsRef: string | null;
+          appliedChRef: string | null;
+          appliedDateBangkok: string | null;
+          receivedTenders: Array<{ tender: string; amountSatang: number }>;
+          note: string | null;
+          resolvedAt: string | null;
+          resolvedBy: string | null;
+        }>;
+      };
+    }>("GET", `/${PROPERTY}/deposits/register`);
+
+    expect(before.body.aging.map((r) => r.rNumber)).not.toContain("R090040");
+    expect(before.body.finished.map((r) => r.rNumber)).toEqual(["R090040"]);
+    expect(before.body.finished[0]!.status).toBe("refunded");
+    expect(before.body.exceptions.overRefunded).toEqual([
+      {
+        rNumber: "R090040",
+        receivedSatang: 0,
+        refundedSatang: 39_500,
+        diffSatang: -39_500,
+        status: "refunded",
+        guestName: "นายทดสอบ คืนเงิน",
+        receivedPmsRef: null,
+        appliedChRef: null,
+        appliedDateBangkok: null,
+        receivedTenders: [],
+        note: null,
+        resolvedAt: null,
+        resolvedBy: null,
+      },
+    ]);
+
+    await call("PUT", `/${PROPERTY}/deposits/R090040/note`, {
+      note: "ใบรับถูกยกเลิกแต่ยังไม่ได้ยกเลิกรายการคืนเงิน — แจ้งรีเซปชั่นแล้ว",
+      resolved: true,
+    });
+    const after = await call<{
+      exceptions: { overRefunded: Array<{ rNumber: string; note: string | null; resolvedAt: string | null }> };
+    }>("GET", `/${PROPERTY}/deposits/register`);
+    const row = after.body.exceptions.overRefunded.find((r) => r.rNumber === "R090040")!;
+    expect(row.note).toBe("ใบรับถูกยกเลิกแต่ยังไม่ได้ยกเลิกรายการคืนเงิน — แจ้งรีเซปชั่นแล้ว");
+    expect(row.resolvedAt).not.toBeNull();
+  });
+
   // Owner ask (2026-08-01, register mapability + explicit deposit state):
   // the top-level `events` field carries the register's full flat event
   // list (additive), and `receivedPmsRef`/`status`/`appliedChRef`/

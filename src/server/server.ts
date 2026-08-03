@@ -16,6 +16,7 @@ import {
   deleteDepositNote,
   deleteExpenseItem,
   deleteOtherIncomeItem,
+  deletePaymentAudit,
   getBookingLineById,
   getBookingLinePmsRef,
   getBookingLinesForDay,
@@ -36,6 +37,7 @@ import {
   listCategories,
   listDaysWithData,
   listDepositNotes,
+  listPaymentAudits,
   mergeCashBlockOverride,
   monthIsClosed,
   moveBookingDay,
@@ -52,12 +54,15 @@ import {
   updateExpenseItem,
   updateOtherIncomeItem,
   upsertDepositNote,
+  upsertPaymentAudit,
 } from "./db.ts";
 import type { BookingLineInput, DepositEventInput, SheetDay } from "./db.ts";
 import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
 import { fetchDayPayments, pmsConfigured } from "./pms-prefill.ts";
 import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
 import { buildDepositExceptions, fetchDepositRegister, DEPOSIT_R_NUMBER_RE } from "./deposit-register.ts";
+import { fetchDayAudit } from "./day-audit.ts";
+import type { DayAuditRow } from "./day-audit.ts";
 import { computeDayTotals } from "../shared/totals.ts";
 import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings, depositCashTotals } from "../shared/bookings.ts";
 import { isAccrualDay } from "../shared/accrual.ts";
@@ -1582,6 +1587,113 @@ export const api = new Elysia({ prefix: "/api" })
     touchSheetDay(property, existing.date, identity!.email);
     enqueueAnalyticsPush(property, existing.date);
     return updated;
+  })
+
+  // 34. GET /api/:property/audit/day/:date — Wave 1, the office audit hub
+  // (docs/plan-audit-hub-slips.md). A day-scoped, STAY-MERGED reshaping of
+  // ALL of a day's PMS payments (src/server/day-audit.ts), independent of
+  // Wave C's importer/cutover and Wave D's register — same dark-by-default
+  // gate as endpoints 26/30 (503 when this property's PMS env URL is unset,
+  // 502 on a live query failure). `checked`/`checkedAt`/`checkedBy` are
+  // merged from THIS row's own `payment_audits` entry (day-scoped lookup,
+  // by `auditKey`); a เช็คอิน row's `depositApplied.receivedChecked`
+  // (additive) is merged from the PAIRED receipt's OWN entry instead — which
+  // may have been ticked from a DIFFERENT day's queue view than the one
+  // being audited right now, hence the SEPARATE property-wide
+  // `listPaymentAudits(property)` lookup (no date filter) for that one
+  // field only. `proofCount`/`proofsPending` are Wave-2 seam placeholders
+  // (always `0`/`false` in Wave 1 — the slip inbox is a separate wave, see
+  // the plan doc). `rows` sorts PENDING FIRST (`Array#sort` is stable, so
+  // each checked/pending bucket keeps `buildDayAuditRows`' own
+  // kind/key-sorted order as a secondary key). `pullStatus` answers the
+  // client's ดึงข้อมูล chip: whether this (property, date) already has at
+  // least one `source: "pms"` booking line (i.e. the day's own bookings page
+  // has been pulled) — reuses `getBookingLinesForDay`, never a second query.
+  .get("/:property/audit/day/:date", async ({ params, status }) => {
+    const { property, date } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (!isValidIso(date)) return status(400, { error: "invalid date" });
+    if (!pmsConfigured(property)) return status(503, { error: "pms prefill not configured" });
+
+    let rawRows: DayAuditRow[];
+    try {
+      rawRows = await fetchDayAudit(property, date);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return status(502, { error: message });
+    }
+
+    const dayAudits = listPaymentAudits(property, date);
+    const checkedByKey = new Map(dayAudits.map((a) => [a.auditKey, a] as const));
+    const allAudits = listPaymentAudits(property);
+    const auditByKeyAll = new Map(allAudits.map((a) => [a.auditKey, a] as const));
+
+    const rows = rawRows.map((row) => {
+      const own = checkedByKey.get(row.auditKey);
+      const base = {
+        ...row,
+        checked: own !== undefined,
+        checkedAt: own?.checkedAt ?? null,
+        checkedBy: own?.checkedBy ?? null,
+        proofCount: 0,
+        proofsPending: false,
+      };
+      if (base.kind === "checkin" && base.depositApplied !== null) {
+        const { depositApplied } = base;
+        const receiptAudit = depositApplied.receivedPayNo ? auditByKeyAll.get(depositApplied.receivedPayNo) : undefined;
+        return { ...base, depositApplied: { ...depositApplied, receivedChecked: receiptAudit !== undefined } };
+      }
+      return base;
+    });
+
+    // Pending first — see this route's own doc comment above.
+    rows.sort((a, b) => Number(a.checked) - Number(b.checked));
+
+    const checkedCount = rows.filter((r) => r.checked).length;
+    const pullStatus = getBookingLinesForDay(property, date).some((line) => line.source === "pms");
+
+    return { rows, checkedCount, totalCount: rows.length, pullStatus };
+  })
+
+  // 35. POST /api/:property/audit/:auditKey/check — ticks (or re-ticks) a
+  // settlement as audited. `date` (body) is the audited day the tick was
+  // made FROM — it is NOT part of the row's identity (PK is `(property,
+  // auditKey)` alone, see `PaymentAudit`'s doc comment, shared/types.ts) —
+  // re-ticking the SAME auditKey from a different day's queue view still
+  // targets the same row. `auditKey` is bound-checked against
+  // `BOOKING_NO_MAX_LEN` — the same length bound every CH/booking-shaped ref
+  // already uses in this contract; an audit key is always either a CH
+  // number or a receipt pay_no, both that same shape. NOT month-close gated
+  // (audit is commentary-like, same reasoning as `deposit_notes`/the day
+  // note/the cash-block adjustment — see api.md for the explicit statement
+  // of this choice).
+  .post(
+    "/:property/audit/:auditKey/check",
+    ({ params, body, identity, status }) => {
+      const { property, auditKey } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (auditKey.length === 0 || !isValidBoundedString(auditKey, BOOKING_NO_MAX_LEN)) {
+        return status(400, { error: "invalid auditKey" });
+      }
+      if (!isValidIso(body.date)) return status(400, { error: "invalid date" });
+
+      const saved = upsertPaymentAudit(property, auditKey, body.date, identity!.email);
+      return saved;
+    },
+    { body: t.Object({ date: t.String() }) },
+  )
+
+  // 36. DELETE /api/:property/audit/:auditKey/check — un-tick. Always 204
+  // (un-ticking a settlement that was never ticked at all is a harmless
+  // no-op, mirrors `DELETE .../deposits/:rNumber/note`).
+  .delete("/:property/audit/:auditKey/check", ({ params, status }) => {
+    const { property, auditKey } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (auditKey.length === 0 || !isValidBoundedString(auditKey, BOOKING_NO_MAX_LEN)) {
+      return status(400, { error: "invalid auditKey" });
+    }
+    deletePaymentAudit(property, auditKey);
+    return status(204);
   });
 
 const apiFetch = (req: Request) => api.handle(req);
@@ -1669,6 +1781,12 @@ if (isProd) {
       "/:property/history": indexHtml,
       "/:property/categories": indexHtml,
       "/:property/deposits": indexHtml,
+      // Alias (Wave 1, docs/plan-audit-hub-slips.md) — same page
+      // (DepositRegisterPage.tsx), a more semantically-named entry point for
+      // the new ตรวจรายวัน tab. `/:property/deposits` stays the canonical
+      // route (bookmarks/deep-links); App.tsx's parseRoute() treats both
+      // identically.
+      "/:property/audit": indexHtml,
       "/:property/report/:date": indexHtml,
       "/healthz": healthz,
       "/api/*": (req) => apiFetch(req),

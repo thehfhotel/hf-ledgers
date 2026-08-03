@@ -18,6 +18,7 @@ import type {
   ExpenseItem,
   IncomeCell,
   OtherIncomeItem,
+  PaymentAudit,
   Property,
   Tender,
 } from "../shared/types.ts";
@@ -236,6 +237,33 @@ export function migrate(): void {
       updated_by TEXT NOT NULL,
       PRIMARY KEY (property, r_number)
     );
+
+    -- Wave 1 (docs/plan-audit-hub-slips.md, the office audit hub): one row
+    -- per audited PAYMENT SETTLEMENT — audit_key is the CH (check-in) number
+    -- for a เช็คอิน row (ค่าห้อง + its ตัดยอดมัดจำ merged), or the receipt's
+    -- own pay_no for a รับมัดจำ/คืนเงิน row. Absence of a row = pending; there
+    -- is no stored "false" (mirrors deposit_notes' resolved_at-presence
+    -- convention). PK is (property, audit_key) ONLY — a settlement has
+    -- exactly one audit_key for its whole life, so re-ticking (from any
+    -- day's queue view) always targets the SAME row; the date column just
+    -- records which audited day the tick was made from (see
+    -- shared/types.ts's PaymentAudit doc comment). Un-ticking DELETEs the
+    -- row outright (deletePaymentAudit) rather than storing a "false" or
+    -- clearing timestamps in place — simpler than deposit_notes' resolved_at
+    -- clear-in-place, and correct here because there is no note text to
+    -- preserve across an un-tick.
+    CREATE TABLE IF NOT EXISTS payment_audits (
+      property TEXT NOT NULL CHECK (property IN ('hf', 'hfville')),
+      audit_key TEXT NOT NULL,
+      date TEXT NOT NULL,
+      checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+      checked_by TEXT NOT NULL,
+      PRIMARY KEY (property, audit_key)
+    );
+
+    -- The day-audit endpoint's own day-scoped listing (listPaymentAudits
+    -- with a date) filters on this pair.
+    CREATE INDEX IF NOT EXISTS idx_payment_audits_day ON payment_audits (property, date);
   `);
 
   migrateCategoryKeyColumn();
@@ -2196,6 +2224,96 @@ export function upsertDepositNote(
 
 export function deleteDepositNote(property: Property, rNumber: string): boolean {
   const info = db.prepare("DELETE FROM deposit_notes WHERE property = ? AND r_number = ?").run(property, rNumber);
+  return info.changes > 0;
+}
+
+// ── payment_audits (Wave 1, the office audit hub — docs/plan-audit-hub-
+// slips.md) ─────────────────────────────────────────────────────────────
+// See the `payment_audits` DDL comment above and `PaymentAudit`
+// (shared/types.ts) for the full reasoning: PK is (property, audit_key)
+// only, absence = pending, un-tick DELETEs the row rather than storing a
+// "false". Deliberately NOT month-close gated at this layer (server.ts's
+// route handlers never call closedMonthResponse for these) — same
+// "commentary, not a booking-day write" reasoning as deposit_notes.
+
+interface PaymentAuditRow {
+  property: string;
+  audit_key: string;
+  date: string;
+  checked_at: string;
+  checked_by: string;
+}
+
+function toPaymentAudit(r: PaymentAuditRow): PaymentAudit {
+  return {
+    property: r.property as Property,
+    auditKey: r.audit_key,
+    date: r.date,
+    checkedAt: r.checked_at,
+    checkedBy: r.checked_by,
+  };
+}
+
+/** A single audit row by its key — module-internal (used by
+ * `upsertPaymentAudit`'s own read-back and nowhere else); external callers
+ * always go through `listPaymentAudits`, which covers both the day-scoped
+ * and property-wide shapes below. */
+function getPaymentAudit(property: Property, auditKey: string): PaymentAudit | null {
+  const row = db
+    .query<PaymentAuditRow, [string, string]>("SELECT * FROM payment_audits WHERE property = ? AND audit_key = ?")
+    .get(property, auditKey);
+  return row ? toPaymentAudit(row) : null;
+}
+
+/**
+ * Every audit row for a property — scoped to one audited `date` when given
+ * (the day-audit endpoint's own queue, matching the task's
+ * `listPaymentAudits(property, date)` signature), or every row regardless of
+ * date when `date` is omitted. The latter is what the day-audit endpoint
+ * ALSO needs for a เช็คอิน row's `depositApplied.receivedChecked` — the
+ * paired receipt's own audit status may have been ticked on a DIFFERENT day
+ * than the one currently being audited (a มัดจำ received last month, applied
+ * today), so that lookup can never be scoped to the CURRENT day's `date`
+ * alone.
+ */
+export function listPaymentAudits(property: Property, date?: string): PaymentAudit[] {
+  if (date !== undefined) {
+    return db
+      .query<PaymentAuditRow, [string, string]>("SELECT * FROM payment_audits WHERE property = ? AND date = ?")
+      .all(property, date)
+      .map(toPaymentAudit);
+  }
+  return db
+    .query<PaymentAuditRow, [string]>("SELECT * FROM payment_audits WHERE property = ?")
+    .all(property)
+    .map(toPaymentAudit);
+}
+
+/**
+ * Ticks (or re-ticks) a settlement as audited — `date` is the audited day
+ * the tick was made from, not part of the row's identity (PK is
+ * `(property, audit_key)` alone). Re-ticking the SAME audit_key (e.g. from a
+ * different day's queue view, or simply pressed twice) overwrites `date`/
+ * `checked_at`/`checked_by` with the latest tick — last write wins, same
+ * convention `upsertDepositNote` uses for its own resolved-state overwrite.
+ */
+export function upsertPaymentAudit(property: Property, auditKey: string, date: string, by: string): PaymentAudit {
+  db.prepare(
+    `INSERT INTO payment_audits (property, audit_key, date, checked_at, checked_by)
+     VALUES (?, ?, ?, datetime('now'), ?)
+     ON CONFLICT (property, audit_key) DO UPDATE SET
+       date = excluded.date,
+       checked_at = excluded.checked_at,
+       checked_by = excluded.checked_by`,
+  ).run(property, auditKey, date, by);
+  return getPaymentAudit(property, auditKey)!;
+}
+
+/** Un-ticks a settlement — a plain DELETE (never a stored "false"), so
+ * un-ticking something never audited at all is a harmless no-op (mirrors
+ * `deleteDepositNote`'s own idempotent DELETE). */
+export function deletePaymentAudit(property: Property, auditKey: string): boolean {
+  const info = db.prepare("DELETE FROM payment_audits WHERE property = ? AND audit_key = ?").run(property, auditKey);
   return info.changes > 0;
 }
 

@@ -11,10 +11,11 @@ process.env.PORT = "0"; // let the OS pick a free port — avoids clashing with 
 
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { activeCashAdjustmentPatch, activeCashOverridePatch } from "../client/cashBlockPatches.ts";
-import { DEPOSIT_NOTE_MAX_LEN, REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
+import { BOOKING_NO_MAX_LEN, DEPOSIT_NOTE_MAX_LEN, REMARK_MAX_LEN, TENDERS } from "../shared/types.ts";
 import type { CashBlock, Category, CategoryKey, Property, Tender } from "../shared/types.ts";
 import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
 import type { DepositLedgerEvent, DepositRegisterData, DepositThread, MonthlyDepositReconciliation } from "./deposit-register.ts";
+import type { DayAuditCheckinRow, DayAuditDepositRow, DayAuditRefundRow, DayAuditRow } from "./day-audit.ts";
 
 const { api } = await import("./server.ts");
 // server.ts already imported pms-prefill.ts above, so this re-import just
@@ -23,6 +24,9 @@ const { _internal: pmsPrefillInternal } = await import("./pms-prefill.ts");
 // Same pattern again for deposit-register.ts (Wave D) — server.ts already
 // imported it above, so this just reads the cached module.
 const { _internal: depositRegisterInternal } = await import("./deposit-register.ts");
+// Same pattern again for day-audit.ts (Wave 1) — server.ts already imported
+// it above, so this just reads the cached module.
+const { _internal: dayAuditInternal } = await import("./day-audit.ts");
 
 const BASE = "http://localhost";
 
@@ -2767,6 +2771,236 @@ describe("Wave D, D3: deposit notes CRUD (PUT/DELETE /:property/deposits/:rNumbe
     expect(put.status).toBe(200);
 
     const del = await call("DELETE", `/${PROPERTY}/deposits/R070005/note`);
+    expect(del.status).toBe(204);
+
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+  });
+});
+
+// ── Wave 1: the office day-audit hub (docs/plan-audit-hub-slips.md) ────────
+
+function auditCheckinRow(overrides: Partial<DayAuditCheckinRow> = {}): DayAuditCheckinRow {
+  return {
+    kind: "checkin",
+    auditKey: "CH26-005269",
+    chRef: "CH26-005269",
+    guestName: null,
+    receiptPayNos: ["R2608-0010"],
+    grossSatang: 50_000,
+    composition: { cashSatang: 50_000, transferSatang: 0, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
+    depositApplied: null,
+    ...overrides,
+  };
+}
+
+function auditDepositRow(overrides: Partial<DayAuditDepositRow> = {}): DayAuditDepositRow {
+  return {
+    kind: "deposit",
+    auditKey: "R2608-0100",
+    rRef: "R090001",
+    guestName: null,
+    payNo: "R2608-0100",
+    tender: "cash",
+    amountSatang: 50_000,
+    checkinDateBangkok: null,
+    ...overrides,
+  };
+}
+
+function auditRefundRow(overrides: Partial<DayAuditRefundRow> = {}): DayAuditRefundRow {
+  return {
+    kind: "refund",
+    auditKey: "R2607-0480",
+    refundOf: "deposit",
+    ref: "R015834",
+    guestName: null,
+    payNo: "R2607-0480",
+    tender: "transfer",
+    amountSatang: -39_500,
+    overRefundedWarning: false,
+    ...overrides,
+  };
+}
+
+describe("Wave 1: the office day-audit hub (GET /:property/audit/day/:date)", () => {
+  const DATE = "2026-08-15";
+
+  afterEach(() => {
+    dayAuditInternal.setFetchDayAuditForTests(null);
+    delete process.env.PMS_DB_URL_HF;
+    delete process.env.PMS_DB_URL_HFVILLE;
+  });
+
+  test("503 when the property's PMS env URL is unset", async () => {
+    delete process.env.PMS_DB_URL_HF;
+    const res = await call("GET", `/${PROPERTY}/audit/day/${DATE}`);
+    expect(res.status).toBe(503);
+    expect((res.body as { error: string }).error).toBe("pms prefill not configured");
+  });
+
+  test("502 when the PMS query fails", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    dayAuditInternal.setFetchDayAuditForTests(async () => {
+      throw new Error("connection refused");
+    });
+    const res = await call("GET", `/${PROPERTY}/audit/day/${DATE}`);
+    expect(res.status).toBe(502);
+  });
+
+  test("400 on an invalid date", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const res = await call("GET", `/${PROPERTY}/audit/day/not-a-date`);
+    expect(res.status).toBe(400);
+  });
+
+  test("200: rows pass through, checkedCount/totalCount computed, pullStatus false with no pms booking lines", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const rows: DayAuditRow[] = [
+      auditCheckinRow({ auditKey: "CH26-100001", chRef: "CH26-100001" }),
+      auditDepositRow({ auditKey: "R2608-0100" }),
+      auditRefundRow({ auditKey: "R2607-0480" }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+
+    const res = await call<{
+      rows: Array<{ auditKey: string; checked: boolean; checkedAt: string | null; checkedBy: string | null; proofCount: number; proofsPending: boolean }>;
+      checkedCount: number;
+      totalCount: number;
+      pullStatus: boolean;
+    }>("GET", `/${PROPERTY}/audit/day/${DATE}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalCount).toBe(3);
+    expect(res.body.checkedCount).toBe(0);
+    expect(res.body.rows.every((r) => r.checked === false && r.checkedAt === null && r.checkedBy === null)).toBe(true);
+    expect(res.body.rows.every((r) => r.proofCount === 0 && r.proofsPending === false)).toBe(true);
+    expect(res.body.pullStatus).toBe(false);
+  });
+
+  test("pullStatus true once a source:'pms' booking line exists for that (property, date)", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    dayAuditInternal.setFetchDayAuditForTests(async () => []);
+    await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, { source: "pms", pmsRef: "audit-pullstatus-test" });
+
+    const res = await call<{ pullStatus: boolean }>("GET", `/${PROPERTY}/audit/day/${DATE}`);
+    expect(res.body.pullStatus).toBe(true);
+  });
+
+  test("rows sort PENDING FIRST once payment_audits ticks exist, preserving each bucket's underlying order", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const rows: DayAuditRow[] = [
+      auditCheckinRow({ auditKey: "CH26-200001", chRef: "CH26-200001" }),
+      auditCheckinRow({ auditKey: "CH26-200002", chRef: "CH26-200002" }),
+      auditDepositRow({ auditKey: "R2608-0200" }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    // Tick the FIRST checkin row only, from a different endpoint call (the
+    // audited day matches DATE here, but the tick's own PK is (property,
+    // auditKey) — see the CRUD describe block below for cross-day proof).
+    await call("POST", `/${PROPERTY}/audit/CH26-200001/check`, { date: DATE });
+
+    const res = await call<{ rows: Array<{ auditKey: string; checked: boolean }> }>(
+      "GET",
+      `/${PROPERTY}/audit/day/${DATE}`,
+    );
+    expect(res.body.rows.map((r) => r.auditKey)).toEqual(["CH26-200002", "R2608-0200", "CH26-200001"]);
+    expect(res.body.rows.map((r) => r.checked)).toEqual([false, false, true]);
+
+    await call("DELETE", `/${PROPERTY}/audit/CH26-200001/check`);
+  });
+
+  test("a เช็คอิน row's depositApplied.receivedChecked reflects the PAIRED receipt's own audit state, even ticked from a different day", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    const rows: DayAuditRow[] = [
+      auditCheckinRow({
+        auditKey: "CH26-300001",
+        chRef: "CH26-300001",
+        depositApplied: {
+          amountSatang: 39_500,
+          rRef: "R090010",
+          receivedDateBangkok: "2026-07-01",
+          receivedPayNo: "R2607-0700",
+          receivedTender: "cash",
+          receivedAmountSatang: 39_500,
+          mismatch: false,
+        },
+      }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+
+    const before = await call<{ rows: Array<{ depositApplied: { receivedChecked: boolean } | null }> }>(
+      "GET",
+      `/${PROPERTY}/audit/day/${DATE}`,
+    );
+    expect(before.body.rows[0]!.depositApplied!.receivedChecked).toBe(false);
+
+    // Tick the RECEIPT itself (a different auditKey, from a different day
+    // entirely) — the checkin row's own auditKey is untouched.
+    await call("POST", `/${PROPERTY}/audit/R2607-0700/check`, { date: "2026-07-01" });
+
+    const after = await call<{ rows: Array<{ auditKey: string; checked: boolean; depositApplied: { receivedChecked: boolean } | null }> }>(
+      "GET",
+      `/${PROPERTY}/audit/day/${DATE}`,
+    );
+    expect(after.body.rows[0]!.checked).toBe(false); // the checkin row itself was never ticked
+    expect(after.body.rows[0]!.depositApplied!.receivedChecked).toBe(true);
+
+    await call("DELETE", `/${PROPERTY}/audit/R2607-0700/check`);
+  });
+});
+
+describe("Wave 1: payment_audits CRUD (POST/DELETE /:property/audit/:auditKey/check)", () => {
+  test("POST ticks a settlement; round-trips checkedAt/checkedBy (who/when)", async () => {
+    const res = await call<{ property: string; auditKey: string; date: string; checkedAt: string; checkedBy: string }>(
+      "POST",
+      `/${PROPERTY}/audit/CH26-900001/check`,
+      { date: "2026-08-15" },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.auditKey).toBe("CH26-900001");
+    expect(res.body.date).toBe("2026-08-15");
+    expect(typeof res.body.checkedAt).toBe("string");
+    expect(res.body.checkedBy).toBe("tester@thehfhotel.org");
+  });
+
+  test("re-POSTing the SAME auditKey overwrites date/checkedAt/checkedBy (last write wins) rather than duplicating", async () => {
+    await call("POST", `/${PROPERTY}/audit/R2608-0900/check`, { date: "2026-08-10" });
+    const second = await call<{ date: string }>("POST", `/${PROPERTY}/audit/R2608-0900/check`, { date: "2026-08-11" });
+    expect(second.status).toBe(200);
+    expect(second.body.date).toBe("2026-08-11");
+  });
+
+  test("DELETE un-ticks; deleting a settlement never ticked at all is still 204 (idempotent)", async () => {
+    await call("POST", `/${PROPERTY}/audit/CH26-900002/check`, { date: "2026-08-15" });
+    const deleted = await call("DELETE", `/${PROPERTY}/audit/CH26-900002/check`);
+    expect(deleted.status).toBe(204);
+
+    const deletedAgain = await call("DELETE", `/${PROPERTY}/audit/CH26-900002/check`);
+    expect(deletedAgain.status).toBe(204);
+  });
+
+  test("400 on an empty auditKey path segment being routed elsewhere is a 404, not a crash — and an overlong one 400s", async () => {
+    const res = await call("POST", `/${PROPERTY}/audit/${"x".repeat(BOOKING_NO_MAX_LEN + 1)}/check`, {
+      date: "2026-08-15",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("400 on an invalid date body", async () => {
+    const res = await call("POST", `/${PROPERTY}/audit/CH26-900003/check`, { date: "not-a-date" });
+    expect(res.status).toBe(400);
+  });
+
+  // NOT month-close gated — audit is commentary-like, same reasoning as
+  // deposit_notes/the day note/the cash-block adjustment (see api.md).
+  test("succeeds even while some month is closed — NOT month-close gated", async () => {
+    const MONTH = "2026-12";
+    await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+
+    const put = await call("POST", `/${PROPERTY}/audit/CH26-900004/check`, { date: `${MONTH}-15` });
+    expect(put.status).toBe(200);
+
+    const del = await call("DELETE", `/${PROPERTY}/audit/CH26-900004/check`);
     expect(del.status).toBe(204);
 
     await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });

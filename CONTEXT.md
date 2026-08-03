@@ -68,3 +68,25 @@ _Avoid_: payment type, channel
 **Category**:
 A named line on the day sheet that money is recorded against, keyed by a stable `categoryKey`.
 Manager-renameable; the key, never the Thai name, is what code matches on.
+
+**ตรวจสอบ** (the office audit hub, added 2026-08-03 — Wave 1,
+docs/plan-audit-hub-slips.md): the office reviews EVERY payment of a day (not just
+deposits), one row per **stay settlement** — a single document bundle a human actually
+holds in hand (a folio's ค่าห้อง payment plus its ตัดยอดมัดจำ line, a received receipt, a
+refund), never one row per raw ledger line. Independent of ยืนยันข้อมูล (day sign-off) and
+month-close entirely — its own small audit trail, by owner decision: a tick just means
+"a human looked at this settlement", not "this day's numbers are correct."
+
+- **รอตรวจ** (pending): a settlement with no tick yet. Absence, never a stored "false" —
+  the same convention a มัดจำ note's `resolvedAt` uses for "unresolved".
+- **ตรวจแล้ว** (checked/audited): a settlement a human has explicitly ticked — who and
+  when are recorded (`checkedBy`/`checkedAt`). Un-ticking (ยกเลิกการตรวจ) removes the
+  tick outright, moving the row back to รอตรวจ.
+- **Settlement / audit key**: the reference identifying ONE stay settlement for its
+  whole life — the CH (check-in) number for a เช็คอิน row (ค่าห้อง + its ตัดยอดมัดจำ merged,
+  never two rows for the same stay), or the receipt's own pay_no for a รับมัดจำ/คืนเงิน row.
+  A tick's identity is this key alone, not the day it was made from — re-ticking the same
+  settlement from a different day's queue view still targets the same audit record.
+
+_Avoid_: conflating a ตรวจแล้ว tick with ยืนยันข้อมูล (verification) or เดือนปิด (month-close)
+— all three are separate, independently-gated axes over the same underlying money.

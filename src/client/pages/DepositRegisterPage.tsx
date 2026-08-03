@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { daysBetween, isoToBuddhist, monthToThaiLong, todayBangkok } from "../../shared/date.ts";
+import { daysBetween, isoToBuddhist, isValidIso, monthToThaiLong, shiftDays, todayBangkok } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
 import {
   DEPOSIT_TENDER_LABELS_TH,
@@ -28,6 +28,7 @@ import {
   matchesDepositSearch,
   type DepositSearchRow,
 } from "./depositRegisterFilter.ts";
+import { DayAuditQueue } from "./DayAuditQueue.tsx";
 import { PropertyBadge } from "./PropertyBadge.tsx";
 
 interface Props {
@@ -72,14 +73,19 @@ const REGISTER_TABLE_EMPTY_TH: Record<DepositFilterBucket, string> = {
  * that reads like there is simply no data of that kind at all. */
 const DEPOSIT_SEARCH_EMPTY_TH = "ไม่พบรายการที่ค้นหา";
 
-/** The page's top-level tab (owner ask, 2026-08-01: "สรุปรายเดือน — move to
- * another pill as another page/tab"). `"register"` (default) is the office's
- * day-to-day working view; `"summary"` is the accounting view. Component
- * state only, one shared `register` fetch underneath both — see
- * `DepositRegisterPage`'s own doc comment for the full section split. */
-type DepositRegisterTab = "register" | "summary";
+/** The page's top-level tab. `"audit"` (Wave 1, docs/plan-audit-hub-slips.md
+ * — DEFAULT as of this wave) is the office's day-audit work queue over ALL
+ * of a day's PMS payments; `"register"` (owner ask, 2026-08-01: "สรุปรายเดือน
+ * — move to another pill as another page/tab", the PRIOR default) is the
+ * มัดจำ-only working view; `"summary"` is the accounting view. Component
+ * state only — `"audit"` has its OWN fetch (DayAuditQueue.tsx, date-scoped,
+ * independent of `register`); `register`/`summary` still share the ONE
+ * `register` fetch underneath both — see `DepositRegisterPage`'s own doc
+ * comment for the full section split. */
+type DepositRegisterTab = "audit" | "register" | "summary";
 
 const DEPOSIT_TABS: ReadonlyArray<{ value: DepositRegisterTab; label: string }> = [
+  { value: "audit", label: "ตรวจรายวัน" },
   { value: "register", label: "รายการมัดจำ" },
   { value: "summary", label: "สรุปรายเดือน" },
 ];
@@ -275,12 +281,34 @@ export function DepositRegisterPage({ property }: Props) {
   // as two independent pieces of state rather than one combined filter
   // object.
   const [search, setSearch] = useState("");
-  // Owner ask (2026-08-01, D5): top-level tab, component state, defaults to
-  // the working view. Not reset by the property-switch effect below, same
-  // as `filter` above — a per-visit view preference the office likely wants
-  // to keep while flipping between properties, not something tied to any
-  // one property's data.
-  const [activeTab, setActiveTab] = useState<DepositRegisterTab>("register");
+  // Wave 1 (docs/plan-audit-hub-slips.md): top-level tab, component state,
+  // defaults to ตรวจรายวัน (was "register" before this wave). Not reset by
+  // the property-switch effect below, same as `filter` above — a per-visit
+  // view preference the office likely wants to keep while flipping between
+  // properties, not something tied to any one property's data.
+  const [activeTab, setActiveTab] = useState<DepositRegisterTab>("audit");
+  // Wave 1: ตรวจรายวัน's own selected date — defaults to YESTERDAY (Bangkok),
+  // the owner's explicit ask (the office audits the PREVIOUS day's payments,
+  // not today's still-in-progress ones). Independent of `register`'s own
+  // fetch/state entirely — DayAuditQueue.tsx owns its own date-scoped fetch.
+  const [auditDate, setAuditDate] = useState<string>(() => shiftDays(todayBangkok(), -1));
+
+  // Deep-link support (owner ask: DaySheetPage's "ตรวจแล้ว n/m" progress chip
+  // links here with `?tab=audit&date=YYYY-MM-DD`) — a plain query-string
+  // read, ONCE on mount only (never re-applied on a later property switch,
+  // and never written back to the URL on subsequent tab/date changes: this
+  // is a one-shot landing preference, not two-way URL sync). App.tsx's own
+  // pushState router only ever inspects `location.pathname`, so the query
+  // string survives untouched for this effect to read.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get("tab");
+    if (tab === "audit" || tab === "register" || tab === "summary") setActiveTab(tab);
+    const date = params.get("date");
+    if (date !== null && isValidIso(date)) setAuditDate(date);
+    // Intentionally run once on mount only — see this effect's own doc
+    // comment above.
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -628,7 +656,9 @@ export function DepositRegisterPage({ property }: Props) {
         )}
       </div>
 
-      {activeTab === "register" ? (
+      {activeTab === "audit" ? (
+        <DayAuditQueue property={property} date={auditDate} onDateChange={setAuditDate} />
+      ) : activeTab === "register" ? (
         <>
           {/* Owner ask (2026-08-01, unified มัดจำ table): ONE thread table
               for the whole working tab, replacing the old two-table split

@@ -317,6 +317,13 @@ Wave D addition:
   of *why* a deposit exception exists (e.g. the R015834-style 395->790 gap),
   so it needs room for a real explanation.
 
+Wave 1 addition:
+
+- `auditKey` (`payment_audits`): reuses `BOOKING_NO_MAX_LEN` (≤ 40 chars) —
+  an audit key is always either a CH number or a receipt pay_no, both that
+  same shape/length already bounded elsewhere in this contract; no new
+  constant was introduced for it.
+
 ## Endpoints (`/api`, Typebox; auth = any verified identity — no roles)
 
 1. **`GET /api/me`** → `{ email }` (`Me`)
@@ -1201,6 +1208,182 @@ key). `applyPmsCandidateToBookingLine(property, id, candidate, by)` — merges
 `candidateTenderPatch`'s fields into the row's CURRENT tenders (never a
 wholesale replace) and reuses `updateBookingLine()`.
 
+## Wave 1: the office audit hub (`src/server/day-audit.ts`, `docs/plan-audit-hub-slips.md`)
+
+A day-scoped, STAY-MERGED reshaping of ALL of a day's PMS payments (not just
+deposits — the audit hub's whole scope, per the plan) into ONE ROW PER
+SETTLEMENT, plus its own tiny audit trail (`payment_audits`) independent of
+`sheet_days.verified_at`/month-close. A SEPARATE code path from both Wave C's
+importer and Wave D's register — `day-audit.ts` reuses `getPmsClient()`/
+`pmsConfigured()`/`bangkokDayWindow()`/`parseLedgerSatang()`/
+`buildGuestName()`/`LEDGER_DS_NAMES`/`DEPOSIT_APPLIED_PREFIX`/
+`parseAppliedBookingNo()` (pms-prefill.ts) and `classifyDepositRow()`/
+`RawDepositLedgerRow` (deposit-register.ts) directly, so all three modules
+can never disagree on what a จ่ายล่วงหน้า/ตัดยอดล่วงหน้า/คืนเงินจองห้อง row
+means.
+
+34. **`GET /api/:property/audit/day/:date`** → `{ rows: DayAuditRow[],
+    checkedCount: number, totalCount: number, pullStatus: boolean }`. Same
+    dark-by-default gate as endpoints 26/30: **503**
+    (`{ error: "pms prefill not configured" }`) when this property's PMS env
+    URL is unset, **502** on a live query failure, **400** on an invalid
+    `date`. `rows` is sorted **PENDING FIRST** (`checked: false` before
+    `checked: true`; `Array#sort`'s stability preserves each bucket's
+    underlying kind/key order). `pullStatus` is whether this `(property,
+    date)` already has at least one `source: "pms"` booking line (the
+    client's ดึงข้อมูล chip) — reuses `getBookingLinesForDay()`, never a
+    second query.
+
+    **`DayAuditRow`** is a discriminated union on `kind`, every variant
+    carrying `auditKey: string` (the settlement's identity — see
+    `payment_audits` below) plus the merged audit-state quartet
+    `checked: boolean`, `checkedAt: string | null`, `checkedBy: string |
+    null`, and the Wave-2 seam placeholders `proofCount: number` (always
+    `0`), `proofsPending: boolean` (always `false` in Wave 1 — the slip
+    inbox is a separate wave, see the plan doc's "Wave 2"/"Not doing"
+    split):
+
+    - **`kind: "checkin"`** (`DayAuditCheckinRow`) — ONE row per STAY, keyed
+      by the CH (check-in) number (`auditKey === chRef`). A check-in's
+      `ค่าห้อง` payment(s) and its (at most one) `ตัดยอดมัดจำ` line merge into
+      this ONE row regardless of whether they share a receipt (pay_no) or
+      not — never two rows for the same stay. `receiptPayNos: string[]`
+      lists every distinct receipt contributing a line; `grossSatang` sums
+      `ค่าห้อง` + `ยกเลิกห้อง` (forced negative, same sign-anomaly fix
+      pms-prefill.ts's `buildBookingCandidate` makes) + `ค่าปรับ` — NEVER the
+      ตัดยอด line's own amount (V1: that money lives in `depositApplied`,
+      not gross) and NEVER a `คืนเงินส่วนเกิน` line (its own `kind: "refund"`
+      row instead, see below). `composition: { cashSatang, transferSatang,
+      creditSatang, webSatang, penaltySatang }` — the first four are TENDER
+      totals (how the folio was paid, read ONCE per payment group and
+      summed across however many receipts share this check-in — the same
+      tender-replication money gotcha pms-prefill.ts's module comment
+      documents); `penaltySatang` is a REVENUE-line breakdown instead (how
+      much of `grossSatang` came from a `ค่าปรับ` line), an orthogonal axis,
+      not a fifth tender. `depositApplied` (`null` when this stay carries no
+      ตัดยอด line, or its line's own R-ref label failed to parse — the
+      register's `unparsedAppliedRows` tripwire already covers that
+      globally, this hub just omits the chip): `{ amountSatang, rRef,
+      receivedDateBangkok, receivedPayNo, receivedTender, receivedAmountSatang,
+      mismatch, receivedChecked }` — paired with the R's own RECEIVED event
+      across its WHOLE history (never just this day, via a second, narrow,
+      no-date-window query), summing every ACTIVE received event for that R
+      into `receivedAmountSatang` (`null` when none exist at all — the
+      orphan-applied shape) and taking the chronologically-first as
+      canonical for `receivedPayNo`/`receivedTender`/`receivedDateBangkok`.
+      `mismatch = |amountSatang - (receivedAmountSatang ?? 0)| >
+      RECONCILE_TOLERANCE_SATANG` — the row-level red-chip flag (the
+      register's own exception list already covers this globally; this is
+      the same signal surfaced per-row for the work queue). `receivedChecked`
+      (additive, merged by the route, NOT by `day-audit.ts` — see below) is
+      the PAIRED RECEIPT's own audit state, distinct from this row's own
+      `checked`.
+    - **`kind: "deposit"`** (`DayAuditDepositRow`) — one รับมัดจำ row per
+      จ่ายล่วงหน้า receipt received THIS day, keyed by its own pay_no
+      (`auditKey === payNo`, since a received deposit has no CH yet).
+      `checkinDateBangkok: string | null` is a best-effort forward reference
+      via `ht_bookings` — **UNVERIFIED**: this build shipped with no live PMS
+      connection to run the `SET ROLE ledger_ro` probe the plan calls for,
+      so `ht_bookings.book_no` being the SAME R-number iHOTEL writes onto
+      `ledger_cin_no`, and `ledger_ro` even holding a grant on
+      `ht_bookings.book_no`/`book_checkin` at all, are both ASSUMPTIONS. The
+      lookup is wrapped in try/catch specifically so a wrong column name or
+      a missing grant degrades to `null` on every row (a normal value, never
+      an error) rather than 502ing the endpoint — **this must be verified
+      against live evergreen data (or simply observed in production logs)
+      before it is trusted to ever return anything.**
+    - **`kind: "refund"`** (`DayAuditRefundRow`) — one คืนเงิน row (negative
+      `amountSatang`) per `คืนเงินจองห้อง` (`refundOf: "deposit"`, `ref` = the
+      R-number, keyed by its own pay_no) or `คืนเงินส่วนเกิน` (`refundOf:
+      "excess"`, `ref` = the CH number when known else its own pay_no) line
+      — kept as ONE row kind with a discriminant since both render
+      identically and only the ref's meaning differs. `คืนเงินส่วนเกิน` is its
+      OWN row here, unlike pms-prefill.ts, which folds it into the same
+      booking candidate as the room charge — this hub wants every
+      settlement independently auditable. `overRefundedWarning` (the
+      R015832-shape signal, `refundOf: "deposit"` only) is `true` when the
+      refund's own R has AT LEAST ONE received event anywhere in its history
+      but NONE are active (every one voided) — a CHEAP per-row proxy for the
+      register's own `overRefunded` bucket, not a re-run of its full
+      thread-level `refundedSatang > receivedSatang` computation.
+
+    Voided rows never produce ANY row here at all (re-asserted in the pure
+    `buildDayAuditRows()`, fixture-provable without a database, same
+    defense-in-depth pattern as `mapLedgerRows`/`classifyDepositRow`) — this
+    is a work queue, not the reconciliation; the register's own voided
+    footnote already covers completeness.
+
+    `checked`/`checkedAt`/`checkedBy` are merged onto every row by THIS
+    route (never by `day-audit.ts`, which has zero knowledge of
+    `payment_audits` — mirrors deposit-register.ts's strict separation from
+    `deposit_notes`) from a day-scoped `listPaymentAudits(property, date)`
+    lookup keyed by `auditKey`. A เช็คอิน row's `depositApplied.receivedChecked`
+    is merged from a SEPARATE, property-WIDE `listPaymentAudits(property)`
+    lookup (no date filter) keyed by `receivedPayNo` instead — the paired
+    receipt may have been ticked from a completely different day's queue
+    view than the one currently being audited.
+
+35. **`POST /api/:property/audit/:auditKey/check`** — body `{ date: string
+    }` → `PaymentAudit` (`{ property, auditKey, date, checkedAt, checkedBy
+    }`). Ticks (or re-ticks) a settlement as audited; `checkedBy` is the
+    caller's identity, `checkedAt` the server timestamp. `date` is the
+    audited day the tick was made FROM — it is **NOT** part of the
+    settlement's identity (the table's PK is `(property, auditKey)` alone),
+    so re-ticking the SAME `auditKey` from a different day's queue view
+    still targets the same row, overwriting `date`/`checkedAt`/`checkedBy`
+    (last write wins, same convention `upsertDepositNote` uses). `auditKey`
+    is bound-checked against `BOOKING_NO_MAX_LEN` (an audit key is always
+    either a CH number or a receipt pay_no, both that same shape/length).
+    **NOT month-close gated** — audit is commentary-like (the SAME reasoning
+    as `deposit_notes`/the day note/endpoint 9/the cash-block adjustment/
+    endpoint 21): a tick is evidence someone LOOKED at a settlement, not a
+    booking-day write, and it must remain possible even after the month
+    closes (an auditor working through a backlog should never be blocked by
+    month-close).
+
+36. **`DELETE /api/:property/audit/:auditKey/check`** → 204, always
+    (un-ticking a settlement never ticked at all is a harmless no-op, same
+    "not worth a 404" reasoning as `DELETE .../deposits/:rNumber/note`).
+    Same `auditKey` bound and month-close exemption as `POST` above.
+
+**Data model.** New table `payment_audits`: `property`, `audit_key TEXT NOT
+NULL`, `date TEXT NOT NULL` (the audited day the tick was made from — NOT
+part of the row's identity), `checked_at`, `checked_by`. PK
+`(property, audit_key)` — absence of a row = pending; there is no stored
+"false". Un-ticking DELETEs the row outright (never a stale timestamp
+surviving a re-open, unlike `deposit_notes`' resolved-state clear-in-place —
+there is no note TEXT to preserve across an un-tick here). db.ts fns:
+`listPaymentAudits(property, date?)` (day-scoped when `date` is given,
+property-wide otherwise — the route uses BOTH shapes, see endpoint 34's own
+doc above), `upsertPaymentAudit`, `deletePaymentAudit`.
+
+**`day-audit.ts` internals.** `DAY_AUDIT_LEDGER_QUERY` — day-scoped (via
+`bangkokDayWindow()`), restricted to the seven recognized `ds_name` shapes
+(`LEDGER_DS_NAMES`'s six exact labels, string-built into the WHERE clause
+rather than a bound array parameter — these are fixed compile-time Thai
+strings, never user input, same reasoning `DEPOSIT_LEDGER_QUERY`'s own
+inlined-literal WHERE uses — plus the `ตัดยอดล่วงหน้า Booking No:` prefix
+family), voided rows excluded at the SQL level (unlike
+`DEPOSIT_LEDGER_QUERY`'s full-history query, which returns them tagged for
+the register's own greyed display — this hub never shows a voided line at
+all). `buildDayAuditRows(rows, receivedByRRef, checkinDateByRRef)` — PURE,
+the stay-merge itself: groups `ค่าห้อง`/`ยกเลิกห้อง`/`ค่าปรับ`/`ตัดยอด` lines
+by payment key first (tender columns read ONCE per group), then re-groups
+those payment-group aggregates by `ledger_cin_no` to build the merged
+เช็คอิน rows — this second re-grouping is the whole point: a room charge and
+its deposit application sharing a CH but NOT a payment key still land in
+ONE row. `fetchReceivedLookup()` — the cross-history pairing query
+(`ledger_ds_name = 'จ่ายล่วงหน้า'` only, `ledger_cin_no IN (...)` the exact
+R-refs this day's rows need, no date window, voided rows NOT filtered —
+`overRefundedWarning` needs to see them), reuses `classifyDepositRow()` on
+every row. `fetchCheckinDateLookup()` — the best-effort `ht_bookings` join,
+see endpoint 34's own `checkinDateBangkok` doc above for why it is
+UNVERIFIED and wrapped in try/catch. Both cross-history lookups build their
+`IN (...)` clause via a small `sqlStringList()` escaper (SQL single-quote
+doubling) rather than a bound array parameter — chosen because this module
+has no live PMS connection available to verify Bun.SQL's array-binding
+behavior against.
+
 ## Shared types (`src/shared/types.ts`, verbatim, READ-ONLY)
 
 `Property`, `PROPERTIES`, `isProperty()`, `PROPERTY_LABELS` (full Thai/En
@@ -1222,7 +1405,8 @@ category cell; `"other"` is deliberately absent — it becomes an itemized
 (Wave D — the office deposit register's note-thread contract),
 `DepositThreadStatus` and `DEPOSIT_THREAD_STATUS_LABELS_TH` (2026-08-01 —
 the register's explicit-state chip vocabulary, see the Register query
-section above), `DayProvenance`,
+section above), `PaymentAudit` (Wave 1 — the audit hub's `payment_audits`
+contract, see that section above), `DayProvenance`,
 `DayTotals`, `BookingTotals`, `DaySheet`
 (see Wave 2 field additions above, plus `deposits: DepositEvent[]` Wave C),
 `DaySummary` (now with

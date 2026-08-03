@@ -405,6 +405,30 @@ export interface DepositNote {
   updatedBy: string;
 }
 
+// ── Payment audits (Wave 1, the office audit hub — docs/plan-audit-hub-
+// slips.md) ─────────────────────────────────────────────────────────────
+// The office audits EVERY payment of a day (not just deposits), one row per
+// STAY SETTLEMENT (see CONTEXT.md's ตรวจสอบ entry). A tick is independent of
+// `sheet_days.verified_at`/month-close — its OWN small audit trail, keyed by
+// the settlement's own reference rather than a date: `auditKey` is the CH
+// (check-in) number for a เช็คอิน row, or the receipt's `pay_no` for a
+// รับมัดจำ/คืนเงิน row. Absence of a row = pending (never a stored "false" —
+// mirrors `deposit_notes`'s "explained = resolved_at IS NOT NULL" convention
+// of using presence/absence rather than a boolean column). `date` records
+// the audited DAY (the ตรวจรายวัน tab's selected date at tick time) — kept
+// for the day-scoped listing query (`listPaymentAudits(property, date)`),
+// even though `auditKey` alone is the table's real identity (PK is
+// `(property, auditKey)`, not `(property, auditKey, date)` — a settlement
+// has exactly one audit_key for life, so re-ticking always targets the same
+// row regardless of which day's queue view the tick was pressed from).
+export interface PaymentAudit {
+  property: Property;
+  auditKey: string;
+  date: string;
+  checkedAt: string;
+  checkedBy: string;
+}
+
 /**
  * A deposit thread's (R-number's) lifecycle state — owner ask (2026-08-01,
  * register mapability): the register must make a deposit's STATE

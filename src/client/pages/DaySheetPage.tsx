@@ -24,6 +24,7 @@ import {
   deleteExpense,
   fillFromBookings,
   getDay,
+  getDayAudit,
   getMe,
   listBookingLines,
   listDays,
@@ -132,6 +133,12 @@ export function DaySheetPage({ property, date }: Props) {
   const [dayNoteState, setDayNoteState] = useState<SimpleSaveState>("idle");
   const [verifyBusy, setVerifyBusy] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+  // Wave 1 (docs/plan-audit-hub-slips.md): the ตรวจสอบ tab's day-audit
+  // progress, fetched fail-silent (null on ANY failure — PMS not
+  // configured, a query error, network — this is secondary info on the day
+  // sheet, never worth its own error banner). `null` also means "not yet
+  // loaded", so the chip simply doesn't render until a real value lands.
+  const [auditProgress, setAuditProgress] = useState<{ checked: number; total: number } | null>(null);
 
   // ── Weekly income chart (print-only, PrintableDaySummary.tsx) ─────────
   // null until loaded, and left null on any fetch failure — the chart
@@ -159,6 +166,21 @@ export function DaySheetPage({ property, date }: Props) {
         /* /api/me failing just means the footer falls back to server-attributed emails */
       });
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAuditProgress(null);
+    getDayAudit(property, date)
+      .then((res) => {
+        if (!cancelled) setAuditProgress({ checked: res.checkedCount, total: res.totalCount });
+      })
+      .catch(() => {
+        /* fail-silent — see auditProgress's own doc comment above */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [property, date]);
 
   useEffect(() => {
     let cancelled = false;
@@ -753,10 +775,26 @@ export function DaySheetPage({ property, date }: Props) {
         </div>
       )}
 
-      {/* สถานะข้อมูล: ที่มา + การยืนยัน */}
+      {/* สถานะข้อมูล: ที่มา + การยืนยัน + ตรวจสอบ (Wave 1) */}
       <section className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-panel px-4 py-2.5 text-sm">
         <span className="text-ink-muted">ที่มาของข้อมูล: {PROVENANCE_LABELS_TH[day.provenance]}</span>
         <div className="flex items-center gap-2">
+          {/* Wave 1 (docs/plan-audit-hub-slips.md): "ตรวจแล้ว n/m" links to
+              the ตรวจสอบ page's ตรวจรายวัน tab, preselected on THIS day —
+              independent of ยืนยันข้อมูล (a separate audit trail entirely, by
+              owner decision — see CONTEXT.md's ตรวจสอบ entry). Fail-silent:
+              simply absent (auditProgress stays null) when the fetch fails
+              for any reason, including PMS-not-configured. */}
+          {auditProgress && (
+            <button
+              type="button"
+              onClick={() => navigate(`/${property}/deposits?tab=audit&date=${date}`)}
+              title="ไปหน้าตรวจสอบรายวัน"
+              className="inline-flex items-center gap-1 rounded-full bg-tint px-2.5 py-1 text-xs font-medium text-ink-muted hover:bg-line"
+            >
+              ตรวจแล้ว {auditProgress.checked}/{auditProgress.total}
+            </button>
+          )}
           {day.verifiedAt ? (
             <span
               title={`ยืนยันโดย ${day.verifiedBy ?? "-"} เมื่อ ${formatUpdatedAt(day.verifiedAt)}`}

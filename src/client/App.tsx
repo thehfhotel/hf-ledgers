@@ -71,7 +71,11 @@ function parseRoute(pathname: string): Route {
   if (parts[1] === "bookings" && parts[2]) return { kind: "bookings", property, date: parts[2] };
   if (parts[1] === "history") return { kind: "history", property };
   if (parts[1] === "categories") return { kind: "categories", property };
-  if (parts[1] === "deposits") return { kind: "deposits", property };
+  // "audit" is a bare alias (Wave 1, docs/plan-audit-hub-slips.md) for the
+  // SAME route/page — "deposits" stays canonical (bookmarks/deep-links);
+  // DepositRegisterPage.tsx itself reads `location.search` for the
+  // ?tab=&date= deep-link params, so no query-string handling belongs here.
+  if (parts[1] === "deposits" || parts[1] === "audit") return { kind: "deposits", property };
   if (parts[1] === "report" && parts[2]) return { kind: "report", property, date: parts[2] };
 
   return homeRoute();
@@ -98,12 +102,15 @@ const PROPERTY_CHIPS: { id: Property; label: string }[] = PROPERTIES.map((id) =>
 // document.title's screen half, keyed by route kind — same names as
 // navItems' labels below (kept as a separate map since navItems only exists
 // inside the component, closed over `route`).
+// "deposits" is now "ตรวจสอบ" (Wave 1, docs/plan-audit-hub-slips.md — the
+// page became a 3-tab hub: ตรวจรายวัน (new, default) | รายการมัดจำ | สรุปรายเดือน).
+// The route/kind name itself stays "deposits" (bookmarks/deep-links).
 const SCREEN_LABEL_TH: Record<Route["kind"], string> = {
   day: "สรุปวัน",
   bookings: "รายละเอียดรายรับ",
   history: "ประวัติ",
   categories: "หมวดหมู่",
-  deposits: "มัดจำ",
+  deposits: "ตรวจสอบ",
   report: "รายงาน",
 };
 
@@ -211,7 +218,7 @@ export function App() {
     },
     {
       key: "deposits",
-      label: "มัดจำ",
+      label: "ตรวจสอบ",
       active: route.kind === "deposits",
       path: `/${displayProperty}/deposits`,
     },

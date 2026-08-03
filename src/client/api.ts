@@ -689,3 +689,139 @@ export function putDepositNote(
 export function deleteDepositNote(property: Property, rNumber: string): Promise<void> {
   return request(`/${property}/deposits/${encodeURIComponent(rNumber)}/note`, { method: "DELETE" });
 }
+
+// ── Wave 1: the office day-audit hub (docs/plan-audit-hub-slips.md) ───────
+// A SEPARATE day-scoped, STAY-MERGED reshaping of a day's PMS payments
+// (src/server/day-audit.ts) — mirrors Wave D's register shape (mismatched
+// server-side type literals, not shared imports — see DepositRegisterEvent's
+// own doc comment above for the same "never invert the natural dependency
+// direction" reasoning).
+
+/** A stay's payment-method breakdown — `cashSatang`/`transferSatang`/
+ * `creditSatang`/`webSatang` are TENDER totals (how the folio was paid);
+ * `penaltySatang` is a REVENUE-line breakdown instead (how much of
+ * `grossSatang` came from a ค่าปรับ line) — an orthogonal axis, not a fifth
+ * tender. */
+export interface DayAuditComposition {
+  cashSatang: number;
+  transferSatang: number;
+  creditSatang: number;
+  webSatang: number;
+  penaltySatang: number;
+}
+
+/** A เช็คอิน row's ตัดยอดมัดจำ chip, paired with the R's own received event
+ * across its whole history. `receivedChecked` (additive over
+ * `src/server/day-audit.ts`'s own `DayAuditDepositApplied`) is the PAIRED
+ * receipt's own audit state (merged server-side by `receivedPayNo`) —
+ * distinct from this เช็คอิน row's OWN `checked` field below, which is this
+ * row's audit state, not the receipt's. */
+export interface DayAuditDepositApplied {
+  amountSatang: number;
+  rRef: string;
+  receivedDateBangkok: string | null;
+  receivedPayNo: string | null;
+  receivedTender: DepositTender | null;
+  receivedAmountSatang: number | null;
+  mismatch: boolean;
+  receivedChecked: boolean;
+}
+
+/** The audit-state fields the server merges onto EVERY row kind from
+ * `payment_audits` (by `auditKey`) — `proofCount`/`proofsPending` are
+ * Wave-2 seam placeholders, always `0`/`false` in Wave 1. */
+interface DayAuditStateFields {
+  checked: boolean;
+  checkedAt: string | null;
+  checkedBy: string | null;
+  proofCount: number;
+  proofsPending: boolean;
+}
+
+/** One เช็คอิน row — a check-in's ค่าห้อง payment(s) and its (at most one)
+ * ตัดยอดมัดจำ line merged, keyed by the CH number. */
+export type DayAuditCheckinRow = DayAuditStateFields & {
+  kind: "checkin";
+  auditKey: string;
+  chRef: string;
+  guestName: string | null;
+  receiptPayNos: string[];
+  grossSatang: number;
+  composition: DayAuditComposition;
+  depositApplied: DayAuditDepositApplied | null;
+};
+
+/** One รับมัดจำ row — a จ่ายล่วงหน้า receipt received this day, keyed by its
+ * own pay_no. `checkinDateBangkok` is a best-effort forward reference (see
+ * server-side doc comment for why it may legitimately be `null` even for a
+ * real booking — an unverified PMS join, not an error state). */
+export type DayAuditDepositRow = DayAuditStateFields & {
+  kind: "deposit";
+  auditKey: string;
+  rRef: string;
+  guestName: string | null;
+  payNo: string;
+  tender: DepositTender | null;
+  amountSatang: number;
+  checkinDateBangkok: string | null;
+};
+
+/** One คืนเงิน row (negative) — `refundOf: "deposit"` (a มัดจำล่วงหน้า
+ * refunded, `ref` = the R-number) or `refundOf: "excess"` (a folio's
+ * excess-payment refund, `ref` = the CH number when known, else its own
+ * `payNo`). `overRefundedWarning` (the R015832-shape signal) is only ever
+ * `true` for `refundOf: "deposit"` rows. */
+export type DayAuditRefundRow = DayAuditStateFields & {
+  kind: "refund";
+  auditKey: string;
+  refundOf: "deposit" | "excess";
+  ref: string;
+  guestName: string | null;
+  payNo: string;
+  tender: DepositTender | null;
+  amountSatang: number;
+  overRefundedWarning: boolean;
+};
+
+export type DayAuditRow = DayAuditCheckinRow | DayAuditDepositRow | DayAuditRefundRow;
+
+export interface DayAuditResponse {
+  rows: DayAuditRow[];
+  checkedCount: number;
+  totalCount: number;
+  /** Whether this (property, date) already has at least one `source: "pms"`
+   * booking line — the client's ดึงข้อมูล chip. */
+  pullStatus: boolean;
+}
+
+// GET /api/:property/audit/day/:date — 503 when this property's PMS env URL
+// is unset (ApiError, err.status === 503), 502 on a live query failure.
+// `rows` arrives PENDING FIRST.
+export function getDayAudit(property: Property, date: string): Promise<DayAuditResponse> {
+  return request(`/${property}/audit/day/${date}`);
+}
+
+export interface PaymentAuditWire {
+  property: string;
+  auditKey: string;
+  date: string;
+  checkedAt: string;
+  checkedBy: string;
+}
+
+// POST /api/:property/audit/:auditKey/check — ticks (or re-ticks) a
+// settlement. `date` is the audited day the tick was made FROM, not part of
+// the settlement's identity (re-ticking the same auditKey from a different
+// day's queue view still targets the same row). NOT month-close gated.
+export function checkPaymentAudit(property: Property, auditKey: string, date: string): Promise<PaymentAuditWire> {
+  return request(`/${property}/audit/${encodeURIComponent(auditKey)}/check`, {
+    method: "POST",
+    body: JSON.stringify({ date }),
+  });
+}
+
+// DELETE /api/:property/audit/:auditKey/check — un-tick. Always 204
+// (un-ticking something never ticked at all is a harmless no-op).
+export function uncheckPaymentAudit(property: Property, auditKey: string): Promise<void> {
+  return request(`/${property}/audit/${encodeURIComponent(auditKey)}/check`, { method: "DELETE" });
+}

@@ -20,6 +20,14 @@ services:
       - PMS_DB_URL_HF=${PMS_DB_URL_HF:-}
       - PMS_DB_URL_HFVILLE=${PMS_DB_URL_HFVILLE:-}
       - DB_PATH=/app/data/ledger.db
+      # Wave 2 (docs/plan-audit-hub-slips.md): the day-audit hub's slip-proof
+      # enrichment + proof-thumb proxy (src/server/server.ts) call ส่งสลิป's
+      # own internal endpoints over the `default` network by container name
+      # — never through Cloudflare Access (that's a private Docker-network
+      # hop, gated purely by the shared bearer token). Both dark (enrichment
+      # a no-op, proxy 404s) when SLIPS_STATUS_URL is empty.
+      - SLIPS_STATUS_URL=${SLIPS_STATUS_URL:-http://hf-slips:4060}
+      - SLIPS_INGRESS_TOKEN=${SLIPS_INGRESS_TOKEN:-}
     volumes:
       - ledger_data:/app/data
     networks:
@@ -43,9 +51,66 @@ services:
         reservations:
           memory: 64M
 
+  # ส่งสลิป — the reception slip inbox (Wave 2, docs/plan-audit-hub-
+  # slips.md). SAME image as `app`, a DIFFERENT entry point (command) and a
+  # completely separate volume/database — the two containers share no
+  # filesystem, no DB, and (deliberately) no public hostname/nginx path;
+  # the CF tunnel reaches this container directly by host IP:port, same
+  # pattern the ledger's own `app` service documents above. Joins `default`
+  # (so `app` can reach it by container name for the internal status/thumb
+  # calls) and `hotel-network` (it reuses src/server/pms-prefill.ts's PMS
+  # client for its own queue query) — never `shared-nginx` (no public path
+  # rides the shared ingress for this host).
+  hf-slips:
+    image: ghcr.io/thehfhotel/income-ledger:${IMAGE_TAG:-latest}
+    container_name: hf-slips
+    command: ["bun", "src/slips/server.ts"]
+    restart: unless-stopped
+    ports:
+      - "${SLIPS_HOST_PORT:-4060}:4060"
+    environment:
+      - NODE_ENV=production
+      - PORT=4060
+      - TZ=${TZ:-Asia/Bangkok}
+      - ACCESS_TEAM_DOMAIN=${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}
+      # A SEPARATE Cloudflare Access application/audience from the ledger's
+      # own ACCESS_AUD above — slips.thehfhotel.org is its own Access app
+      # (reception kiosks + HF Managers), never the income-ledger one.
+      - ACCESS_AUD=${ACCESS_AUD_SLIPS:-}
+      # Same read-only PMS role the ledger uses (src/server/pms-prefill.ts,
+      # reused directly by src/slips/queue.ts) — same values, both
+      # containers read the same GH secrets.
+      - PMS_DB_URL_HF=${PMS_DB_URL_HF:-}
+      - PMS_DB_URL_HFVILLE=${PMS_DB_URL_HFVILLE:-}
+      - SLIPS_DATA_DIR=/app/slips-data
+      # Server-to-server bearer token (src/slips/internal.ts) — the SAME
+      # value the ledger's own SLIPS_INGRESS_TOKEN below must carry, or
+      # every enrichment/proxy call 401s.
+      - SLIPS_INGRESS_TOKEN=${SLIPS_INGRESS_TOKEN:-}
+    volumes:
+      - slips_data:/app/slips-data
+    networks:
+      - default
+      - hotel-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4060/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1.0'
+        reservations:
+          memory: 64M
+
 volumes:
   ledger_data:
     name: ledger_data
+  slips_data:
+    name: slips_data
 
 networks:
   shared-nginx:

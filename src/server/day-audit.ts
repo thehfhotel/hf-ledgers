@@ -321,6 +321,23 @@ export interface DayAuditRefundRow {
 
 export type DayAuditRow = DayAuditCheckinRow | DayAuditDepositRow | DayAuditRefundRow;
 
+/**
+ * True iff this settlement carries a nonzero TRANSFER component anywhere —
+ * a เช็คอิน row's own transfer tender, or a รับมัดจำ/คืนเงิน row whose own
+ * `tender` is `"transfer"`. Wave 2 (docs/plan-audit-hub-slips.md): "only
+ * TRANSFER payments queue for slips (cash needs no slip; include transfer-
+ * tendered รับมัดจำ and refunds)" — this is that predicate, exported so BOTH
+ * src/server/server.ts (the ledger's own day-audit route, deciding which
+ * auditKeys are even worth asking the slips service about) and
+ * src/slips/queue.ts (ส่งสลิป's own queue filter) share ONE rule rather than
+ * two copies that could drift — this file already owns the row shape both
+ * sides read, so it is the natural home, not either caller. PURE.
+ */
+export function needsSlipProof(row: DayAuditRow): boolean {
+  if (row.kind === "checkin") return row.composition.transferSatang !== 0;
+  return row.tender === "transfer";
+}
+
 /** One booking-scope (ค่าห้อง/ยกเลิกห้อง/ค่าปรับ/ตัดยอด) payment group's
  * running aggregate, keyed by payment key while grouping, then re-grouped by
  * `cinNo` to build the merged เช็คอิน rows. Internal to `buildDayAuditRows`. */

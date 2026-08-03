@@ -1,0 +1,5 @@
+/* Reuses the ledger's own HF One token file directly (one source of truth
+   for the estate design system's burgundy/gold tokens across BOTH origins
+   this repo now builds) — see src/client/style.css's own doc comment for
+   where the canonical values live (~/HF-erp/design/HF-ONE.md). */
+@import "../../client/style.css";

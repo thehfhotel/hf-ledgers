@@ -31,16 +31,22 @@ COPY package.json bun.lock* ./
 RUN bun install --production --frozen-lockfile
 
 COPY tsconfig.json ./
-# Copies ALL of src/ (server + client + shared), not a subset. A new
+# Copies ALL of src/ (server + client + shared + slips), not a subset. A new
 # top-level src/ directory needs no Dockerfile change as a result — but a
-# new import path OUTSIDE src/ (or scripts/) does. See CLAUDE.md.
+# new import path OUTSIDE src/ (or scripts/) does. See CLAUDE.md. This is
+# ALSO how ส่งสลิป (src/slips/, Wave 2, docs/plan-audit-hub-slips.md) ships:
+# same image, same COPY, a different CMD (see docker-compose.yml's hf-slips
+# service) — verified this needed no Dockerfile change here.
 COPY src ./src
 COPY scripts ./scripts
 COPY --from=build /app/dist ./dist
 
-# SQLite lives on a mounted volume.
-RUN mkdir -p /app/data
-VOLUME ["/app/data"]
+# SQLite lives on a mounted volume. /app/slips-data is ส่งสลิป's OWN volume
+# (a SEPARATE container/volume — see docker-compose.yml's hf-slips service
+# — never shares ledger_data); harmless to create here even though the
+# ledger's own CMD never touches it.
+RUN mkdir -p /app/data /app/slips-data
+VOLUME ["/app/data", "/app/slips-data"]
 
 EXPOSE 3000
 

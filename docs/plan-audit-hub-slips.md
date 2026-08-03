@@ -38,15 +38,22 @@ names, pull-status), the 3-tab restructure + queue UI, day-sheet progress chip. 
 **Wave 2 — slip inbox + integration (same repo, second service).** OWNER-DECIDED 2026-08-03:
 no new repo — ส่งสลิป lives in THIS repo as a second entry point (src/slips/), sharing the PMS
 client / guest-name / UI kit code directly, built into the SAME Docker image, deployed as a
-SECOND container (service hf-slips, port 4050, own slips-data volume) behind
+SECOND container (service hf-slips, port 4060, own slips-data volume) behind
 slips.thehfhotel.org. Separate process/origin is non-negotiable (security): the reception
 origin must physically contain no ledger routes — never serve both hostnames from one process.
-Estate wiring: hostnames.json managed entry (192.168.100.228:4050), Access app (reception
+Estate wiring: hostnames.json managed entry (192.168.100.228:4060), Access app (reception
 kiosks + HF Managers), portal card, compose service, deploy workflow extension. Ledger audit
 integration (thumbnails, รอสลิป) via bearer-token server-to-server fetch. Retire printed
 copies. **Opus review of the
 security surface before ship** (cross-app token, volume privacy, public-repo discipline —
 slips carry bank account numbers).
+
+Port corrected 2026-08-03 (Opus security review, B1): originally spec'd as 4050, but 4050 is
+ALREADY the Expense Ledger's port on the estate map
+(`~/HF-erp/infra/cloudflare/hostnames.json` → `expense.thehfhotel.org` → `192.168.100.228:4050`,
+its own engine on 4051) — publishing hf-slips on 4050 would collide with/take down Expense
+Ledger. hf-slips uses **4060** (internal container port and published host port both), verified
+free across the estate map.
 
 Storage rules (owner-decided 2026-08-03, binding):
 - **Append-only versioning.** No code path deletes or overwrites a picture file; the app has no

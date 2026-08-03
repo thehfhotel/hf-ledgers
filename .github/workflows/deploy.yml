@@ -109,6 +109,16 @@ jobs:
           ANALYTICS_TOKEN: ${{ secrets.ANALYTICS_TOKEN }}
           PMS_DB_URL_HF: ${{ secrets.PMS_DB_URL_HF }}
           PMS_DB_URL_HFVILLE: ${{ secrets.PMS_DB_URL_HFVILLE }}
+          # Wave 2 (docs/plan-audit-hub-slips.md): ส่งสลิป's own Cloudflare
+          # Access application/audience (a SEPARATE app from ACCESS_AUD
+          # above — slips.thehfhotel.org, not income.thehfhotel.org) and the
+          # shared server-to-server bearer token both containers need (the
+          # ledger to call ส่งสลิป's internal endpoints, ส่งสลิป to validate
+          # those calls) — see src/slips/internal.ts. Both new GH secrets;
+          # empty until set keeps both features dark (no enrichment, 401 on
+          # the internal endpoints).
+          ACCESS_AUD_SLIPS: ${{ secrets.ACCESS_AUD_SLIPS }}
+          SLIPS_INGRESS_TOKEN: ${{ secrets.SLIPS_INGRESS_TOKEN }}
         run: |
           set -euo pipefail
           # Runtime env shipped alongside compose; docker compose reads
@@ -130,6 +140,15 @@ jobs:
             # property whose URL is empty. Never commit values — public repo.
             printf 'PMS_DB_URL_HF=%s\n' "${PMS_DB_URL_HF:-}"
             printf 'PMS_DB_URL_HFVILLE=%s\n' "${PMS_DB_URL_HFVILLE:-}"
+            # Wave 2: ส่งสลิป (docs/plan-audit-hub-slips.md) — one .env feeds
+            # BOTH compose services (`app` and `hf-slips`), so these live
+            # here once, not duplicated per service. SLIPS_HOST_PORT stays
+            # at its compose default (4060) unless overridden; SLIPS_STATUS_URL
+            # is a fixed internal container-name URL, never a secret (same
+            # treatment as ANALYTICS_URL above).
+            printf 'SLIPS_STATUS_URL=%s\n' "http://hf-slips:4060"
+            printf 'ACCESS_AUD_SLIPS=%s\n' "${ACCESS_AUD_SLIPS:-}"
+            printf 'SLIPS_INGRESS_TOKEN=%s\n' "${SLIPS_INGRESS_TOKEN:-}"
           } > .env
           tar -czf /tmp/deploy.tar.gz docker-compose.yml .env
           rm -f .env

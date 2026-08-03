@@ -61,7 +61,7 @@ import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push
 import { fetchDayPayments, pmsConfigured } from "./pms-prefill.ts";
 import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-prefill.ts";
 import { buildDepositExceptions, fetchDepositRegister, DEPOSIT_R_NUMBER_RE } from "./deposit-register.ts";
-import { fetchDayAudit } from "./day-audit.ts";
+import { fetchDayAudit, needsSlipProof } from "./day-audit.ts";
 import type { DayAuditRow } from "./day-audit.ts";
 import { computeDayTotals } from "../shared/totals.ts";
 import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings, depositCashTotals } from "../shared/bookings.ts";
@@ -339,6 +339,75 @@ function preCutoverDepositAppliedResponse(
     });
   }
   return null;
+}
+
+// ── Wave 2: slip-proof enrichment (docs/plan-audit-hub-slips.md) ──────────
+// Server-to-server call to ส่งสลิป's own internal status endpoint
+// (src/slips/internal.ts) — bearer-token gated (SLIPS_INGRESS_TOKEN), NEVER
+// behind Cloudflare Access (a private Docker-network hop between the two
+// containers). Read lazily (call-time), never captured at import time —
+// same rule pms-prefill.ts documents for its own env reads. Dark by default
+// (SLIPS_STATUS_URL unset skips the fetch outright) and FAIL-SILENT: any
+// error (network, non-200, bad JSON, timeout) degrades to "every row's
+// proofCount stays 0" rather than 502ing the whole day-audit route — a
+// slip-inbox outage must never take down the ledger's own audit hub.
+
+const SLIPS_STATUS_URL = () => process.env.SLIPS_STATUS_URL || "";
+const SLIPS_INGRESS_TOKEN = () => process.env.SLIPS_INGRESS_TOKEN || "";
+
+interface SlipProofStatusEntry {
+  count: number;
+  latestAt: string | null;
+  latestVersion: number | null;
+  superseded: number;
+}
+
+type SlipProofFetcher = (property: Property, auditKeys: readonly string[]) => Promise<Map<string, SlipProofStatusEntry>>;
+
+let slipProofFetchOverride: SlipProofFetcher | null = null;
+
+/**
+ * Batch-fetches proof status for exactly the auditKeys that need one
+ * (callers filter with `needsSlipProof` first — never asked about a
+ * cash-only row). Consults the test override first (same `_internal`
+ * pattern as every sibling module). `AbortSignal.timeout` bounds a hung
+ * slip service to a few seconds rather than blocking the whole day-audit
+ * response indefinitely.
+ */
+async function fetchSlipProofStatus(property: Property, auditKeys: readonly string[]): Promise<Map<string, SlipProofStatusEntry>> {
+  const out = new Map<string, SlipProofStatusEntry>();
+  // Nothing eligible — never even calls the override/fetch. Checked BEFORE
+  // the override so a test override is a true full replacement (never
+  // invoked when the route itself has nothing to ask about), same as the
+  // real fetch path below.
+  if (auditKeys.length === 0) return out;
+
+  // Wraps the OVERRIDE too, not just the real fetch — a throwing test
+  // override must degrade exactly the same way a real network failure
+  // does (this IS the fail-silent guarantee under test, not just a
+  // production-only code path).
+  try {
+    if (slipProofFetchOverride) return await slipProofFetchOverride(property, auditKeys);
+
+    const baseUrl = SLIPS_STATUS_URL();
+    if (baseUrl === "") return out;
+
+    const url = `${baseUrl}/slips-internal/${property}/status?keys=${encodeURIComponent(auditKeys.join(","))}`;
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${SLIPS_INGRESS_TOKEN()}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) throw new Error(`slips status endpoint returned ${res.status}`);
+    const body = (await res.json()) as Record<string, SlipProofStatusEntry>;
+    for (const [key, value] of Object.entries(body)) out.set(key, value);
+  } catch (err) {
+    console.warn(
+      `day-audit: slip proof status unavailable (fail-silent — proofCount stays 0 for this request): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  return out;
 }
 
 // ── /api routes ────────────────────────────────────────────────────────
@@ -1601,10 +1670,17 @@ export const api = new Elysia({ prefix: "/api" })
   // may have been ticked from a DIFFERENT day's queue view than the one
   // being audited right now, hence the SEPARATE property-wide
   // `listPaymentAudits(property)` lookup (no date filter) for that one
-  // field only. `proofCount`/`proofsPending` are Wave-2 seam placeholders
-  // (always `0`/`false` in Wave 1 — the slip inbox is a separate wave, see
-  // the plan doc). `rows` sorts PENDING FIRST (`Array#sort` is stable, so
-  // each checked/pending bucket keeps `buildDayAuditRows`' own
+  // field only. `proofCount`/`proofsPending` (Wave 2): `proofCount` comes
+  // from ส่งสลิป's own internal status endpoint (`fetchSlipProofStatus`,
+  // fail-silent — an unreachable/unconfigured slip service just means every
+  // row's `proofCount` stays 0, never a 502 for the whole route);
+  // `proofsPending` is `needsSlipProof(row) && proofCount === 0`, computed
+  // UNCONDITIONALLY from the row itself (never gated on whether the slip
+  // service actually answered) — the safer failure direction is "still
+  // shows pending", never silently hiding a missing-slip signal. A row that
+  // never needed a slip (cash-only) always reads `proofCount: 0,
+  // proofsPending: false`. `rows` sorts PENDING FIRST (`Array#sort` is
+  // stable, so each checked/pending bucket keeps `buildDayAuditRows`' own
   // kind/key-sorted order as a secondary key). `pullStatus` answers the
   // client's ดึงข้อมูล chip: whether this (property, date) already has at
   // least one `source: "pms"` booking line (i.e. the day's own bookings page
@@ -1628,15 +1704,20 @@ export const api = new Elysia({ prefix: "/api" })
     const allAudits = listPaymentAudits(property);
     const auditByKeyAll = new Map(allAudits.map((a) => [a.auditKey, a] as const));
 
+    const proofEligibleKeys = rawRows.filter(needsSlipProof).map((r) => r.auditKey);
+    const proofByKey = await fetchSlipProofStatus(property, proofEligibleKeys);
+
     const rows = rawRows.map((row) => {
       const own = checkedByKey.get(row.auditKey);
+      const eligible = needsSlipProof(row);
+      const proofCount = eligible ? (proofByKey.get(row.auditKey)?.count ?? 0) : 0;
       const base = {
         ...row,
         checked: own !== undefined,
         checkedAt: own?.checkedAt ?? null,
         checkedBy: own?.checkedBy ?? null,
-        proofCount: 0,
-        proofsPending: false,
+        proofCount,
+        proofsPending: eligible && proofCount === 0,
       };
       if (base.kind === "checkin" && base.depositApplied !== null) {
         const { depositApplied } = base;
@@ -1694,9 +1775,60 @@ export const api = new Elysia({ prefix: "/api" })
     }
     deletePaymentAudit(property, auditKey);
     return status(204);
+  })
+
+  // 37. GET /api/:property/audit/proof-thumb/:auditKey — Wave 2: proxies
+  // ส่งสลิป's own internal thumbnail endpoint server-to-server (bearer
+  // token), so the office browser never needs the slips origin directly —
+  // this endpoint sits INSIDE the ledger's own auth'd /api group (Cloudflare
+  // Access + identify() already gate it), the bearer token is only for the
+  // ledger->slips hop. Dark (404) when SLIPS_STATUS_URL is unset; 502 on any
+  // fetch failure. A convenience image only — DayAuditQueue.tsx falls back
+  // to its own รอสลิป chip on any non-200, never blocks on this.
+  .get("/:property/audit/proof-thumb/:auditKey", async ({ params, status }) => {
+    const { property, auditKey } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (auditKey.length === 0 || !isValidBoundedString(auditKey, BOOKING_NO_MAX_LEN)) {
+      return status(400, { error: "invalid auditKey" });
+    }
+    const baseUrl = SLIPS_STATUS_URL();
+    if (baseUrl === "") return status(404, { error: "not configured" });
+
+    try {
+      const res = await fetch(`${baseUrl}/slips-internal/${property}/thumb/${encodeURIComponent(auditKey)}`, {
+        headers: { authorization: `Bearer ${SLIPS_INGRESS_TOKEN()}` },
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.status === 404) return status(404, { error: "not found" });
+      if (!res.ok) return status(502, { error: "thumbnail unavailable" });
+      const bytes = await res.arrayBuffer();
+      // Cache-Control (2026-08-03 review): `no-store` — these are bank-slip
+      // photos proxied to a browser on a SHARED reception/office kiosk; a
+      // fixed short TTL still leaves them cached on that shared machine's
+      // disk. Never forwards the upstream response's own header verbatim
+      // either, so this stays correct even if src/slips/server.ts's own
+      // value ever changes.
+      return new Response(bytes, {
+        headers: { "content-type": res.headers.get("content-type") ?? "image/jpeg", "cache-control": "private, no-store" },
+      });
+    } catch (err) {
+      // Error hygiene: never surface a raw fetch error (can embed the
+      // internal slips hostname/port) to the client — log detail
+      // server-side only.
+      console.error(`audit proof-thumb proxy failed for ${property}/${auditKey}: ${err instanceof Error ? err.message : String(err)}`);
+      return status(502, { error: "thumbnail unavailable" });
+    }
   });
 
 const apiFetch = (req: Request) => api.handle(req);
+
+// Test-only handle — same shape as every sibling module's `_internal`
+// (day-audit.ts, pms-prefill.ts).
+export const _internal = {
+  setSlipProofFetchForTests(fn: SlipProofFetcher | null): void {
+    slipProofFetchOverride = fn;
+  },
+};
 
 // GET /healthz lives OUTSIDE /api, needs no auth, and never touches the DB
 // (the deploy shim only allows 15 attempts x 2s) — see src/shared/api.md.

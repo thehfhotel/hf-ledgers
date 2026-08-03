@@ -187,13 +187,14 @@ export function DayAuditQueue({ property, date, onDateChange }: Props) {
                       <th className="px-4 py-2 text-left">ลูกค้า / อ้างอิง</th>
                       <th className="px-4 py-2 text-right">ยอด</th>
                       <th className="px-4 py-2 text-left">การชำระ</th>
+                      <th className="px-4 py-2 text-left">สลิป</th>
                       <th className="px-4 py-2"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-line">
                     {pending.map((row) => (
                       <tr key={row.auditKey}>
-                        <RowCells row={row} />
+                        <RowCells row={row} property={property} />
                         <td className="px-4 py-2 text-right">
                           <button
                             type="button"
@@ -223,6 +224,7 @@ export function DayAuditQueue({ property, date, onDateChange }: Props) {
                       <th className="px-4 py-2 text-left">ลูกค้า / อ้างอิง</th>
                       <th className="px-4 py-2 text-right">ยอด</th>
                       <th className="px-4 py-2 text-left">การชำระ</th>
+                      <th className="px-4 py-2 text-left">สลิป</th>
                       <th className="px-4 py-2 text-left">ตรวจโดย</th>
                       <th className="px-4 py-2"></th>
                     </tr>
@@ -230,7 +232,7 @@ export function DayAuditQueue({ property, date, onDateChange }: Props) {
                   <tbody className="divide-y divide-line text-ink-muted">
                     {done.map((row) => (
                       <tr key={row.auditKey}>
-                        <RowCells row={row} />
+                        <RowCells row={row} property={property} />
                         <td className="px-4 py-2 text-xs">
                           {row.checkedAt === null ? (
                             "กำลังบันทึก..."
@@ -277,10 +279,10 @@ function rowAmountSatang(row: DayAuditRow): number {
   return row.kind === "checkin" ? row.grossSatang : row.amountSatang;
 }
 
-/** The two shared cells (ประเภท / ลูกค้า+อ้างอิง) plus ยอด/การชำระ — one
+/** The two shared cells (ประเภท / ลูกค้า+อ้างอิง) plus ยอด/การชำระ/สลิป — one
  * function so the pending and done tables never drift on layout, only on
  * the trailing action/who-when cell each table appends itself. */
-function RowCells({ row }: { row: DayAuditRow }) {
+function RowCells({ row, property }: { row: DayAuditRow; property: Property }) {
   return (
     <>
       <td className="px-4 py-2 align-top">
@@ -298,7 +300,54 @@ function RowCells({ row }: { row: DayAuditRow }) {
       <td className="px-4 py-2 align-top">
         <CompositionCell row={row} />
       </td>
+      <td className="px-4 py-2 align-top">
+        <SlipProofCell row={row} property={property} />
+      </td>
     </>
+  );
+}
+
+/** True iff this settlement carries a nonzero TRANSFER component anywhere —
+ * a เช็คอิน row's own transfer tender, or a รับมัดจำ/คืนเงิน row whose own
+ * `tender` is `"transfer"`. This is the client's OWN copy of
+ * src/server/day-audit.ts's `needsSlipProof` (Wave 2, docs/plan-audit-hub-
+ * slips.md) — a small pure predicate, kept as a separate literal rather
+ * than imported (the client never imports server-only modules; same "never
+ * invert the natural dependency direction" reasoning this codebase already
+ * documents for its other small duplicated predicates/constants, e.g.
+ * deposit-register.ts's DEPOSIT_R_NUMBER_RE). */
+function needsSlipProof(row: DayAuditRow): boolean {
+  if (row.kind === "checkin") return row.composition.transferSatang !== 0;
+  return row.tender === "transfer";
+}
+
+/** สลิป cell (Wave 2): a settlement that never needed a transfer slip shows
+ * a plain dash. One that does shows either a thumbnail + count (a ledger-
+ * proxied, auth'd route — GET /api/:property/audit/proof-thumb/:auditKey —
+ * so the office browser never needs the slips origin directly) or a
+ * รอสลิป chip when `proofsPending` — a missing slip is an audit signal on
+ * both sides, per the plan. The thumbnail img has no onError fallback
+ * beyond simply not rendering broken-image chrome poorly — a 404/502 from
+ * the proxy (slips service down, or genuinely no thumbnail yet) is exactly
+ * as informative as รอสลิป would be, so this stays a thin `<img>`, never a
+ * second network call to check existence first. */
+function SlipProofCell({ row, property }: { row: DayAuditRow; property: Property }) {
+  if (!needsSlipProof(row)) return <span className="text-ink-muted">-</span>;
+
+  if (row.proofsPending) {
+    return <span className="rounded-full bg-bad/15 px-2 py-0.5 text-[11px] font-semibold text-bad">รอสลิป</span>;
+  }
+
+  return (
+    <span className="flex items-center gap-1">
+      <img
+        src={`/api/${property}/audit/proof-thumb/${encodeURIComponent(row.auditKey)}`}
+        alt={`สลิปของ ${row.auditKey}`}
+        className="h-8 w-8 rounded-md object-cover"
+        loading="lazy"
+      />
+      {row.proofCount > 1 && <span className="text-[11px] font-medium text-ink-muted">×{row.proofCount}</span>}
+    </span>
   );
 }
 

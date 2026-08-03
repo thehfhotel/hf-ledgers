@@ -33,8 +33,35 @@ async function jwksKeys(): Promise<Json[]> {
   return jwksCache.keys;
 }
 
-/** Verify a CF Access JWT; returns its payload or null. */
+let loggedMissingAudInProd = false;
+
+/** Verify a CF Access JWT; returns its payload or null.
+ *
+ * B4 (Opus security review, 2026-08-03): an unset `ACCESS_AUD` used to
+ * silently SKIP the audience check below (`if (wantAud.length)` was simply
+ * false) — meaning any signature-valid JWT from ANYWHERE in the same
+ * Cloudflare Access team (including employee-facing apps) would verify
+ * successfully. This is checked FIRST, before any parsing or network work,
+ * so a misconfigured production deployment (e.g. a fresh container whose
+ * `ACCESS_AUD_SLIPS` secret hasn't been set yet) fails CLOSED — rejecting
+ * every request — rather than silently accepting a wider audience than
+ * intended. Never fires outside `NODE_ENV=production` (dev/test rely on the
+ * DEV_USER bypass in `identify()` below, which never reaches this
+ * function). Logged once per process, not once per request, so a
+ * misconfigured deploy doesn't spam its own logs into uselessness. */
 export async function verifyAccessJwt(token: string): Promise<Json | null> {
+  const wantAud = (process.env.ACCESS_AUD || "")
+    .split(",")
+    .map((s2) => s2.trim())
+    .filter(Boolean);
+  if (process.env.NODE_ENV === "production" && wantAud.length === 0) {
+    if (!loggedMissingAudInProd) {
+      loggedMissingAudInProd = true;
+      console.error("auth: ACCESS_AUD is unset in production — refusing every request until it is configured (fail-closed, not fail-open)");
+    }
+    return null;
+  }
+
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [h, p, s] = parts;
@@ -67,10 +94,6 @@ export async function verifyAccessJwt(token: string): Promise<Json | null> {
   if (typeof payload.exp === "number" && payload.exp < now) return null;
   if (typeof payload.nbf === "number" && payload.nbf > now + 60) return null;
   if (payload.iss !== `https://${TEAM_DOMAIN()}`) return null;
-  const wantAud = (process.env.ACCESS_AUD || "")
-    .split(",")
-    .map((s2) => s2.trim())
-    .filter(Boolean);
   if (wantAud.length) {
     const got = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
     if (!got.some((a: string) => wantAud.includes(a))) return null;
@@ -89,3 +112,13 @@ export async function identify(req: Request): Promise<Identity | null> {
   if (!payload?.email) return null;
   return { email: String(payload.email).toLowerCase() };
 }
+
+// Test-only handle — same shape as every sibling module's `_internal`.
+export const _internal = {
+  resetJwksCacheForTests(): void {
+    jwksCache = undefined;
+  },
+  resetLoggedMissingAudForTests(): void {
+    loggedMissingAudInProd = false;
+  },
+};

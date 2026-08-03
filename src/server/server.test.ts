@@ -17,7 +17,7 @@ import type { DepositCandidate, PrefillAnomaly, PrefillCandidate } from "./pms-p
 import type { DepositLedgerEvent, DepositRegisterData, DepositThread, MonthlyDepositReconciliation } from "./deposit-register.ts";
 import type { DayAuditCheckinRow, DayAuditDepositRow, DayAuditRefundRow, DayAuditRow } from "./day-audit.ts";
 
-const { api } = await import("./server.ts");
+const { api, _internal: serverInternal } = await import("./server.ts");
 // server.ts already imported pms-prefill.ts above, so this re-import just
 // reads the cached module — same _internal pattern as analytics-push.test.ts.
 const { _internal: pmsPrefillInternal } = await import("./pms-prefill.ts");
@@ -2873,7 +2873,17 @@ describe("Wave 1: the office day-audit hub (GET /:property/audit/day/:date)", ()
     expect(res.body.totalCount).toBe(3);
     expect(res.body.checkedCount).toBe(0);
     expect(res.body.rows.every((r) => r.checked === false && r.checkedAt === null && r.checkedBy === null)).toBe(true);
-    expect(res.body.rows.every((r) => r.proofCount === 0 && r.proofsPending === false)).toBe(true);
+    // Every row's proofCount is 0 (SLIPS_STATUS_URL unset in this test —
+    // the fail-silent default). proofsPending additionally requires
+    // needsSlipProof(row): the checkin row's composition is cash-only and
+    // the deposit row's tender is "cash" (auditCheckinRow/auditDepositRow's
+    // own defaults), so neither needs a slip — but auditRefundRow's own
+    // default tender IS "transfer", so THAT row reads proofsPending: true.
+    expect(res.body.rows.every((r) => r.proofCount === 0)).toBe(true);
+    const byKey = new Map(res.body.rows.map((r) => [r.auditKey, r]));
+    expect(byKey.get("CH26-100001")?.proofsPending).toBe(false);
+    expect(byKey.get("R2608-0100")?.proofsPending).toBe(false);
+    expect(byKey.get("R2607-0480")?.proofsPending).toBe(true);
     expect(res.body.pullStatus).toBe(false);
   });
 
@@ -2946,6 +2956,138 @@ describe("Wave 1: the office day-audit hub (GET /:property/audit/day/:date)", ()
     expect(after.body.rows[0]!.depositApplied!.receivedChecked).toBe(true);
 
     await call("DELETE", `/${PROPERTY}/audit/R2607-0700/check`);
+  });
+});
+
+describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () => {
+  const DATE = "2026-08-15";
+
+  afterEach(() => {
+    dayAuditInternal.setFetchDayAuditForTests(null);
+    serverInternal.setSlipProofFetchForTests(null);
+    delete process.env.PMS_DB_URL_HF;
+    delete process.env.SLIPS_STATUS_URL;
+  });
+
+  test("dark by default: SLIPS_STATUS_URL unset -> every eligible row's proofCount stays 0, proofsPending true only for rows needing a slip", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    delete process.env.SLIPS_STATUS_URL;
+    const rows: DayAuditRow[] = [
+      auditCheckinRow({
+        auditKey: "CH26-400001",
+        chRef: "CH26-400001",
+        composition: { cashSatang: 0, transferSatang: 100_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
+      }),
+      auditDepositRow({ auditKey: "R2608-0400", tender: "cash" }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+
+    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean }> }>(
+      "GET",
+      `/${PROPERTY}/audit/day/${DATE}`,
+    );
+    const byKey = new Map(res.body.rows.map((r) => [r.auditKey, r]));
+    expect(byKey.get("CH26-400001")?.proofCount).toBe(0);
+    expect(byKey.get("CH26-400001")?.proofsPending).toBe(true); // needs a slip (transfer), none reachable
+    expect(byKey.get("R2608-0400")?.proofCount).toBe(0);
+    expect(byKey.get("R2608-0400")?.proofsPending).toBe(false); // cash-tendered — never needed one
+  });
+
+  test("real enrichment: reflects the slip service's own counts for eligible rows only", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";
+    const rows: DayAuditRow[] = [
+      auditCheckinRow({
+        auditKey: "CH26-500001",
+        chRef: "CH26-500001",
+        composition: { cashSatang: 0, transferSatang: 100_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
+      }),
+      auditRefundRow({ auditKey: "R2607-0501", tender: "transfer" }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+
+    let requestedKeys: readonly string[] = [];
+    serverInternal.setSlipProofFetchForTests(async (_property, keys) => {
+      requestedKeys = keys;
+      return new Map([
+        ["CH26-500001", { count: 2, latestAt: "2026-08-15 10:00:00", latestVersion: 2, superseded: 0 }],
+        // R2607-0501 deliberately absent — the route must default it to 0/pending.
+      ]);
+    });
+
+    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean }> }>(
+      "GET",
+      `/${PROPERTY}/audit/day/${DATE}`,
+    );
+    // Only the rows that actually need a slip are even asked about — a
+    // cash-only row would waste a lookup.
+    expect([...requestedKeys].sort()).toEqual(["CH26-500001", "R2607-0501"]);
+
+    const byKey = new Map(res.body.rows.map((r) => [r.auditKey, r]));
+    expect(byKey.get("CH26-500001")?.proofCount).toBe(2);
+    expect(byKey.get("CH26-500001")?.proofsPending).toBe(false);
+    expect(byKey.get("R2607-0501")?.proofCount).toBe(0);
+    expect(byKey.get("R2607-0501")?.proofsPending).toBe(true);
+  });
+
+  test("fail-silent: a throwing fetch degrades to proofCount 0 everywhere, never a 502", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";
+    const rows: DayAuditRow[] = [
+      auditCheckinRow({
+        auditKey: "CH26-600001",
+        chRef: "CH26-600001",
+        composition: { cashSatang: 0, transferSatang: 50_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
+      }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    serverInternal.setSlipProofFetchForTests(async () => {
+      throw new Error("slips service unreachable");
+    });
+
+    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number }> }>("GET", `/${PROPERTY}/audit/day/${DATE}`);
+    expect(res.status).toBe(200); // never 502s the whole route
+    expect(res.body.rows[0]!.proofCount).toBe(0);
+  });
+
+  test("a row that never needs a slip never triggers a lookup at all", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";
+    dayAuditInternal.setFetchDayAuditForTests(async () => [auditCheckinRow({ auditKey: "CH26-700001", chRef: "CH26-700001" })]);
+
+    let called = false;
+    serverInternal.setSlipProofFetchForTests(async () => {
+      called = true;
+      return new Map();
+    });
+
+    await call("GET", `/${PROPERTY}/audit/day/${DATE}`);
+    expect(called).toBe(false); // fetchSlipProofStatus short-circuits on an empty key list
+  });
+});
+
+describe("Wave 2: GET /:property/audit/proof-thumb/:auditKey (ledger-proxied, fail-silent)", () => {
+  afterEach(() => {
+    delete process.env.SLIPS_STATUS_URL;
+  });
+
+  test("400 on an invalid property or auditKey", async () => {
+    process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";
+    expect((await call("GET", `/xx/audit/proof-thumb/CH000001`)).status).toBe(400);
+    expect((await call("GET", `/${PROPERTY}/audit/proof-thumb/${"X".repeat(999)}`)).status).toBe(400);
+  });
+
+  test("404 when SLIPS_STATUS_URL is unset (dark by default)", async () => {
+    delete process.env.SLIPS_STATUS_URL;
+    const res = await call("GET", `/${PROPERTY}/audit/proof-thumb/CH000001`);
+    expect(res.status).toBe(404);
+  });
+
+  test("502 when the slips origin is unreachable", async () => {
+    // A URL nothing listens on — fetch() rejects, the route turns that into 502.
+    process.env.SLIPS_STATUS_URL = "http://127.0.0.1:1";
+    const res = await call("GET", `/${PROPERTY}/audit/proof-thumb/CH000001`);
+    expect(res.status).toBe(502);
   });
 });
 

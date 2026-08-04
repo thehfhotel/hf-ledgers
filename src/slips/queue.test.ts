@@ -12,7 +12,7 @@ import type { DayAuditCheckinRow, DayAuditDepositRow, DayAuditRefundRow, DayAudi
 import type { RawDepositLedgerRow } from "../server/deposit-register.ts";
 const { _internal: dayAuditInternal, buildDayAuditRows } = await import("../server/day-audit.ts");
 const { buildSlipQueue, needsSlipProof } = await import("./queue.ts");
-const { createAttachment } = await import("./storage.ts");
+const { createAttachment, supersede } = await import("./storage.ts");
 
 function checkinRow(overrides: Partial<DayAuditCheckinRow> = {}): DayAuditCheckinRow {
   return {
@@ -134,6 +134,51 @@ describe("buildSlipQueue", () => {
     const queue = await buildSlipQueue("hf", "2026-08-03");
     expect(queue[0]!.attachment.count).toBe(1);
     expect(queue[0]!.attachment.latestAt).not.toBeNull();
+  });
+
+  test("currentAttachments carries one entry per CURRENT picture (the จัดการสลิป gallery's own thumbnail strip), matching attachment.count", async () => {
+    const v1 = await createAttachment({
+      property: "hf",
+      auditKey: "CH000005",
+      auditDate: "2026-08-03",
+      by: "a@x.com",
+      buffer: new Uint8Array([1]),
+      thumbBuffer: new Uint8Array([2]),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    await createAttachment({
+      property: "hf",
+      auditKey: "CH000005",
+      auditDate: "2026-08-03",
+      by: "b@x.com",
+      buffer: new Uint8Array([3]),
+      thumbBuffer: new Uint8Array([4]),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    supersede("hf", "CH000005", v1.version, "m@x.com"); // v1 taken out — only v2 stays current
+
+    const rows: DayAuditRow[] = [
+      checkinRow({ auditKey: "CH000005", chRef: "CH000005", composition: { cashSatang: 0, transferSatang: 50_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 } }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    const queue = await buildSlipQueue("hf", "2026-08-03");
+    expect(queue[0]!.currentAttachments.map((a) => a.version)).toEqual([2]);
+    expect(queue[0]!.currentAttachments).toHaveLength(queue[0]!.attachment.count);
+  });
+
+  test("currentAttachments is [] for a pending (never-attached) row", async () => {
+    const rows: DayAuditRow[] = [
+      checkinRow({ auditKey: "CH000006", chRef: "CH000006", composition: { cashSatang: 0, transferSatang: 50_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 } }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    const queue = await buildSlipQueue("hf", "2026-08-03");
+    expect(queue[0]!.currentAttachments).toEqual([]);
   });
 
   test("a PMS query failure rejects — the route (not this function) turns that into a 502", async () => {

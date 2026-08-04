@@ -7,7 +7,6 @@ import { DateBar } from "../../client/components/DateBar.tsx";
 import {
   ApiError,
   attachSlip,
-  getHistory,
   getMe,
   getSlipQueue,
   pictureUrl,
@@ -16,8 +15,10 @@ import {
   type Me,
   type SlipQueueRow,
 } from "./api.ts";
-import { AttachModal, type AttachMode } from "./components/AttachModal.tsx";
+import { AttachModal } from "./components/AttachModal.tsx";
 import { HistoryDrawer } from "./components/HistoryDrawer.tsx";
+import { RemoveConfirmDialog } from "./components/RemoveConfirmDialog.tsx";
+import { historyCount, shouldShowCountBadge } from "./gallery.ts";
 import { matchesSearch, partitionSlipQueue } from "./partition.ts";
 
 const KIND_LABEL_TH: Record<SlipQueueRow["kind"], string> = {
@@ -33,23 +34,16 @@ const KIND_LABEL_TH: Record<SlipQueueRow["kind"], string> = {
  * explicit tabs makes that move a navigable destination instead. */
 type Tab = "pending" | "manage";
 
-function formatWhen(utc: string): string {
-  const iso = utc.includes("T") ? utc : `${utc.replace(" ", "T")}Z`;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return utc;
-  return new Intl.DateTimeFormat("th-TH", {
-    timeZone: "Asia/Bangkok",
-    day: "2-digit",
-    month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(d);
-}
-
 interface ModalState {
   row: SlipQueueRow;
-  mode: AttachMode;
   initialFiles: File[];
+}
+
+/** Which picture (auditKey + version) นำออก's confirm dialog is currently
+ * asking about — `null` means the dialog is closed. */
+interface RemoveTarget {
+  auditKey: string;
+  version: number;
 }
 
 /** ส่งสลิป — the reception slip inbox (Wave 2, docs/plan-audit-hub-slips.md).
@@ -66,6 +60,7 @@ export function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState | null>(null);
   const [historyKey, setHistoryKey] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<RemoveTarget | null>(null);
   const [pasteTargetKey, setPasteTargetKey] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("pending");
   // Owner ask (2026-08-04): immediate, explicit feedback on a successful
@@ -127,7 +122,7 @@ export function App() {
       const row = rows?.find((r) => r.auditKey === pasteTargetKey);
       if (!row) return;
       e.preventDefault();
-      setModal({ row, mode: "add", initialFiles: files });
+      setModal({ row, initialFiles: files });
     }
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
@@ -145,12 +140,7 @@ export function App() {
   const filtered = useMemo(() => (rows ?? []).filter((r) => matchesSearch(r, search)), [rows, search]);
   const { pending, attached } = useMemo(() => partitionSlipQueue(filtered), [filtered]);
 
-  async function handleSave(row: SlipQueueRow, mode: AttachMode, files: File[]) {
-    if (mode === "replace") {
-      const history = await getHistory(property, row.auditKey);
-      const current = history.versions.filter((v) => !v.superseded);
-      for (const v of current) await supersedeSlip(property, row.auditKey, v.version);
-    }
+  async function handleSave(row: SlipQueueRow, files: File[]) {
     for (const file of files) await attachSlip(property, row.auditKey, date, file);
     // Reload BEFORE closing the modal — by the time the modal disappears,
     // `rows` already reflects the attach (the row has already moved into
@@ -159,6 +149,20 @@ export function App() {
     await reloadQueue();
     setModal(null);
     setShowAttachToast(true);
+  }
+
+  // นำออก: supersedes exactly the one version the confirm dialog is asking
+  // about — never a delete (RemoveConfirmDialog's own wording is the
+  // binding proof of that to reception). Reloads the queue on success so
+  // the gallery/badge/ประวัติ count all drop that picture from "current" at
+  // once; the dialog itself closes only after the reload lands, same
+  // "never show a stale state behind a closed dialog" discipline
+  // `handleSave` above already follows.
+  async function handleConfirmRemove() {
+    if (!removeTarget) return;
+    await supersedeSlip(property, removeTarget.auditKey, removeTarget.version);
+    await reloadQueue();
+    setRemoveTarget(null);
   }
 
   return (
@@ -254,7 +258,7 @@ export function App() {
                       row={row}
                       onFocusZone={() => setPasteTargetKey(row.auditKey)}
                       onBlurZone={() => setPasteTargetKey((prev) => (prev === row.auditKey ? null : prev))}
-                      onFilesChosen={(files) => setModal({ row, mode: "add", initialFiles: files })}
+                      onFilesChosen={(files) => setModal({ row, initialFiles: files })}
                     />
                   ))}
                 </ul>
@@ -275,9 +279,9 @@ export function App() {
                       key={row.auditKey}
                       property={property}
                       row={row}
-                      onAddMore={() => setModal({ row, mode: "add", initialFiles: [] })}
-                      onReplace={() => setModal({ row, mode: "replace", initialFiles: [] })}
+                      onAddMore={() => setModal({ row, initialFiles: [] })}
                       onShowHistory={() => setHistoryKey(row.auditKey)}
+                      onRequestRemove={(version) => setRemoveTarget({ auditKey: row.auditKey, version })}
                     />
                   ))}
                 </ul>
@@ -293,14 +297,17 @@ export function App() {
         <AttachModal
           auditKey={modal.row.auditKey}
           guestName={modal.row.guestName}
-          mode={modal.mode}
           initialFiles={modal.initialFiles}
           onCancel={() => setModal(null)}
-          onSave={(files) => handleSave(modal.row, modal.mode, files)}
+          onSave={(files) => handleSave(modal.row, files)}
         />
       )}
 
-      {historyKey && <HistoryDrawer property={property} auditKey={historyKey} onClose={() => setHistoryKey(null)} />}
+      {historyKey && (
+        <HistoryDrawer property={property} auditKey={historyKey} onClose={() => setHistoryKey(null)} onRestored={() => void reloadQueue()} />
+      )}
+
+      {removeTarget && <RemoveConfirmDialog onCancel={() => setRemoveTarget(null)} onConfirm={handleConfirmRemove} />}
 
       {/* Attach-success toast (owner ask, 2026-08-04) — explicit "it went
           HERE" feedback the instant a slip saves, with a direct jump. Never
@@ -410,60 +417,96 @@ interface AttachedCardProps {
   property: Property;
   row: SlipQueueRow;
   onAddMore: () => void;
-  onReplace: () => void;
   onShowHistory: () => void;
+  onRequestRemove: (version: number) => void;
 }
 
-function AttachedCard({ property, row, onAddMore, onReplace, onShowHistory }: AttachedCardProps) {
-  const { attachment } = row;
-  return (
-    <li className="flex items-center gap-3 rounded-lg border border-line bg-panel p-3">
-      {attachment.latestVersion !== null ? (
-        // Owner ask (2026-08-04, จัดการสลิป tab): tapping the thumbnail
-        // opens the full-size picture directly (a real link, new tab) —
-        // ประวัติ below is the SEPARATE, explicit path to full version
-        // history, so the two affordances stay distinct rather than both
-        // routing through the drawer.
-        <a
-          href={pictureUrl(property, row.auditKey, attachment.latestVersion)}
-          target="_blank"
-          rel="noreferrer"
-          className="relative shrink-0"
-          title="ดูรูปเต็ม"
-        >
-          <img
-            src={thumbUrl(property, row.auditKey, attachment.latestVersion)}
-            alt={`สลิปล่าสุดของ ${row.auditKey}`}
-            className="h-14 w-14 rounded-md object-cover"
-          />
-          <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-500 px-1 text-[10px] font-semibold text-white">
-            {attachment.count}
-          </span>
-        </a>
-      ) : (
-        <div className="h-14 w-14 shrink-0 rounded-md bg-tint" />
-      )}
+/**
+ * จัดการสลิป gallery card (owner-approved "จัดการสลิป — Manage Slips" design,
+ * retires the old single-thumbnail + เปลี่ยน layout): EVERY current picture
+ * renders as its own thumbnail, each with its own × (นำออก — see
+ * RemoveConfirmDialog for why this is a supersede, never a delete) and an
+ * HH:MM attach-time caption, plus a trailing dashed "+ เพิ่มรูป" tile. Tapping
+ * a thumbnail opens the full-size picture directly (a real link, new tab) —
+ * same pattern this app already used for the old single thumbnail and
+ * HistoryDrawer's own rows, so ประวัติ below stays the one SEPARATE,
+ * explicit path to full version history/restore rather than overloading the
+ * same tap gesture two different ways.
+ */
+function AttachedCard({ property, row, onAddMore, onShowHistory, onRequestRemove }: AttachedCardProps) {
+  const { attachment, currentAttachments } = row;
+  const showBadge = shouldShowCountBadge(attachment.count);
+  const nHistory = historyCount(attachment);
+  // "แนบล่าสุด HH:MM · who" — the highest-version CURRENT picture (ties
+  // broken by version, same rule storage.ts's `latestCurrent` uses server-
+  // side), never re-derived from `attachment.latestAt`/`latestVersion`
+  // separately (this way the caption and the gallery's own thumbnails can
+  // never disagree with each other).
+  const latest =
+    currentAttachments.length > 0 ? currentAttachments.reduce((a, b) => (b.version > a.version ? b : a)) : null;
 
-      <div className="flex flex-1 flex-col gap-0.5">
-        <span className="rounded-full bg-tint px-2 py-0.5 text-[11px] font-medium text-ink-muted w-fit">{KIND_LABEL_TH[row.kind]}</span>
-        <span className="font-semibold text-ink">{row.guestName ?? "ไม่ทราบชื่อ"}</span>
-        <RefsLine row={row} />
-        {attachment.latestAt && <span className="text-[11px] text-ink-muted">แนบล่าสุด {formatWhen(attachment.latestAt)}</span>}
+  return (
+    <li className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1.5">
+            <span className="rounded-full bg-tint px-2 py-0.5 text-[11px] font-medium text-ink-muted">{KIND_LABEL_TH[row.kind]}</span>
+            {showBadge && (
+              <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-brand-500 px-1 text-[10px] font-semibold text-white">
+                {attachment.count}
+              </span>
+            )}
+          </span>
+          <span className="font-semibold text-ink">{row.guestName ?? "ไม่ทราบชื่อ"}</span>
+          <RefsLine row={row} />
+        </div>
+        <span className="text-sm font-semibold tabular-nums text-ink">{formatSatang(row.amountSatang)}</span>
       </div>
 
-      <div className="flex flex-col items-end gap-1">
-        <span className="text-sm font-semibold tabular-nums text-ink">{formatSatang(row.amountSatang)}</span>
-        <div className="flex gap-1">
-          <button type="button" onClick={onAddMore} className="rounded-md border border-line-strong px-2 py-1 text-[11px] font-medium text-ink hover:bg-tint">
-            เพิ่มรูป
-          </button>
-          <button type="button" onClick={onReplace} className="rounded-md border border-line-strong px-2 py-1 text-[11px] font-medium text-ink hover:bg-tint">
-            เปลี่ยน
-          </button>
-        </div>
-        <button type="button" onClick={onShowHistory} className="text-[11px] text-brand-500 hover:underline">
-          ประวัติ
+      <div className="flex flex-wrap gap-2">
+        {currentAttachments.map((a) => (
+          <div key={a.version} className="flex flex-col items-center gap-0.5">
+            <div className="relative">
+              <a href={pictureUrl(property, row.auditKey, a.version)} target="_blank" rel="noreferrer" title="ดูรูปเต็ม">
+                <img
+                  src={thumbUrl(property, row.auditKey, a.version)}
+                  alt={`สลิปของ ${row.auditKey} เวอร์ชัน ${a.version}`}
+                  className="h-16 w-16 rounded-md object-cover"
+                />
+              </a>
+              <button
+                type="button"
+                onClick={() => onRequestRemove(a.version)}
+                aria-label="นำออก"
+                title="นำออก"
+                className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-xs leading-none text-white hover:bg-bad"
+              >
+                ×
+              </button>
+            </div>
+            <span className="text-[10px] text-ink-muted">{timeBangkok(a.createdAt) ?? ""}</span>
+          </div>
+        ))}
+
+        <button
+          type="button"
+          onClick={onAddMore}
+          className="flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-md border-2 border-dashed border-line-strong text-[10px] text-ink-muted hover:border-brand-300 hover:bg-tint"
+        >
+          <span className="text-base leading-none text-brand-500">+</span>
+          <span>เพิ่มรูป</span>
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-1">
+        <button type="button" onClick={onShowHistory} className="text-[11px] text-brand-500 hover:underline">
+          ประวัติ ({nHistory} รายการ)
+        </button>
+        {latest && (
+          <span className="text-[11px] text-ink-muted">
+            แนบล่าสุด {timeBangkok(latest.createdAt) ?? "-"} · {latest.createdBy}
+          </span>
+        )}
       </div>
     </li>
   );

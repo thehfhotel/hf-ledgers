@@ -3033,6 +3033,34 @@ describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () =
     expect(byKey.get("R2607-0501")?.proofsPending).toBe(true);
   });
 
+  test("office-side รอสลิป reversion: a settlement whose only current picture was taken out (นำออก) explicitly reports count 0, and proofsPending flips back to true", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";
+    const rows: DayAuditRow[] = [
+      auditCheckinRow({
+        auditKey: "CH26-550001",
+        chRef: "CH26-550001",
+        composition: { cashSatang: 0, transferSatang: 100_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
+      }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    // Explicitly reports count: 0 (superseded: 1) — the slip service's own
+    // shape for "this settlement had a picture, but it was taken out and
+    // nothing current remains" (src/slips/storage.ts's `summarize`),
+    // distinct from "never had one at all" (also count: 0, superseded: 0),
+    // but the ledger's own `proofsPending` derivation treats both the same
+    // way — count is 0, so a slip is still needed.
+    serverInternal.setSlipProofFetchForTests(async () => new Map([["CH26-550001", { count: 0, latestAt: null, latestVersion: null, superseded: 1 }]]));
+
+    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean }> }>(
+      "GET",
+      `/${PROPERTY}/audit/day/${DATE}`,
+    );
+    const row = res.body.rows.find((r) => r.auditKey === "CH26-550001");
+    expect(row?.proofCount).toBe(0);
+    expect(row?.proofsPending).toBe(true); // reverts to รอสลิป, exactly like a settlement that never had a slip
+  });
+
   test("fail-silent: a throwing fetch degrades to proofCount 0 everywhere, never a 502", async () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";

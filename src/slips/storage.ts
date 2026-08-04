@@ -3,9 +3,16 @@
 //
 // - No code path deletes or overwrites a picture file. A version's file
 //   name embeds its version number AND a content hash, so it is only ever
-//   written once (see buildAttachmentPaths). เปลี่ยน/ลบ writes a supersede
-//   record (db.ts's `supersede_events`) instead of touching the file or the
-//   attachment row — see `supersede()` below.
+//   written once (see buildAttachmentPaths). นำออก (per-picture remove, the
+//   จัดการสลิป gallery's own × control) writes a supersede EVENT (db.ts's
+//   `supersede_events`, an append-only event log — not a single flag)
+//   instead of touching the file or the attachment row — see `supersede()`
+//   below. กู้คืน (restore, from the ประวัติ drawer) writes a SEPARATE new
+//   `restore` event — never mutates the supersede event it's undoing — see
+//   `restore()`. A version's current-vs-superseded status is always "what
+//   does the LATEST event say", so a version can be taken out and restored
+//   any number of times and every toggle still survives forever as its own
+//   row (db.ts's own module doc comment has the full reasoning).
 // - Per-property layout: <root>/<property>/<yyyy-mm>/<auditKey>/, keyed by
 //   the SETTLEMENT'S OWN audited day (not upload day) — `auditDate` is a
 //   required input to `createAttachment`, not derived from `Date.now()`, so
@@ -179,16 +186,34 @@ interface AttachmentRow {
   superseded_by: string | null;
 }
 
-// LEFT JOINs supersede_events by its own (property, audit_key, version) —
-// current vs. history is this join, never a stored flag on `attachments`
-// itself (which is never UPDATEd — see db.ts's module doc comment).
+// LEFT JOINs the LATEST supersede_events row (highest `id`) for each
+// (property, audit_key, version) — current vs. superseded is "what does
+// that latest event say" (action = 'supersede' -> superseded, action =
+// 'restore' or no event at all -> current), never a stored flag on
+// `attachments` itself (which is never UPDATEd — see db.ts's module doc
+// comment) and never just "does a row exist" (a restored-then-resuperseded
+// version has MULTIPLE rows — see db.ts's own doc comment on why the old
+// UNIQUE-per-version shape couldn't represent that). `superseded_at`/
+// `superseded_by` come from that latest row ONLY when it's a 'supersede'
+// action — a restore's own `at`/`by` never leaks into these columns (a
+// restored version reads superseded_at/by NULL, exactly like a version
+// that was never touched).
 const ATTACHMENT_SELECT = `
   SELECT a.property, a.audit_key, a.version, a.audit_date, a.file_path, a.thumb_path,
          a.content_hash, a.bytes, a.width, a.height, a.format, a.engine,
-         a.created_at, a.created_by, s.at AS superseded_at, s.by AS superseded_by
+         a.created_at, a.created_by,
+         CASE WHEN s.action = 'supersede' THEN s.at ELSE NULL END AS superseded_at,
+         CASE WHEN s.action = 'supersede' THEN s.by ELSE NULL END AS superseded_by
   FROM attachments a
-  LEFT JOIN supersede_events s
-    ON s.property = a.property AND s.audit_key = a.audit_key AND s.version = a.version
+  LEFT JOIN (
+    SELECT property, audit_key, version, action, by, at
+    FROM (
+      SELECT property, audit_key, version, action, by, at,
+             ROW_NUMBER() OVER (PARTITION BY property, audit_key, version ORDER BY id DESC) AS rn
+      FROM supersede_events
+    )
+    WHERE rn = 1
+  ) s ON s.property = a.property AND s.audit_key = a.audit_key AND s.version = a.version
 `;
 
 function toRecord(r: AttachmentRow): AttachmentRecord {
@@ -234,6 +259,32 @@ export function listHistory(property: Property, auditKey: string): AttachmentRec
  * proof chip shows. */
 export function listCurrent(property: Property, auditKey: string): AttachmentRecord[] {
   return listHistory(property, auditKey).filter((a) => !a.superseded);
+}
+
+/** Batch form of `listCurrent` — one query for every auditKey the caller
+ * asks about, never N+1 (same discipline `summarize` below already
+ * documents). Powers the จัดการสลิป gallery: each payment card needs the
+ * FULL list of its current pictures (not just a count), to render one
+ * thumbnail per picture. Every requested key is present in the returned
+ * map (an empty array when the settlement has no current attachment), so a
+ * caller never needs an existence check first. Oldest-first per key (same
+ * order `listHistory` returns), mirroring `ATTACHMENT_SELECT`'s ordering. */
+export function listCurrentBatch(property: Property, auditKeys: readonly string[]): Map<string, AttachmentRecord[]> {
+  const out = new Map<string, AttachmentRecord[]>();
+  for (const key of auditKeys) out.set(key, []);
+  if (auditKeys.length === 0) return out;
+
+  const placeholders = auditKeys.map(() => "?").join(", ");
+  const rows = db
+    .query<AttachmentRow, string[]>(`${ATTACHMENT_SELECT} WHERE a.property = ? AND a.audit_key IN (${placeholders}) ORDER BY a.version ASC`)
+    .all(property, ...auditKeys)
+    .map(toRecord);
+
+  for (const row of rows) {
+    if (row.superseded) continue;
+    out.get(row.auditKey)?.push(row);
+  }
+  return out;
 }
 
 /** Batch summary for the internal status endpoint (server-to-server, the
@@ -345,19 +396,50 @@ export async function createAttachment(input: CreateAttachmentInput): Promise<At
 }
 
 /**
- * เปลี่ยน/ลบ: writes a supersede record for one version — never touches the
- * file, never touches the attachment row. `null` when the version doesn't
- * exist at all (caller 404s); re-superseding an already-superseded version
- * is a harmless no-op (the `supersede_events` unique index absorbs the
- * duplicate), same idempotence convention as `payment_audits`'s un-tick in
- * the ledger.
+ * นำออก (the จัดการสลิป gallery's per-picture ×; formerly เปลี่ยน/ลบ): writes a
+ * `'supersede'` event for one version — never touches the file, never
+ * touches the attachment row, never mutates a prior event. `null` when the
+ * version doesn't exist at all (caller 404s). Re-superseding an
+ * already-superseded version is a harmless, APPLICATION-level no-op (checked
+ * here via `existing.superseded`, not a DB unique index — see db.ts's own
+ * doc comment on why the event log dropped that index): the FIRST supersede
+ * event stays the one that's "in effect" (same idempotence convention as
+ * `payment_audits`'s un-tick in the ledger), and nothing new is written.
  */
 export function supersede(property: Property, auditKey: string, version: number, by: string): AttachmentRecord | null {
   const existing = getAttachment(property, auditKey, version);
   if (!existing) return null;
-  db.prepare(
-    `INSERT INTO supersede_events (property, audit_key, version, by) VALUES (?, ?, ?, ?)
-     ON CONFLICT (property, audit_key, version) DO NOTHING`,
-  ).run(property, auditKey, version, by);
+  if (existing.superseded) return existing; // already superseded — no-op, first event stands
+  db.prepare(`INSERT INTO supersede_events (property, audit_key, version, action, by) VALUES (?, ?, ?, 'supersede', ?)`).run(
+    property,
+    auditKey,
+    version,
+    by,
+  );
+  return getAttachment(property, auditKey, version);
+}
+
+/**
+ * กู้คืน (the ประวัติ drawer's restore action): writes a `'restore'` event for
+ * one version — the binding rule (owner-approved จัดการสลิป design) is that
+ * this is a NEW append-only record, never a mutation of the supersede event
+ * it's undoing. `null` when the version doesn't exist at all (caller 404s).
+ * Restoring a version that's already current is a harmless no-op, same
+ * idempotence shape as `supersede` above. Because this is a genuine new
+ * event (not a row delete/flag flip), the version can be superseded again
+ * later — that later `supersede` call sees `existing.superseded === false`
+ * (the restore is now the latest event) and is free to write a fresh
+ * `'supersede'` event of its own.
+ */
+export function restore(property: Property, auditKey: string, version: number, by: string): AttachmentRecord | null {
+  const existing = getAttachment(property, auditKey, version);
+  if (!existing) return null;
+  if (!existing.superseded) return existing; // already current — no-op
+  db.prepare(`INSERT INTO supersede_events (property, audit_key, version, action, by) VALUES (?, ?, ?, 'restore', ?)`).run(
+    property,
+    auditKey,
+    version,
+    by,
+  );
   return getAttachment(property, auditKey, version);
 }

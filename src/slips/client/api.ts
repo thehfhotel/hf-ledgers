@@ -54,6 +54,11 @@ export interface SlipQueueRow {
   amountSatang: number;
   transferSatang: number;
   attachment: { count: number; latestAt: string | null; latestVersion: number | null; superseded: number };
+  /** Every CURRENT picture, oldest-first — the จัดการสลิป gallery's own
+   * per-payment thumbnail strip (src/slips/queue.ts's own doc comment has
+   * the full reasoning). `currentAttachments.length === attachment.count`
+   * always. */
+  currentAttachments: { version: number; createdAt: string; createdBy: string }[];
 }
 
 export function getSlipQueue(property: Property, date: string): Promise<{ rows: SlipQueueRow[] }> {
@@ -83,6 +88,10 @@ export function attachSlip(property: Property, auditKey: string, date: string, f
 
 export function supersedeSlip(property: Property, auditKey: string, version: number): Promise<AttachmentWire> {
   return request(`/${property}/supersede/${encodeURIComponent(auditKey)}/${version}`, { method: "POST" });
+}
+
+export function restoreSlip(property: Property, auditKey: string, version: number): Promise<AttachmentWire> {
+  return request(`/${property}/restore/${encodeURIComponent(auditKey)}/${version}`, { method: "POST" });
 }
 
 export function pictureUrl(property: Property, auditKey: string, version: number): string {

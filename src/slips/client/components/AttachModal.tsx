@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 
-export type AttachMode = "add" | "replace";
-
 interface StagedFile {
   file: File;
   previewUrl: string;
@@ -12,12 +10,13 @@ interface StagedFile {
 interface Props {
   auditKey: string;
   guestName: string | null;
-  mode: AttachMode;
   initialFiles: File[];
   onCancel: () => void;
   /** Uploads one file — the modal drives the sequence + per-file progress
-   * state, the caller owns the actual network call (and, for `mode:
-   * "replace"`, superseding every current version first). */
+   * state, the caller owns the actual network call. Always an ADD now: the
+   * จัดการสลิป redesign retired เปลี่ยน (whole-settlement replace) in favor of
+   * per-picture นำออก (supersede) on the gallery itself, so this modal only
+   * ever appends fresh current pictures — never supersedes anything first. */
   onSave: (files: File[]) => Promise<void>;
 }
 
@@ -34,13 +33,11 @@ function thaiFileError(file: File): string | null {
 }
 
 /**
- * แนบสลิป modal: preview, multi-file, upload progress, Thai errors.
- * `mode: "replace"` (เปลี่ยน) still just calls `onSave` — the caller
- * supersedes every current version FIRST, then attaches these as fresh
- * ones; this component only stages/uploads files, never decides supersede
- * semantics itself.
+ * แนบสลิป modal: preview, multi-file, upload progress, Thai errors. Only
+ * ever adds fresh pictures — see this file's own Props doc comment on why
+ * เปลี่ยน/replace mode no longer exists.
  */
-export function AttachModal({ auditKey, guestName, mode, initialFiles, onCancel, onSave }: Props) {
+export function AttachModal({ auditKey, guestName, initialFiles, onCancel, onSave }: Props) {
   const [staged, setStaged] = useState<StagedFile[]>(() => toStaged(initialFiles));
   const [saving, setSaving] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
@@ -101,7 +98,7 @@ export function AttachModal({ auditKey, guestName, mode, initialFiles, onCancel,
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-lg bg-panel shadow-xl">
         <div className="border-b border-line px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink">{mode === "replace" ? "เปลี่ยนสลิป" : "แนบสลิป"}</h2>
+          <h2 className="text-sm font-semibold text-ink">แนบสลิป</h2>
           <p className="text-xs text-ink-muted">
             {guestName ? `${guestName} · ` : ""}
             {auditKey}
@@ -154,7 +151,7 @@ export function AttachModal({ auditKey, guestName, mode, initialFiles, onCancel,
                     <button
                       type="button"
                       onClick={() => removeAt(i)}
-                      aria-label="ลบรูปนี้ออกจากรายการที่จะบันทึก"
+                      aria-label="เอารูปนี้ออกจากรายการที่จะบันทึก"
                       className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-xs text-white"
                     >
                       ×

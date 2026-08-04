@@ -330,7 +330,24 @@ function needsSlipProof(row: DayAuditRow): boolean {
  * beyond simply not rendering broken-image chrome poorly — a 404/502 from
  * the proxy (slips service down, or genuinely no thumbnail yet) is exactly
  * as informative as รอสลิป would be, so this stays a thin `<img>`, never a
- * second network call to check existence first. */
+ * second network call to check existence first.
+ *
+ * `row.proofCount` is `SlipProofStatusEntry.count` from src/server/server.ts's
+ * own `fetchSlipProofStatus` (server.ts endpoint 34), which is itself
+ * ส่งสลิป's `AttachmentSummary.count` untouched (src/slips/storage.ts's
+ * `summarize`) — the number of CURRENT (non-superseded) pictures, NEVER
+ * `latestVersion` (a settlement เปลี่ยน'd/นำออก'd+re-attached several times
+ * can sit at a high version number while having exactly one current
+ * picture — owner-reported badge bug, fixed at the source in storage.ts,
+ * never patched over on either display surface). This chip's own threshold
+ * is `> 1` (shown for 2+); the reception จัดการสลิป gallery's own badge
+ * (src/slips/client/gallery.ts's `shouldShowCountBadge`) reads the exact
+ * same `count` field with the same effective threshold, just spelled
+ * `>= 2` there — the two surfaces are never allowed to read different
+ * fields for "how many pictures does this settlement currently have". A
+ * settlement whose only current picture gets taken out (นำออก) drops
+ * `count` to 0, which flips `proofsPending` back to `true` above — this
+ * chip reverts to รอสลิป automatically, no separate wiring needed. */
 function SlipProofCell({ row, property }: { row: DayAuditRow; property: Property }) {
   if (!needsSlipProof(row)) return <span className="text-ink-muted">-</span>;
 

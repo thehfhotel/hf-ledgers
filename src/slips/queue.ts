@@ -11,7 +11,7 @@
 import { fetchDayAudit, needsSlipProof, type DayAuditRow } from "../server/day-audit.ts";
 import { pmsConfigured } from "../server/pms-prefill.ts";
 import type { Property } from "../shared/types.ts";
-import { summarize, type AttachmentSummary } from "./storage.ts";
+import { listCurrentBatch, summarize, type AttachmentSummary } from "./storage.ts";
 
 export { needsSlipProof };
 
@@ -34,6 +34,17 @@ function rowTransferSatang(row: DayAuditRow): number {
 
 export type SlipQueueAttachmentState = AttachmentSummary;
 
+/** One CURRENT picture, as the จัดการสลิป gallery needs it — just enough to
+ * build a thumbnail/full-image URL (`version`) and a caption (`createdAt`,
+ * `createdBy`). A deliberately small slice of `AttachmentRecord`, not the
+ * whole record (server filesystem paths never leave this service — same
+ * rule `toWireAttachment` in server.ts already follows). */
+export interface SlipQueueCurrentAttachment {
+  version: number;
+  createdAt: string;
+  createdBy: string;
+}
+
 export interface SlipQueueRow {
   auditKey: string;
   kind: DayAuditRow["kind"];
@@ -51,6 +62,14 @@ export interface SlipQueueRow {
   amountSatang: number;
   transferSatang: number;
   attachment: SlipQueueAttachmentState;
+  /** Every CURRENT picture for this settlement, oldest-first — the
+   * จัดการสลิป gallery's own per-payment thumbnail strip. Always `[]` for a
+   * รอแนบสลิป row (nothing attached yet); `attachment.count` and
+   * `currentAttachments.length` are the SAME number by construction (both
+   * derive from storage.ts's own current/superseded LEFT JOIN), so a
+   * caller can trust `currentAttachments.length === attachment.count`
+   * without re-deriving it. */
+  currentAttachments: SlipQueueCurrentAttachment[];
 }
 
 /**
@@ -64,10 +83,9 @@ export interface SlipQueueRow {
 export async function buildSlipQueue(property: Property, date: string): Promise<SlipQueueRow[]> {
   const rows = await fetchDayAudit(property, date);
   const needing = rows.filter(needsSlipProof);
-  const summaries = summarize(
-    property,
-    needing.map((r) => r.auditKey),
-  );
+  const auditKeys = needing.map((r) => r.auditKey);
+  const summaries = summarize(property, auditKeys);
+  const currentByKey = listCurrentBatch(property, auditKeys);
 
   return needing.map((row) => ({
     auditKey: row.auditKey,
@@ -78,6 +96,11 @@ export async function buildSlipQueue(property: Property, date: string): Promise<
     amountSatang: rowAmountSatang(row),
     transferSatang: rowTransferSatang(row),
     attachment: summaries.get(row.auditKey) ?? { count: 0, latestAt: null, latestVersion: null, superseded: 0 },
+    currentAttachments: (currentByKey.get(row.auditKey) ?? []).map((a) => ({
+      version: a.version,
+      createdAt: a.createdAt,
+      createdBy: a.createdBy,
+    })),
   }));
 }
 

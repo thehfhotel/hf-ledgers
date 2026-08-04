@@ -20,7 +20,7 @@ import type { Property } from "../shared/types.ts";
 import { encodeSlipImage, SlipImageError } from "./image.ts";
 import { buildStatusResponse, isValidIngressToken, latestThumbPath, parseStatusKeys } from "./internal.ts";
 import { buildSlipQueue } from "./queue.ts";
-import { createAttachment, getAttachment, listHistory, supersede, type AttachmentRecord } from "./storage.ts";
+import { createAttachment, getAttachment, listHistory, restore, supersede, type AttachmentRecord } from "./storage.ts";
 
 const isProd = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT ?? 4060);
@@ -183,9 +183,10 @@ export const api = new Elysia({ prefix: "/slips-api" })
     { body: t.Object({ file: t.File({ maxSize: "15m" }), date: t.String() }) },
   )
 
-  // POST /slips-api/:property/supersede/:auditKey/:version — เปลี่ยน/ลบ:
-  // writes a supersede record only. Idempotent (re-superseding an
-  // already-superseded version is a no-op — see storage.ts).
+  // POST /slips-api/:property/supersede/:auditKey/:version — นำออก (the
+  // จัดการสลิป gallery's per-picture ×; formerly เปลี่ยน/ลบ): writes a
+  // supersede EVENT only. Idempotent (re-superseding an already-superseded
+  // version is a no-op — see storage.ts).
   .post("/:property/supersede/:auditKey/:version", ({ params, identity, status }) => {
     const { property, auditKey } = params;
     if (!isProperty(property)) return status(400, { error: "invalid property" });
@@ -194,6 +195,22 @@ export const api = new Elysia({ prefix: "/slips-api" })
     if (version === null) return status(400, { error: "invalid version" });
 
     const result = supersede(property, auditKey, version, identity!.email);
+    if (!result) return status(404, { error: "attachment not found" });
+    return toWireAttachment(result);
+  })
+
+  // POST /slips-api/:property/restore/:auditKey/:version — กู้คืน (the
+  // ประวัติ drawer's restore action): writes a RESTORE event only — never
+  // mutates the supersede event it's undoing (storage.ts's `restore()`).
+  // Idempotent (restoring an already-current version is a no-op).
+  .post("/:property/restore/:auditKey/:version", ({ params, identity, status }) => {
+    const { property, auditKey } = params;
+    if (!isProperty(property)) return status(400, { error: "invalid property" });
+    if (!isValidAuditKey(auditKey)) return status(400, { error: "invalid auditKey" });
+    const version = parseVersionParam(params.version);
+    if (version === null) return status(400, { error: "invalid version" });
+
+    const result = restore(property, auditKey, version, identity!.email);
     if (!result) return status(404, { error: "attachment not found" });
     return toWireAttachment(result);
   })

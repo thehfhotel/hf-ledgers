@@ -12,6 +12,7 @@ function row(overrides: Partial<SlipQueueRow> = {}): SlipQueueRow {
     amountSatang: 100_000,
     transferSatang: 100_000,
     attachment: { count: 0, latestAt: null, latestVersion: null, superseded: 0 },
+    currentAttachments: [],
     ...overrides,
   };
 }

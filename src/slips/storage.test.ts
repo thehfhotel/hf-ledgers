@@ -18,8 +18,10 @@ const {
   getAttachment,
   latestCurrent,
   listCurrent,
+  listCurrentBatch,
   listHistory,
   nextVersion,
+  restore,
   sanitizeAuditKeyForPath,
   summarize,
   supersede,
@@ -269,6 +271,78 @@ describe("createAttachment / supersede / history (round-trip against a real temp
     expect(getAttachment("hf", "CH-NEVER", 1)).toBeNull();
   });
 
+  test("restore round-trip: a superseded version becomes current again, and the ORIGINAL supersede event survives (never mutated)", async () => {
+    const v1 = await createAttachment({
+      property: "hf",
+      auditKey: "CH00005",
+      auditDate: "2026-08-03",
+      by: "reception@x.com",
+      buffer: fakeImage(15),
+      thumbBuffer: fakeImage(16),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    supersede("hf", "CH00005", v1.version, "manager@x.com");
+    expect(listCurrent("hf", "CH00005")).toHaveLength(0);
+
+    const restored = restore("hf", "CH00005", v1.version, "manager2@x.com");
+    expect(restored?.superseded).toBe(false);
+    expect(restored?.supersededAt).toBeNull();
+    expect(restored?.supersededBy).toBeNull();
+    expect(listCurrent("hf", "CH00005")).toHaveLength(1);
+    // The file/row itself was never touched by any of this.
+    expect(listHistory("hf", "CH00005")).toHaveLength(1);
+  });
+
+  test("restore is a harmless no-op on a version that is already current", async () => {
+    const v1 = await createAttachment({
+      property: "hf",
+      auditKey: "CH00006",
+      auditDate: "2026-08-03",
+      by: "a@x.com",
+      buffer: fakeImage(17),
+      thumbBuffer: fakeImage(18),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    const result = restore("hf", "CH00006", v1.version, "m@x.com");
+    expect(result?.superseded).toBe(false);
+    expect(listCurrent("hf", "CH00006")).toHaveLength(1);
+  });
+
+  test("restore on an unknown version returns null (caller 404s)", () => {
+    expect(restore("hf", "CH00006", 99, "x@x.com")).toBeNull();
+  });
+
+  test("a restored version can be superseded again — repeated take-out/restore toggles each survive as their own event", async () => {
+    const v1 = await createAttachment({
+      property: "hf",
+      auditKey: "CH00007",
+      auditDate: "2026-08-03",
+      by: "a@x.com",
+      buffer: fakeImage(19),
+      thumbBuffer: fakeImage(20),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    supersede("hf", "CH00007", v1.version, "m1@x.com");
+    expect(listCurrent("hf", "CH00007")).toHaveLength(0);
+
+    restore("hf", "CH00007", v1.version, "m2@x.com");
+    expect(listCurrent("hf", "CH00007")).toHaveLength(1);
+
+    const secondTakeOut = supersede("hf", "CH00007", v1.version, "m3@x.com");
+    expect(secondTakeOut?.superseded).toBe(true);
+    expect(secondTakeOut?.supersededBy).toBe("m3@x.com"); // the FRESH event, not the first one
+    expect(listCurrent("hf", "CH00007")).toHaveLength(0);
+  });
+
   test("latestCurrent picks the highest current version, ignoring superseded ones", async () => {
     const v1 = await createAttachment({
       property: "hfville",
@@ -345,6 +419,71 @@ describe("summarize", () => {
 
   test("empty key list returns an empty map without querying", () => {
     expect(summarize("hf", []).size).toBe(0);
+  });
+
+  test("count reaches 0 once every current picture is taken out (office-side รอสลิป reversion)", async () => {
+    const v1 = await createAttachment({
+      property: "hf",
+      auditKey: "CH-SUM-ZERO",
+      auditDate: "2026-08-03",
+      by: "a@x.com",
+      buffer: fakeImage(25),
+      thumbBuffer: fakeImage(26),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    expect(summarize("hf", ["CH-SUM-ZERO"]).get("CH-SUM-ZERO")!.count).toBe(1);
+    supersede("hf", "CH-SUM-ZERO", v1.version, "m@x.com");
+    const out = summarize("hf", ["CH-SUM-ZERO"]);
+    expect(out.get("CH-SUM-ZERO")!.count).toBe(0);
+    expect(out.get("CH-SUM-ZERO")!.latestVersion).toBeNull();
+    expect(out.get("CH-SUM-ZERO")!.latestAt).toBeNull();
+  });
+});
+
+describe("listCurrentBatch", () => {
+  test("every requested key is present, empty array when never attached", () => {
+    const out = listCurrentBatch("hf", ["CH-NEVER-A", "CH-NEVER-B"]);
+    expect(out.get("CH-NEVER-A")).toEqual([]);
+    expect(out.get("CH-NEVER-B")).toEqual([]);
+  });
+
+  test("returns only CURRENT versions, oldest-first, excluding superseded ones", async () => {
+    const v1 = await createAttachment({
+      property: "hf",
+      auditKey: "CH-BATCH-1",
+      auditDate: "2026-08-03",
+      by: "a@x.com",
+      buffer: fakeImage(27),
+      thumbBuffer: fakeImage(28),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    const v2 = await createAttachment({
+      property: "hf",
+      auditKey: "CH-BATCH-1",
+      auditDate: "2026-08-03",
+      by: "a@x.com",
+      buffer: fakeImage(29),
+      thumbBuffer: fakeImage(30),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+    supersede("hf", "CH-BATCH-1", v1.version, "m@x.com");
+
+    const out = listCurrentBatch("hf", ["CH-BATCH-1", "CH-NEVER-C"]);
+    expect(out.get("CH-BATCH-1")!.map((a) => a.version)).toEqual([v2.version]);
+    expect(out.get("CH-NEVER-C")).toEqual([]);
+  });
+
+  test("empty key list returns an empty map without querying", () => {
+    expect(listCurrentBatch("hf", []).size).toBe(0);
   });
 });
 

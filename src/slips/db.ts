@@ -57,21 +57,73 @@ export function migrate(): void {
 
     CREATE INDEX IF NOT EXISTS idx_attachments_key ON attachments (property, audit_key);
 
-    -- Append-only: every row here is an INSERT, never an UPDATE/DELETE. A
-    -- row present means the named (property, audit_key, version) is
-    -- superseded; "current" = every attachment row with NO matching row
-    -- here (storage.ts's LEFT JOIN). Superseding a version with no fresh
-    -- attach following it is how "ลบ" (remove) is expressed — there is no
-    -- file-delete code path anywhere in this app.
+    -- Append-only EVENT LOG: every take-out ("action = 'supersede'", เปลี่ยน/
+    -- ลบ/นำออก) or restore ("action = 'restore'", กู้คืน) is its OWN INSERTed
+    -- row, never an UPDATE to a prior one — restore's own binding rule is
+    -- "writes a new record un-superseding, never mutating history"
+    -- (docs/plan-audit-hub-slips.md's storage rules extend to this: a
+    -- version can be taken out, restored, and taken out again, and every
+    -- one of those toggles must survive as its own permanent row). Current
+    -- vs. history is therefore no longer "does a matching row exist" — it's
+    -- "what is the LATEST event (highest id) for this (property, audit_key,
+    -- version)": no rows or a latest action='restore' means current, a
+    -- latest action='supersede' means superseded (storage.ts's
+    -- ATTACHMENT_SELECT computes this with a window function). No UNIQUE
+    -- index on (property, audit_key, version) here —
+    -- that constraint belonged to the pre-restore, at-most-one-supersede-
+    -- ever shape; see migrateSupersedeEventsToActionLog for the one-time,
+    -- data-preserving rebuild of a database still carrying that old shape.
     CREATE TABLE IF NOT EXISTS supersede_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       property TEXT NOT NULL,
       audit_key TEXT NOT NULL,
       version INTEGER NOT NULL,
+      action TEXT NOT NULL DEFAULT 'supersede' CHECK (action IN ('supersede', 'restore')),
       by TEXT NOT NULL,
-      at TEXT NOT NULL DEFAULT (datetime('now')),
-      UNIQUE (property, audit_key, version)
+      at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE INDEX IF NOT EXISTS idx_supersede_events_version ON supersede_events (property, audit_key, version);
+  `);
+
+  migrateSupersedeEventsToActionLog();
+}
+
+/**
+ * One-time, idempotent rebuild of a database whose `supersede_events` table
+ * still has the OLD shape (no `action` column — the pre-restore design that
+ * recorded at most one row ever per (property, audit_key, version), via a
+ * UNIQUE index). Detected by `PRAGMA table_info` rather than a version
+ * counter, matching this codebase's existing `addColumnIfMissing`-style
+ * convention (src/server/db.ts). A brand-new database never reaches the
+ * rebuild branch — `migrate()`'s own `CREATE TABLE IF NOT EXISTS` above
+ * already creates the new (action-column, no-UNIQUE) shape directly, so
+ * `columns.some(action column present)` is already true.
+ *
+ * The rebuild itself (rename -> recreate -> copy -> drop) is a schema
+ * change, NOT a data deletion: every existing supersede_events row survives,
+ * translated 1:1 into an `action: 'supersede'` event (exactly what it always
+ * meant under the old shape — the old table only ever recorded take-outs).
+ */
+function migrateSupersedeEventsToActionLog(): void {
+  const columns = db.query<{ name: string }, []>(`PRAGMA table_info(supersede_events)`).all();
+  if (columns.some((c) => c.name === "action")) return; // fresh DB, or already migrated
+
+  db.exec(`
+    ALTER TABLE supersede_events RENAME TO supersede_events_pre_restore;
+    CREATE TABLE supersede_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property TEXT NOT NULL,
+      audit_key TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      action TEXT NOT NULL DEFAULT 'supersede' CHECK (action IN ('supersede', 'restore')),
+      by TEXT NOT NULL,
+      at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO supersede_events (property, audit_key, version, action, by, at)
+      SELECT property, audit_key, version, 'supersede', by, at FROM supersede_events_pre_restore;
+    DROP TABLE supersede_events_pre_restore;
+    CREATE INDEX IF NOT EXISTS idx_supersede_events_version ON supersede_events (property, audit_key, version);
   `);
 }
 

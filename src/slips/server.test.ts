@@ -224,14 +224,46 @@ describe("attach -> re-encode -> serve -> supersede -> history round-trip", () =
     // the day-audit queue now reflects the real attachment state, no PMS override interference on the property gate.
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     dayAuditInternal.setFetchDayAuditForTests(async () => [checkinRow({ auditKey: "CH900100", chRef: "CH900100" })]);
-    const queue = await call<{ rows: Array<{ auditKey: string; attachment: { count: number; latestVersion: number | null } }> }>(
-      api,
-      "GET",
-      "/slips-api/hf/day/2026-08-03",
-    );
+    const queue = await call<{
+      rows: Array<{ auditKey: string; attachment: { count: number; latestVersion: number | null }; currentAttachments: Array<{ version: number }> }>;
+    }>(api, "GET", "/slips-api/hf/day/2026-08-03");
     expect(queue.body.rows[0]!.attachment.count).toBe(1); // only v2 is current
     expect(queue.body.rows[0]!.attachment.latestVersion).toBe(2);
+    expect(queue.body.rows[0]!.currentAttachments.map((a) => a.version)).toEqual([2]);
     delete process.env.PMS_DB_URL_HF;
+
+    // กู้คืน: restoring v1 brings it back as current WITHOUT touching v2.
+    const restoreRes = await call<{ version: number; superseded: boolean; supersededBy: string | null }>(
+      api,
+      "POST",
+      "/slips-api/hf/restore/CH900100/1",
+    );
+    expect(restoreRes.status).toBe(200);
+    expect(restoreRes.body.superseded).toBe(false);
+    expect(restoreRes.body.supersededBy).toBeNull();
+
+    const historyAfterRestore = await call<{ versions: Array<{ version: number; superseded: boolean }> }>(
+      api,
+      "GET",
+      "/slips-api/hf/history/CH900100",
+    );
+    expect(historyAfterRestore.body.versions).toEqual([
+      expect.objectContaining({ version: 1, superseded: false }),
+      expect.objectContaining({ version: 2, superseded: false }),
+    ]);
+
+    // restore on a nonexistent version 404s.
+    expect((await call(api, "POST", "/slips-api/hf/restore/CH900100/99")).status).toBe(404);
+
+    // Take v1 back out again over HTTP — proves a restored version stays
+    // supersede-able through the real route (storage.test.ts's own
+    // multi-author unit test proves this writes a genuinely FRESH event,
+    // not a no-op against the original supersede). This also returns
+    // CH900100 to its pre-restore state (only v2 current) for the
+    // downstream /slips-internal test below.
+    const reSupersede = await call<{ superseded: boolean }>(api, "POST", "/slips-api/hf/supersede/CH900100/1");
+    expect(reSupersede.status).toBe(200);
+    expect(reSupersede.body.superseded).toBe(true);
   });
 
   test("400 for a non-image upload", async () => {

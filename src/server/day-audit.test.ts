@@ -15,10 +15,29 @@ import { describe, expect, test } from "bun:test";
 import type { DepositLedgerEvent, RawDepositLedgerRow } from "./deposit-register.ts";
 import {
   buildDayAuditRows,
+  sortDayAuditRows,
   type DayAuditCheckinRow,
   type DayAuditDepositRow,
   type DayAuditRefundRow,
+  type DayAuditRow,
 } from "./day-audit.ts";
+
+/** Minimal DayAuditDepositRow literal for `sortDayAuditRows`'s own direct
+ * (non-`buildDayAuditRows`) tests — only `paidAtIso`/`auditKey` ever vary in
+ * those tests, everything else is a fixed placeholder. */
+function minimalDepositRow(auditKey: string, paidAtIso: string | null): DayAuditDepositRow {
+  return {
+    kind: "deposit",
+    auditKey,
+    rRef: "R000000",
+    paidAtIso,
+    guestName: null,
+    payNo: auditKey,
+    tender: "cash",
+    amountSatang: 1000,
+    checkinDateBangkok: null,
+  };
+}
 
 /** Default row: a single-line ค่าห้อง (room charge) payment, cash tender,
  * everything else zeroed — same "everything else zeroed" default
@@ -461,20 +480,118 @@ describe("buildDayAuditRows: voided rows excluded entirely", () => {
   });
 });
 
-describe("buildDayAuditRows: row ordering", () => {
-  test("checkin rows first (by chRef), then deposit rows (by payNo), then refund rows (by payNo)", () => {
+describe("buildDayAuditRows: row ordering (owner ask 2026-08-04 — date+time DESC, unified across kinds)", () => {
+  test("rows of every kind interleave strictly newest-first by paidAtIso, not grouped by kind", () => {
     const rows: RawDepositLedgerRow[] = [
-      row({ ledger_pay_no: "R2608-0301", ledger_cin_no: "CH26-800002", ledger_ds_name: "ค่าห้อง" }),
-      row({ ledger_pay_no: "R2608-0300", ledger_cin_no: "CH26-800001", ledger_ds_name: "ค่าห้อง" }),
-      row({ ledger_pay_no: "R2608-0311", ledger_cin_no: "R020002", ledger_ds_name: "จ่ายล่วงหน้า" }),
-      row({ ledger_pay_no: "R2608-0310", ledger_cin_no: "R020001", ledger_ds_name: "จ่ายล่วงหน้า" }),
-      row({ ledger_pay_no: "R2608-0321", ledger_cin_no: "R020004", ledger_ds_name: "คืนเงินจองห้อง" }),
-      row({ ledger_pay_no: "R2608-0320", ledger_cin_no: "R020003", ledger_ds_name: "คืนเงินจองห้อง" }),
+      row({ ledger_pay_no: "R2608-0300", ledger_cin_no: "CH26-800001", ledger_ds_name: "ค่าห้อง", ledger_pay_date: "2026-08-15T06:00:00.000Z" }), // 13:00 BKK
+      row({ ledger_pay_no: "R2608-0310", ledger_cin_no: "R020001", ledger_ds_name: "จ่ายล่วงหน้า", ledger_pay_date: "2026-08-15T07:00:00.000Z" }), // 14:00 BKK
+      row({ ledger_pay_no: "R2608-0320", ledger_cin_no: "R020003", ledger_ds_name: "คืนเงินจองห้อง", ledger_pay_date: "2026-08-15T05:00:00.000Z" }), // 12:00 BKK
+      row({ ledger_pay_no: "R2608-0301", ledger_cin_no: "CH26-800002", ledger_ds_name: "ค่าห้อง", ledger_pay_date: "2026-08-15T08:00:00.000Z" }), // 15:00 BKK — latest
     ];
     const result = buildDayAuditRows(rows, new Map(), new Map());
-    expect(result.map((r) => r.kind)).toEqual(["checkin", "checkin", "deposit", "deposit", "refund", "refund"]);
-    expect(checkinRows(result).map((r) => r.chRef)).toEqual(["CH26-800001", "CH26-800002"]);
-    expect(depositRows(result).map((r) => r.payNo)).toEqual(["R2608-0310", "R2608-0311"]);
-    expect(refundRows(result).map((r) => r.payNo)).toEqual(["R2608-0320", "R2608-0321"]);
+    // Newest (15:00 checkin) -> 14:00 deposit -> 13:00 checkin -> 12:00 refund.
+    // Kinds interleave — this is the explicit intent, not incidental.
+    expect(result.map((r) => r.auditKey)).toEqual(["CH26-800002", "R2608-0310", "CH26-800001", "R2608-0320"]);
+    expect(result.map((r) => r.kind)).toEqual(["checkin", "deposit", "checkin", "refund"]);
+    // Every consecutive pair is strictly non-increasing in paidAtIso.
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i]!.paidAtIso! <= result[i - 1]!.paidAtIso!).toBe(true);
+    }
+  });
+
+  test("a merged เช็คอิน row's paidAtIso is the LATEST non-voided line's pay_date in its group, never the earliest or the room-charge line specifically", () => {
+    const rows: RawDepositLedgerRow[] = [
+      // ค่าห้อง posted first...
+      row({
+        ledger_legacy_id: 1,
+        ledger_pay_no: "R2608-0400",
+        ledger_cin_no: "CH26-900001",
+        ledger_ds_name: "ค่าห้อง",
+        ledger_pay_date: "2026-08-15T02:00:00.000Z",
+      }),
+      // ...its ตัดยอด line lands LATER, on a different receipt, same CH.
+      row({
+        ledger_legacy_id: 2,
+        ledger_pay_no: "R2608-0401",
+        ledger_cin_no: "CH26-900001",
+        ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R090099",
+        ledger_cash: "0",
+        ledger_amount: "100.00",
+        ledger_free: "100.00",
+        ledger_pay_date: "2026-08-15T09:30:00.000Z", // the LATEST line — this wins
+      }),
+      // ...and a ค่าปรับ line lands in between.
+      row({
+        ledger_legacy_id: 3,
+        ledger_pay_no: "R2608-0402",
+        ledger_cin_no: "CH26-900001",
+        ledger_ds_name: "ค่าปรับ",
+        ledger_cash: "0",
+        ledger_tran: "50.00",
+        ledger_amount: "50.00",
+        ledger_pay_date: "2026-08-15T05:00:00.000Z",
+      }),
+    ];
+    const c = checkinRows(buildDayAuditRows(rows, new Map(), new Map()))[0]!;
+    expect(c.paidAtIso).toBe("2026-08-15T09:30:00.000Z"); // the ตัดยอด line — latest, not first, not the room charge
+  });
+
+  test("a row with no parseable pay_date (paidAtIso null) always sorts LAST, after every dated row", () => {
+    const rows: RawDepositLedgerRow[] = [
+      row({ ledger_pay_no: "R2608-0500", ledger_cin_no: "R020010", ledger_ds_name: "จ่ายล่วงหน้า", ledger_pay_date: "not-a-real-date" }),
+      row({ ledger_pay_no: "R2608-0501", ledger_cin_no: "R020011", ledger_ds_name: "จ่ายล่วงหน้า", ledger_pay_date: "2026-08-15T03:00:00.000Z" }),
+    ];
+    const result = buildDayAuditRows(rows, new Map(), new Map());
+    expect(result.map((r) => r.auditKey)).toEqual(["R2608-0501", "R2608-0500"]);
+    expect(result[0]!.paidAtIso).not.toBeNull();
+    expect(result[1]!.paidAtIso).toBeNull();
+  });
+
+  test("equal (including equally-null) paidAtIso breaks the tie deterministically by auditKey DESC", () => {
+    const rows: RawDepositLedgerRow[] = [
+      row({ ledger_pay_no: "R2608-0600", ledger_cin_no: "R020020", ledger_ds_name: "จ่ายล่วงหน้า", ledger_pay_date: "2026-08-15T04:00:00.000Z" }),
+      row({ ledger_pay_no: "R2608-0601", ledger_cin_no: "R020021", ledger_ds_name: "จ่ายล่วงหน้า", ledger_pay_date: "2026-08-15T04:00:00.000Z" }),
+      row({ ledger_pay_no: "R2608-0602", ledger_cin_no: "R020022", ledger_ds_name: "จ่ายล่วงหน้า", ledger_pay_date: "not-a-real-date" }),
+      row({ ledger_pay_no: "R2608-0603", ledger_cin_no: "R020023", ledger_ds_name: "จ่ายล่วงหน้า", ledger_pay_date: "not-a-real-date" }),
+    ];
+    const result = buildDayAuditRows(rows, new Map(), new Map());
+    // Same-timestamp pair: higher auditKey (payNo, here) first.
+    expect(result.slice(0, 2).map((r) => r.auditKey)).toEqual(["R2608-0601", "R2608-0600"]);
+    // Both-null pair (still last overall): same DESC tiebreak among themselves.
+    expect(result.slice(2, 4).map((r) => r.auditKey)).toEqual(["R2608-0603", "R2608-0602"]);
+
+    // Re-running against a shuffled input yields the identical order —
+    // proves the tiebreak is deterministic, not incidentally stable on
+    // insertion order.
+    const shuffled = [rows[3]!, rows[1]!, rows[2]!, rows[0]!];
+    const result2 = buildDayAuditRows(shuffled, new Map(), new Map());
+    expect(result2.map((r) => r.auditKey)).toEqual(result.map((r) => r.auditKey));
+  });
+});
+
+describe("sortDayAuditRows (direct, no PMS shaping)", () => {
+  test("sorts by paidAtIso DESC, independent of input order", () => {
+    const rows: DayAuditRow[] = [
+      minimalDepositRow("A", "2026-08-15T05:00:00.000Z"),
+      minimalDepositRow("B", "2026-08-15T08:00:00.000Z"),
+      minimalDepositRow("C", "2026-08-15T02:00:00.000Z"),
+    ];
+    expect(sortDayAuditRows(rows).map((r) => r.auditKey)).toEqual(["B", "A", "C"]);
+  });
+
+  test("never mutates its input array", () => {
+    const rows: DayAuditRow[] = [minimalDepositRow("A", "2026-08-15T05:00:00.000Z"), minimalDepositRow("B", "2026-08-15T08:00:00.000Z")];
+    const original = [...rows];
+    sortDayAuditRows(rows);
+    expect(rows).toEqual(original);
+  });
+
+  test("null paidAtIso rows always sort after every non-null row, regardless of how many", () => {
+    const rows: DayAuditRow[] = [
+      minimalDepositRow("Z-null-1", null),
+      minimalDepositRow("A", "2026-08-15T05:00:00.000Z"),
+      minimalDepositRow("Y-null-2", null),
+    ];
+    expect(sortDayAuditRows(rows).map((r) => r.auditKey)).toEqual(["A", "Z-null-1", "Y-null-2"]);
   });
 });

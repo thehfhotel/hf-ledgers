@@ -43,6 +43,12 @@ export function getMe(): Promise<Me> {
 export interface SlipQueueRow {
   auditKey: string;
   kind: "checkin" | "deposit" | "refund";
+  /** The settlement's own payment instant (owner ask, 2026-08-04: date+time
+   * DESCENDING, shared with the ledger's own ตรวจรายวัน queue) — `rows`
+   * arrives already sorted newest-first; this is exposed for display (the
+   * compact time chip next to each card's refs) only, never re-sorted by
+   * client-side. `null` only on a parse failure (defensive). */
+  paidAtIso: string | null;
   guestName: string | null;
   refs: string[];
   amountSatang: number;

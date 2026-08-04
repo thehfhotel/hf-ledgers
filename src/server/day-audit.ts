@@ -182,6 +182,32 @@ function paymentDateBangkok(raw: string | Date | null | undefined): string | nul
   }).format(date);
 }
 
+/** Full-precision ISO-8601 instant for `ledger_pay_date` (unlike
+ * `paymentDateBangkok` above, which truncates to a Bangkok CALENDAR date) —
+ * this is what every `DayAuditRow.paidAtIso` is built from, and what
+ * `sortDayAuditRows` orders by. `Date#toISOString()` always emits a fixed-
+ * width `YYYY-MM-DDTHH:mm:ss.sssZ` UTC string, so plain string comparison
+ * (`<`/`>`) is exactly chronological comparison — callers never need to
+ * parse back to a `Date` just to compare two of these. `null` for a missing
+ * or unparseable value, same defensive contract as `paymentDateBangkok`. */
+function paymentTimestampIso(raw: string | Date | null | undefined): string | null {
+  if (raw == null) return null;
+  const date = raw instanceof Date ? raw : new Date(raw);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+/** `a` if it sorts later (or equal) than `b` under the ISO-string-compare
+ * rule above, else `b` — `null` never wins (a row with an unknown timestamp
+ * never displaces a known one as "latest"). PURE, used both while folding a
+ * single payment group's lines and while merging several groups into one
+ * เช็คอิน row. */
+function laterPaidAtIso(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a > b ? a : b;
+}
+
 /** SQL-escapes and quotes a list of plain-text values for an inlined `IN
  * (...)` clause — used for the two cross-history lookups below, whose
  * R-ref lists are runtime DATA (parsed off today's ตัดยอด/คืนเงินจองห้อง
@@ -247,6 +273,20 @@ export interface DayAuditCheckinRow {
   kind: "checkin";
   auditKey: string;
   chRef: string;
+  /** Owner ask (2026-08-04): the moment this settlement sorts by, newest-
+   * first, across ALL row kinds (`sortDayAuditRows`). A merged เช็คอิน row
+   * may aggregate several receipts/lines (ค่าห้อง/ยกเลิกห้อง/ค่าปรับ/ตัดยอด)
+   * under one CH — this is deliberately the LATEST of those lines'
+   * `ledger_pay_date` (never the earliest, never the room-charge line
+   * specifically): the settlement's COMPLETION moment is what the office is
+   * scanning the queue by, and the last line posted is what actually closed
+   * the folio out. Every line reaching this row is already non-voided
+   * (`activeRows` filters voided rows out before grouping even starts), so
+   * "latest line" and "latest NON-VOIDED line" are the same computation
+   * here — there is no separate voided-line exclusion step needed. `null`
+   * only if every contributing line's own `ledger_pay_date` failed to parse
+   * (defensive — never expected in practice). */
+  paidAtIso: string | null;
   guestName: string | null;
   /** Every distinct receipt (payment key) contributing a ค่าห้อง/ยกเลิกห้อง/
    * ค่าปรับ/ตัดยอด line to this check-in — usually one, more than one when
@@ -275,6 +315,10 @@ export interface DayAuditDepositRow {
   kind: "deposit";
   auditKey: string;
   rRef: string;
+  /** This receipt's own `ledger_pay_date` — see `DayAuditCheckinRow.paidAtIso`
+   * for the shared ordering contract (`sortDayAuditRows`). `null` only on a
+   * parse failure (defensive — never expected in practice). */
+  paidAtIso: string | null;
   guestName: string | null;
   payNo: string;
   tender: DepositTender | null;
@@ -298,6 +342,10 @@ export interface DayAuditRefundRow {
   auditKey: string;
   refundOf: "deposit" | "excess";
   ref: string;
+  /** This line's own `ledger_pay_date` — see `DayAuditCheckinRow.paidAtIso`
+   * for the shared ordering contract (`sortDayAuditRows`). `null` only on a
+   * parse failure (defensive — never expected in practice). */
+  paidAtIso: string | null;
   guestName: string | null;
   payNo: string;
   tender: DepositTender | null;
@@ -320,6 +368,39 @@ export interface DayAuditRefundRow {
 }
 
 export type DayAuditRow = DayAuditCheckinRow | DayAuditDepositRow | DayAuditRefundRow;
+
+/**
+ * Unified newest-first ordering across every row kind (owner ask, 2026-08-04:
+ * "the payment rows must sort by DATE AND TIME, DESCENDING — in BOTH ตรวจรายวัน
+ * and ส่งสลิป", which share this same row-building module) — `paidAtIso` DESC
+ * (string comparison IS chronological comparison here, see
+ * `paymentTimestampIso`'s own doc comment), a `null` `paidAtIso` always
+ * sorting LAST (never guessed a position among the dated rows), and a
+ * deterministic tiebreak on `auditKey` DESC for equal (including equally
+ * `null`) timestamps, so the order never depends on incidental Map/object
+ * insertion order. Rows of different KINDS now interleave chronologically —
+ * this is the explicit intent, not an oversight: a เช็คอิน settled at 14:32
+ * can sit between a รับมัดจำ at 14:40 and a คืนเงิน at 14:20. Replaces the
+ * three separate per-kind ref-string sorts this module used before
+ * (checkin-by-chRef, deposit-by-payNo, refund-by-payNo, concatenated in that
+ * fixed kind order) — nothing downstream may assume rows are grouped by
+ * kind any more (server.ts's PENDING-FIRST re-sort is stable, so it merely
+ * splits this order into two buckets without disturbing it within either;
+ * src/slips/queue.ts's `buildSlipQueue` filters this SAME array, so it
+ * inherits the identical order for free). PURE, exported so `queue.ts` never
+ * needs a second copy of this comparator.
+ */
+export function sortDayAuditRows<T extends DayAuditRow>(rows: readonly T[]): T[] {
+  return [...rows].sort((a, b) => {
+    if (a.paidAtIso !== b.paidAtIso) {
+      if (a.paidAtIso === null) return 1; // null always last
+      if (b.paidAtIso === null) return -1;
+      return a.paidAtIso > b.paidAtIso ? -1 : 1; // DESC
+    }
+    if (a.auditKey === b.auditKey) return 0;
+    return a.auditKey > b.auditKey ? -1 : 1; // DESC tiebreak
+  });
+}
 
 /**
  * True iff this settlement carries a nonzero TRANSFER component anywhere —
@@ -356,6 +437,13 @@ interface BookingPaymentGroupAgg {
   appliedAmountSatang: number;
   appliedRRef: string | null;
   hasApplied: boolean;
+  /** Latest `ledger_pay_date` (as `paymentTimestampIso`) among every line
+   * folded into THIS payment group — see `DayAuditCheckinRow.paidAtIso`'s
+   * doc comment for why "latest", not "first", is the right rule. Read ONCE
+   * per line (unlike the tender columns, which read once per GROUP — every
+   * line can carry a different `ledger_pay_date`, so this one genuinely
+   * folds across all of them, never just the first). */
+  maxPaidAtIso: string | null;
 }
 
 /**
@@ -364,10 +452,11 @@ interface BookingPaymentGroupAgg {
  * a best-effort check-in-date lookup (see `fetchCheckinDateLookup`) — PURE,
  * no I/O, both maps are plain data by the time this runs. Returns pending-
  * vs-checked-UNAWARE rows (this module has no knowledge of `payment_audits`
- * — see this file's own module doc comment) in a stable, deterministic order
- * (checkin rows by `chRef`, then deposit rows by `payNo`, then refund rows
- * by `payNo`) — server.ts merges checked state and re-sorts pending-first on
- * top of this.
+ * — see this file's own module doc comment), newest-first across every kind
+ * (`sortDayAuditRows` — see its own doc comment for the full ordering
+ * contract) — server.ts merges checked state and re-sorts pending-first on
+ * top of this (a stable sort, so it only splits this order into two
+ * buckets, never disturbs it within either).
  *
  * Re-asserts the voided filter `DAY_AUDIT_LEDGER_QUERY`'s WHERE already
  * applies (`activeRows`, below) — same fixture-provable defense-in-depth
@@ -400,6 +489,7 @@ export function buildDayAuditRows(
         kind: "deposit",
         auditKey: event.pmsRef,
         rRef: rNumber,
+        paidAtIso: paymentTimestampIso(row.ledger_pay_date),
         guestName: event.guestName,
         payNo: event.pmsRef,
         tender: event.tender,
@@ -422,6 +512,7 @@ export function buildDayAuditRows(
         auditKey: event.pmsRef,
         refundOf: "deposit",
         ref: rNumber,
+        paidAtIso: paymentTimestampIso(row.ledger_pay_date),
         guestName: event.guestName,
         payNo: event.pmsRef,
         tender: event.tender,
@@ -439,6 +530,7 @@ export function buildDayAuditRows(
         auditKey: pmsRef,
         refundOf: "excess",
         ref: chRef ?? pmsRef,
+        paidAtIso: paymentTimestampIso(row.ledger_pay_date),
         guestName: buildGuestName(row.cust_title, row.cust_firstname, row.cust_lastname, row.cust_name2),
         payNo: pmsRef,
         tender: dominantTenderRaw(row),
@@ -472,6 +564,7 @@ export function buildDayAuditRows(
         appliedAmountSatang: 0,
         appliedRRef: null,
         hasApplied: false,
+        maxPaidAtIso: null,
       };
       groups.set(pmsRef, agg);
     }
@@ -479,6 +572,10 @@ export function buildDayAuditRows(
     if (agg.guestName === null) {
       agg.guestName = buildGuestName(row.cust_title, row.cust_firstname, row.cust_lastname, row.cust_name2);
     }
+    // Latest pay_date across EVERY line in this group (room/cancel/penalty/
+    // applied alike) — unlike the tender columns below, this reads every
+    // line, not just the first (see BookingPaymentGroupAgg.maxPaidAtIso).
+    agg.maxPaidAtIso = laterPaidAtIso(agg.maxPaidAtIso, paymentTimestampIso(row.ledger_pay_date));
     // Tender columns are REPLICATED across every line of a multi-line
     // receipt (pms-prefill.ts's module-level money gotcha) — read ONCE,
     // from the first line encountered for this payment group, never summed
@@ -533,6 +630,7 @@ export function buildDayAuditRows(
     let creditSatang = 0;
     let webSatang = 0;
     let penaltySatang = 0;
+    let paidAtIso: string | null = null;
     let appliedAgg: BookingPaymentGroupAgg | null = null;
     for (const agg of aggs) {
       grossSatang += agg.roomSatang + agg.cancelSatang + agg.penaltySatang;
@@ -541,6 +639,9 @@ export function buildDayAuditRows(
       creditSatang += agg.creditSatang;
       webSatang += agg.webSatang;
       penaltySatang += agg.penaltySatang;
+      // The stay's paidAtIso is the LATEST line across every receipt sharing
+      // this CH — see DayAuditCheckinRow.paidAtIso's own doc comment.
+      paidAtIso = laterPaidAtIso(paidAtIso, agg.maxPaidAtIso);
       if (agg.hasApplied && appliedAgg === null) appliedAgg = agg;
     }
 
@@ -567,6 +668,7 @@ export function buildDayAuditRows(
       kind: "checkin",
       auditKey: cinNo,
       chRef: cinNo,
+      paidAtIso,
       guestName,
       receiptPayNos,
       grossSatang,
@@ -575,11 +677,7 @@ export function buildDayAuditRows(
     });
   }
 
-  checkinRows.sort((a, b) => (a.chRef < b.chRef ? -1 : a.chRef > b.chRef ? 1 : 0));
-  depositRows.sort((a, b) => (a.payNo < b.payNo ? -1 : a.payNo > b.payNo ? 1 : 0));
-  refundRows.sort((a, b) => (a.payNo < b.payNo ? -1 : a.payNo > b.payNo ? 1 : 0));
-
-  return [...checkinRows, ...depositRows, ...refundRows];
+  return sortDayAuditRows([...checkinRows, ...depositRows, ...refundRows]);
 }
 
 // ── network shim ────────────────────────────────────────────────────────

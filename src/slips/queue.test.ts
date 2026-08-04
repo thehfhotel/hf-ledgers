@@ -9,7 +9,8 @@ process.env.DEV_USER = "tester@thehfhotel.org";
 
 import { afterEach, describe, expect, test } from "bun:test";
 import type { DayAuditCheckinRow, DayAuditDepositRow, DayAuditRefundRow, DayAuditRow } from "../server/day-audit.ts";
-const { _internal: dayAuditInternal } = await import("../server/day-audit.ts");
+import type { RawDepositLedgerRow } from "../server/deposit-register.ts";
+const { _internal: dayAuditInternal, buildDayAuditRows } = await import("../server/day-audit.ts");
 const { buildSlipQueue, needsSlipProof } = await import("./queue.ts");
 const { createAttachment } = await import("./storage.ts");
 
@@ -18,6 +19,7 @@ function checkinRow(overrides: Partial<DayAuditCheckinRow> = {}): DayAuditChecki
     kind: "checkin",
     auditKey: "CH000001",
     chRef: "CH000001",
+    paidAtIso: "2026-08-03T08:00:00.000Z",
     guestName: "สมชาย ใจดี",
     receiptPayNos: ["R2608-0001"],
     grossSatang: 100_000,
@@ -32,6 +34,7 @@ function depositRow(overrides: Partial<DayAuditDepositRow> = {}): DayAuditDeposi
     kind: "deposit",
     auditKey: "R2608-0100",
     rRef: "R090001",
+    paidAtIso: "2026-08-03T09:00:00.000Z",
     guestName: "สมหญิง มีทรัพย์",
     payNo: "R2608-0100",
     tender: "cash",
@@ -47,6 +50,7 @@ function refundRow(overrides: Partial<DayAuditRefundRow> = {}): DayAuditRefundRo
     auditKey: "R2607-0480",
     refundOf: "deposit",
     ref: "R015834",
+    paidAtIso: "2026-08-03T10:00:00.000Z",
     guestName: null,
     payNo: "R2607-0480",
     tender: "transfer",
@@ -137,5 +141,48 @@ describe("buildSlipQueue", () => {
       throw new Error("connection refused");
     });
     await expect(buildSlipQueue("hf", "2026-08-03")).rejects.toThrow("connection refused");
+  });
+
+  test("preserves paidAtIso newest-first, matching buildDayAuditRows exactly — the two queue builders never disagree on order", async () => {
+    // Three transfer-tendered รับมัดจำ receipts (all needsSlipProof: true),
+    // fed in SCRAMBLED (non-chronological) raw order — buildDayAuditRows'
+    // own sortDayAuditRows call is what puts them right, never anything in
+    // this module.
+    function rawRow(overrides: Partial<RawDepositLedgerRow>): RawDepositLedgerRow {
+      return {
+        ledger_legacy_id: 1,
+        ledger_pay_no: "R2608-0900",
+        ledger_cin_no: "R090100",
+        ledger_ds_name: "จ่ายล่วงหน้า",
+        ledger_pay_date: "2026-08-03T04:00:00.000Z",
+        ledger_status: null,
+        ledger_cash: "0",
+        ledger_credit: "0",
+        ledger_tran: "500.00",
+        ledger_web: "0",
+        ledger_amount: "500.00",
+        ledger_free: "0",
+        ledger_note: null,
+        cust_title: null,
+        cust_firstname: null,
+        cust_lastname: null,
+        cust_name2: null,
+        ...overrides,
+      };
+    }
+    const raw: RawDepositLedgerRow[] = [
+      rawRow({ ledger_legacy_id: 1, ledger_pay_no: "R2608-0910", ledger_cin_no: "R090110", ledger_pay_date: "2026-08-03T02:00:00.000Z" }), // earliest
+      rawRow({ ledger_legacy_id: 2, ledger_pay_no: "R2608-0911", ledger_cin_no: "R090111", ledger_pay_date: "2026-08-03T08:00:00.000Z" }), // latest
+      rawRow({ ledger_legacy_id: 3, ledger_pay_no: "R2608-0912", ledger_cin_no: "R090112", ledger_pay_date: "2026-08-03T05:00:00.000Z" }), // middle
+    ];
+
+    const auditRows = buildDayAuditRows(raw, new Map(), new Map());
+    const expectedOrder = auditRows.filter(needsSlipProof).map((r) => r.auditKey);
+    expect(expectedOrder).toEqual(["R2608-0911", "R2608-0912", "R2608-0910"]); // newest-first, sanity check
+
+    dayAuditInternal.setFetchDayAuditForTests(async () => auditRows);
+    const queue = await buildSlipQueue("hf", "2026-08-03");
+    expect(queue.map((r) => r.auditKey)).toEqual(expectedOrder);
+    expect(queue.map((r) => r.paidAtIso)).toEqual(auditRows.filter(needsSlipProof).map((r) => r.paidAtIso));
   });
 });

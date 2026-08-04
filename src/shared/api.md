@@ -1229,14 +1229,24 @@ means.
     URL is unset, **502** on a live query failure, **400** on an invalid
     `date`. `rows` is sorted **PENDING FIRST** (`checked: false` before
     `checked: true`; `Array#sort`'s stability preserves each bucket's
-    underlying kind/key order). `pullStatus` is whether this `(property,
-    date)` already has at least one `source: "pms"` booking line (the
-    client's ดึงข้อมูล chip) — reuses `getBookingLinesForDay()`, never a
-    second query.
+    underlying order as a secondary key), and **within each bucket, date+time
+    DESCENDING** — newest `paidAtIso` first (`sortDayAuditRows`,
+    `src/server/day-audit.ts`, owner ask 2026-08-04: "payment rows must sort
+    by DATE AND TIME, DESCENDING — in BOTH ตรวจรายวัน and ส่งสลิป", which share
+    this same row-building module). A row with `paidAtIso: null` always sorts
+    LAST; equal (including equally-null) timestamps break the tie
+    deterministically on `auditKey` DESC. **Rows of different `kind`s
+    interleave chronologically — this is deliberate, not a bug**: nothing
+    downstream may assume rows are grouped by kind. `pullStatus` is whether
+    this `(property, date)` already has at least one `source: "pms"` booking
+    line (the client's ดึงข้อมูล chip) — reuses `getBookingLinesForDay()`,
+    never a second query.
 
     **`DayAuditRow`** is a discriminated union on `kind`, every variant
     carrying `auditKey: string` (the settlement's identity — see
-    `payment_audits` below) plus the merged audit-state quartet
+    `payment_audits` below), `paidAtIso: string | null` (the sort key above —
+    full-precision ISO-8601 instant, `null` only on a `ledger_pay_date` parse
+    failure, never expected in practice) plus the merged audit-state quartet
     `checked: boolean`, `checkedAt: string | null`, `checkedBy: string |
     null`, and the Wave-2 seam placeholders `proofCount: number` (always
     `0`), `proofsPending: boolean` (always `false` in Wave 1 — the slip
@@ -1247,7 +1257,12 @@ means.
       by the CH (check-in) number (`auditKey === chRef`). A check-in's
       `ค่าห้อง` payment(s) and its (at most one) `ตัดยอดมัดจำ` line merge into
       this ONE row regardless of whether they share a receipt (pay_no) or
-      not — never two rows for the same stay. `receiptPayNos: string[]`
+      not — never two rows for the same stay. `paidAtIso` for a merged row is
+      the **LATEST** contributing line's own `ledger_pay_date` (across every
+      ค่าห้อง/ยกเลิกห้อง/ค่าปรับ/ตัดยอด line feeding this CH, regardless of
+      which receipt it's on) — never the earliest, never specifically the
+      room-charge line: the settlement's COMPLETION moment is what the
+      office scans the queue by. `receiptPayNos: string[]`
       lists every distinct receipt contributing a line; `grossSatang` sums
       `ค่าห้อง` + `ยกเลิกห้อง` (forced negative, same sign-anomaly fix
       pms-prefill.ts's `buildBookingCandidate` makes) + `ค่าปรับ` — NEVER the
@@ -1368,11 +1383,18 @@ family), voided rows excluded at the SQL level (unlike
 the register's own greyed display — this hub never shows a voided line at
 all). `buildDayAuditRows(rows, receivedByRRef, checkinDateByRRef)` — PURE,
 the stay-merge itself: groups `ค่าห้อง`/`ยกเลิกห้อง`/`ค่าปรับ`/`ตัดยอด` lines
-by payment key first (tender columns read ONCE per group), then re-groups
-those payment-group aggregates by `ledger_cin_no` to build the merged
-เช็คอิน rows — this second re-grouping is the whole point: a room charge and
-its deposit application sharing a CH but NOT a payment key still land in
-ONE row. `fetchReceivedLookup()` — the cross-history pairing query
+by payment key first (tender columns read ONCE per group, but each line's own
+`ledger_pay_date` is folded into a running `maxPaidAtIso` EVERY line, not just
+the first — see `paidAtIso`'s doc above), then re-groups those payment-group
+aggregates by `ledger_cin_no` to build the merged เช็คอิน rows (taking the
+LATEST `maxPaidAtIso` across every aggregate sharing that CH) — this second
+re-grouping is the whole point: a room charge and its deposit application
+sharing a CH but NOT a payment key still land in ONE row. Returns
+`sortDayAuditRows(...)` of the three row-kind arrays (exported, PURE — see
+endpoint 34's own ordering doc above; also reused as-is by
+`src/slips/queue.ts`'s `buildSlipQueue`, which merely filters this
+already-ordered array and therefore never disagrees with the ledger's own
+queue on order). `fetchReceivedLookup()` — the cross-history pairing query
 (`ledger_ds_name = 'จ่ายล่วงหน้า'` only, `ledger_cin_no IN (...)` the exact
 R-refs this day's rows need, no date window, voided rows NOT filtered —
 `overRefundedWarning` needs to see them), reuses `classifyDepositRow()` on

@@ -1681,7 +1681,9 @@ export const api = new Elysia({ prefix: "/api" })
   // never needed a slip (cash-only) always reads `proofCount: 0,
   // proofsPending: false`. `rows` sorts PENDING FIRST (`Array#sort` is
   // stable, so each checked/pending bucket keeps `buildDayAuditRows`' own
-  // kind/key-sorted order as a secondary key). `pullStatus` answers the
+  // newest-first-by-`paidAtIso` order — `sortDayAuditRows`, owner ask
+  // 2026-08-04 — as a secondary key: within EITHER bucket, rows are date+time
+  // DESCENDING, interleaved across kinds). `pullStatus` answers the
   // client's ดึงข้อมูล chip: whether this (property, date) already has at
   // least one `source: "pms"` booking line (i.e. the day's own bookings page
   // has been pulled) — reuses `getBookingLinesForDay`, never a second query.

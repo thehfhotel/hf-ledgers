@@ -37,6 +37,15 @@ export type SlipQueueAttachmentState = AttachmentSummary;
 export interface SlipQueueRow {
   auditKey: string;
   kind: DayAuditRow["kind"];
+  /** The settlement's own `DayAuditRow.paidAtIso`, carried through verbatim
+   * — the ตรวจรายวัน/ส่งสลิป queues share ONE ordering (owner ask, 2026-08-04:
+   * date+time DESC in BOTH). This module invents no second copy of the
+   * timestamp or the sort: `buildSlipQueue` below simply filters
+   * `fetchDayAudit`'s already-`sortDayAuditRows`-ordered rows, so this
+   * queue's own row order is that SAME order for free — `paidAtIso` is
+   * exposed here purely so the client can render the compact time chip, not
+   * because this module re-sorts by it. */
+  paidAtIso: string | null;
   guestName: string | null;
   refs: string[];
   amountSatang: number;
@@ -63,6 +72,7 @@ export async function buildSlipQueue(property: Property, date: string): Promise<
   return needing.map((row) => ({
     auditKey: row.auditKey,
     kind: row.kind,
+    paidAtIso: row.paidAtIso,
     guestName: row.guestName,
     refs: rowRefs(row),
     amountSatang: rowAmountSatang(row),

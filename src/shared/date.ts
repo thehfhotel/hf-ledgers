@@ -14,6 +14,26 @@ export function todayBangkok(): string {
   }).format(new Date());
 }
 
+/** Compact "HH:MM" Bangkok wall-clock time for an ISO-8601 instant — the
+ * payment-time chip on the day-audit (ตรวจรายวัน) and slips (ส่งสลิป) queues,
+ * next to each row's refs line, so the newest-first date+time sort (owner
+ * ask, 2026-08-04) is actually legible rather than an invisible ordering
+ * rule. No seconds (Thai-appropriate, matches every other timestamp chip in
+ * this app — `formatCheckedAt`/`formatWhen`). `null` in (a row's
+ * `paidAtIso` may legitimately be `null`, or the instant may fail to parse)
+ * -> `null` out, never a guessed/blank string. */
+export function timeBangkok(iso: string | null): string | null {
+  if (iso === null) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+}
+
 export function toIso(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");

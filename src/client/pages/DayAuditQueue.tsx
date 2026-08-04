@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isoToBuddhist, shiftDays } from "../../shared/date.ts";
+import { isoToBuddhist, shiftDays, timeBangkok } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
 import { DEPOSIT_TENDER_LABELS_TH, type DepositTender, type Property } from "../../shared/types.ts";
 import {
@@ -351,6 +351,16 @@ function SlipProofCell({ row, property }: { row: DayAuditRow; property: Property
   );
 }
 
+/** Compact "· 14:32" suffix for the refs line — muted, no seconds (the
+ * date+time DESCENDING sort, owner ask 2026-08-04, is only legible if the
+ * time it's sorting by is actually shown). Omitted entirely when
+ * `paidAtIso` is `null` (never a guessed/blank time). */
+function PaidAtChip({ paidAtIso }: { paidAtIso: string | null }) {
+  const time = timeBangkok(paidAtIso);
+  if (time === null) return null;
+  return <span className="text-ink-muted"> · {time}</span>;
+}
+
 function RefCell({ row }: { row: DayAuditRow }) {
   if (row.kind === "checkin") {
     return (
@@ -359,6 +369,7 @@ function RefCell({ row }: { row: DayAuditRow }) {
         <span className="text-[11px] text-ink-muted">
           {row.chRef}
           {row.receiptPayNos.length > 0 && <> · {row.receiptPayNos.join(" · ")}</>}
+          <PaidAtChip paidAtIso={row.paidAtIso} />
         </span>
       </span>
     );
@@ -369,6 +380,7 @@ function RefCell({ row }: { row: DayAuditRow }) {
         {row.guestName && <span className="font-semibold text-ink">{row.guestName}</span>}
         <span className="text-[11px] text-ink-muted">
           {row.rRef} · {row.payNo}
+          <PaidAtChip paidAtIso={row.paidAtIso} />
         </span>
         {row.checkinDateBangkok && (
           <span className="text-[11px] text-ink-muted">เช็คอิน {isoToBuddhist(row.checkinDateBangkok)}</span>
@@ -381,6 +393,7 @@ function RefCell({ row }: { row: DayAuditRow }) {
       {row.guestName && <span className="font-semibold text-ink">{row.guestName}</span>}
       <span className="text-[11px] text-ink-muted">
         {row.ref} · {row.payNo}
+        <PaidAtChip paidAtIso={row.paidAtIso} />
       </span>
       {row.overRefundedWarning && (
         <span className="text-[11px] font-medium text-bad">ใบรับถูกยกเลิกแต่รายการคืนเงินยังไม่ถูกยกเลิก — ตรวจสอบใน iHOTEL</span>

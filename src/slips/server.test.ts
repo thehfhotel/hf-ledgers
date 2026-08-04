@@ -70,6 +70,7 @@ function checkinRow(overrides: Partial<DayAuditCheckinRow> = {}): DayAuditChecki
     kind: "checkin",
     auditKey: "CH900001",
     chRef: "CH900001",
+    paidAtIso: "2026-08-15T08:00:00.000Z",
     guestName: "ทดสอบ ระบบ",
     receiptPayNos: ["R2608-9001"],
     grossSatang: 100_000,

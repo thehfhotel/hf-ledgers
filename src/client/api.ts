@@ -744,6 +744,13 @@ export type DayAuditCheckinRow = DayAuditStateFields & {
   kind: "checkin";
   auditKey: string;
   chRef: string;
+  /** The settlement's sort key (owner ask, 2026-08-04: date+time DESC across
+   * every row kind, `sortDayAuditRows` server-side) — for a merged เช็คอิน
+   * row this is the LATEST contributing line's own pay_date, never the
+   * earliest or the room-charge line specifically (see the server-side
+   * `DayAuditCheckinRow.paidAtIso` doc comment for the full reasoning).
+   * `null` only on a parse failure (defensive — never expected). */
+  paidAtIso: string | null;
   guestName: string | null;
   receiptPayNos: string[];
   grossSatang: number;
@@ -759,6 +766,9 @@ export type DayAuditDepositRow = DayAuditStateFields & {
   kind: "deposit";
   auditKey: string;
   rRef: string;
+  /** This receipt's own pay_date — see `DayAuditCheckinRow.paidAtIso` above
+   * for the shared ordering contract. */
+  paidAtIso: string | null;
   guestName: string | null;
   payNo: string;
   tender: DepositTender | null;
@@ -776,6 +786,9 @@ export type DayAuditRefundRow = DayAuditStateFields & {
   auditKey: string;
   refundOf: "deposit" | "excess";
   ref: string;
+  /** This line's own pay_date — see `DayAuditCheckinRow.paidAtIso` above for
+   * the shared ordering contract. */
+  paidAtIso: string | null;
   guestName: string | null;
   payNo: string;
   tender: DepositTender | null;
@@ -796,7 +809,9 @@ export interface DayAuditResponse {
 
 // GET /api/:property/audit/day/:date — 503 when this property's PMS env URL
 // is unset (ApiError, err.status === 503), 502 on a live query failure.
-// `rows` arrives PENDING FIRST.
+// `rows` arrives PENDING FIRST, then date+time DESCENDING (newest paidAtIso
+// first) within each bucket, interleaved across row kinds — never re-sort
+// this client-side, it would fight the server's own order.
 export function getDayAudit(property: Property, date: string): Promise<DayAuditResponse> {
   return request(`/${property}/audit/day/${date}`);
 }

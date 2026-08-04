@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { shiftDays, todayBangkok } from "../../shared/date.ts";
+import { shiftDays, timeBangkok, todayBangkok } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
 import { PROPERTIES, type Property } from "../../shared/types.ts";
 import { PROPERTY_BADGE_LABELS } from "../../client/labels.ts";
@@ -10,6 +10,7 @@ import {
   getHistory,
   getMe,
   getSlipQueue,
+  pictureUrl,
   supersedeSlip,
   thumbUrl,
   type Me,
@@ -17,6 +18,7 @@ import {
 } from "./api.ts";
 import { AttachModal, type AttachMode } from "./components/AttachModal.tsx";
 import { HistoryDrawer } from "./components/HistoryDrawer.tsx";
+import { matchesSearch, partitionSlipQueue } from "./partition.ts";
 
 const KIND_LABEL_TH: Record<SlipQueueRow["kind"], string> = {
   checkin: "เช็คอิน",
@@ -24,12 +26,12 @@ const KIND_LABEL_TH: Record<SlipQueueRow["kind"], string> = {
   refund: "คืนเงิน",
 };
 
-function matchesSearch(row: SlipQueueRow, query: string): boolean {
-  if (query.trim() === "") return true;
-  const needle = query.trim().toLowerCase();
-  if (row.guestName?.toLowerCase().includes(needle)) return true;
-  return row.refs.some((r) => r.toLowerCase().includes(needle));
-}
+/** Which of the two tabs is active — owner feedback, 2026-08-04: the single
+ * scrolling list (รอแนบสลิป on top, แนบแล้ว below) made a just-attached row's
+ * move feel like a disappearance (แนบแล้ว could be off-screen, or plain
+ * didn't exist yet as a section for the day's first slip). Splitting into
+ * explicit tabs makes that move a navigable destination instead. */
+type Tab = "pending" | "manage";
 
 function formatWhen(utc: string): string {
   const iso = utc.includes("T") ? utc : `${utc.replace(" ", "T")}Z`;
@@ -65,6 +67,11 @@ export function App() {
   const [modal, setModal] = useState<ModalState | null>(null);
   const [historyKey, setHistoryKey] = useState<string | null>(null);
   const [pasteTargetKey, setPasteTargetKey] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("pending");
+  // Owner ask (2026-08-04): immediate, explicit feedback on a successful
+  // attach — never let the row's move to จัดการสลิป read as a silent
+  // vanish. `true` shows the toast; auto-dismisses below.
+  const [showAttachToast, setShowAttachToast] = useState(false);
 
   useEffect(() => {
     getMe()
@@ -126,9 +133,17 @@ export function App() {
     return () => window.removeEventListener("paste", onPaste);
   }, [pasteTargetKey, rows]);
 
+  // Auto-dismiss the attach-success toast — a lingering confirmation is as
+  // much noise as no confirmation at all; the tab pill itself (with its own
+  // live count) stays the permanent record of where the row went.
+  useEffect(() => {
+    if (!showAttachToast) return;
+    const t = setTimeout(() => setShowAttachToast(false), 6000);
+    return () => clearTimeout(t);
+  }, [showAttachToast]);
+
   const filtered = useMemo(() => (rows ?? []).filter((r) => matchesSearch(r, search)), [rows, search]);
-  const pending = filtered.filter((r) => r.attachment.count === 0);
-  const attached = filtered.filter((r) => r.attachment.count > 0);
+  const { pending, attached } = useMemo(() => partitionSlipQueue(filtered), [filtered]);
 
   async function handleSave(row: SlipQueueRow, mode: AttachMode, files: File[]) {
     if (mode === "replace") {
@@ -137,8 +152,13 @@ export function App() {
       for (const v of current) await supersedeSlip(property, row.auditKey, v.version);
     }
     for (const file of files) await attachSlip(property, row.auditKey, date, file);
-    setModal(null);
+    // Reload BEFORE closing the modal — by the time the modal disappears,
+    // `rows` already reflects the attach (the row has already moved into
+    // จัดการสลิป), so there is no brief window where the modal is gone but
+    // the pending list still shows the stale (pre-attach) state.
     await reloadQueue();
+    setModal(null);
+    setShowAttachToast(true);
   }
 
   return (
@@ -185,42 +205,83 @@ export function App() {
 
       {rows !== null && (
         <>
-          <section className="flex flex-col gap-2">
-            <h2 className="text-sm font-semibold text-ink">รอแนบสลิป ({pending.length})</h2>
-            {pending.length === 0 ? (
-              <p className="rounded-lg border border-line bg-panel px-4 py-6 text-center text-sm text-ink-muted">
-                {filtered.length === 0 && rows.length > 0 ? "ไม่พบรายการที่ค้นหา" : "ไม่มีรายการที่รอแนบสลิป"}
-              </p>
-            ) : (
-              <ul className="flex flex-col gap-2">
-                {pending.map((row) => (
-                  <PendingCard
-                    key={row.auditKey}
-                    row={row}
-                    onFocusZone={() => setPasteTargetKey(row.auditKey)}
-                    onBlurZone={() => setPasteTargetKey((prev) => (prev === row.auditKey ? null : prev))}
-                    onFilesChosen={(files) => setModal({ row, mode: "add", initialFiles: files })}
-                  />
-                ))}
-              </ul>
-            )}
-          </section>
+          {/* Two tabs, not one scrolling list — see the Tab type's own doc
+              comment for why. The tab bar mirrors this app's own pill
+              language (same treatment as the property switcher above), and
+              carries a live count on EACH tab so a settlement's move from
+              รอแนบสลิป to จัดการสลิป is always visible at a glance, not just
+              inferred from the list shrinking. Counts (like the search box
+              and DateBar above) are scoped to the current date + search —
+              BOTH tabs share that same scoping, never a per-tab copy. */}
+          <div className="flex justify-center">
+            <div className="flex overflow-hidden rounded-full border border-brand-300">
+              <button
+                type="button"
+                onClick={() => setTab("pending")}
+                aria-pressed={tab === "pending"}
+                className={
+                  "px-3 py-1.5 text-xs font-semibold transition " +
+                  (tab === "pending" ? "bg-brand-500 text-white" : "bg-brand-50 text-brand-600 hover:bg-brand-100")
+                }
+              >
+                รอแนบสลิป ({pending.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("manage")}
+                aria-pressed={tab === "manage"}
+                className={
+                  "px-3 py-1.5 text-xs font-semibold transition " +
+                  (tab === "manage" ? "bg-brand-500 text-white" : "bg-brand-50 text-brand-600 hover:bg-brand-100")
+                }
+              >
+                จัดการสลิป ({attached.length})
+              </button>
+            </div>
+          </div>
 
-          {attached.length > 0 && (
-            <section className="flex flex-col gap-2 opacity-95">
-              <h2 className="text-sm font-semibold text-ink">แนบแล้ว ({attached.length})</h2>
-              <ul className="flex flex-col gap-2">
-                {attached.map((row) => (
-                  <AttachedCard
-                    key={row.auditKey}
-                    property={property}
-                    row={row}
-                    onAddMore={() => setModal({ row, mode: "add", initialFiles: [] })}
-                    onReplace={() => setModal({ row, mode: "replace", initialFiles: [] })}
-                    onShowHistory={() => setHistoryKey(row.auditKey)}
-                  />
-                ))}
-              </ul>
+          {tab === "pending" && (
+            <section className="flex flex-col gap-2">
+              {pending.length === 0 ? (
+                <p className="rounded-lg border border-line bg-panel px-4 py-6 text-center text-sm text-ink-muted">
+                  {filtered.length === 0 && rows.length > 0 ? "ไม่พบรายการที่ค้นหา" : "ไม่มีรายการที่รอแนบสลิป"}
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {pending.map((row) => (
+                    <PendingCard
+                      key={row.auditKey}
+                      row={row}
+                      onFocusZone={() => setPasteTargetKey(row.auditKey)}
+                      onBlurZone={() => setPasteTargetKey((prev) => (prev === row.auditKey ? null : prev))}
+                      onFilesChosen={(files) => setModal({ row, mode: "add", initialFiles: files })}
+                    />
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
+          {tab === "manage" && (
+            <section className="flex flex-col gap-2">
+              {attached.length === 0 ? (
+                <p className="rounded-lg border border-line bg-panel px-4 py-6 text-center text-sm text-ink-muted">
+                  {filtered.length === 0 && rows.length > 0 ? "ไม่พบรายการที่ค้นหา" : "ยังไม่มีรายการที่แนบสลิปแล้ว"}
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {attached.map((row) => (
+                    <AttachedCard
+                      key={row.auditKey}
+                      property={property}
+                      row={row}
+                      onAddMore={() => setModal({ row, mode: "add", initialFiles: [] })}
+                      onReplace={() => setModal({ row, mode: "replace", initialFiles: [] })}
+                      onShowHistory={() => setHistoryKey(row.auditKey)}
+                    />
+                  ))}
+                </ul>
+              )}
             </section>
           )}
 
@@ -240,12 +301,55 @@ export function App() {
       )}
 
       {historyKey && <HistoryDrawer property={property} auditKey={historyKey} onClose={() => setHistoryKey(null)} />}
+
+      {/* Attach-success toast (owner ask, 2026-08-04) — explicit "it went
+          HERE" feedback the instant a slip saves, with a direct jump. Never
+          blocks the UI (fixed, dismissible, auto-clears) and never appears
+          for a "replace"/supersede-only outcome differently — every
+          successful save (add or replace) lands the settlement in จัดการสลิป,
+          so the same message covers both. */}
+      {showAttachToast && (
+        <div className="fixed inset-x-3 bottom-3 z-40 flex items-center justify-between gap-3 rounded-lg bg-brand-800 px-4 py-3 text-sm text-white shadow-xl">
+          <span>
+            แนบสลิปแล้ว — ดูได้ที่แท็บ{" "}
+            <button
+              type="button"
+              onClick={() => {
+                setTab("manage");
+                setShowAttachToast(false);
+              }}
+              className="font-semibold underline underline-offset-2 hover:text-gold-200"
+            >
+              จัดการสลิป
+            </button>
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowAttachToast(false)}
+            aria-label="ปิดข้อความแจ้งเตือน"
+            className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-white/70 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
+/** Refs line + the compact "· 14:32" payment-time chip — the newest-first
+ * date+time sort (owner ask, 2026-08-04) is only legible if the time it's
+ * sorting by is actually shown next to each card, same treatment
+ * DayAuditQueue.tsx (the ledger's own ตรวจรายวัน queue) gives it. Omitted
+ * entirely when `paidAtIso` is `null` (never a guessed/blank time). */
 function RefsLine({ row }: { row: SlipQueueRow }) {
-  return <span className="text-[11px] text-ink-muted">{row.refs.join(" · ")}</span>;
+  const time = timeBangkok(row.paidAtIso);
+  return (
+    <span className="text-[11px] text-ink-muted">
+      {row.refs.join(" · ")}
+      {time !== null && <> · {time}</>}
+    </span>
+  );
 }
 
 interface PendingCardProps {
@@ -315,7 +419,18 @@ function AttachedCard({ property, row, onAddMore, onReplace, onShowHistory }: At
   return (
     <li className="flex items-center gap-3 rounded-lg border border-line bg-panel p-3">
       {attachment.latestVersion !== null ? (
-        <button type="button" onClick={onShowHistory} className="relative shrink-0">
+        // Owner ask (2026-08-04, จัดการสลิป tab): tapping the thumbnail
+        // opens the full-size picture directly (a real link, new tab) —
+        // ประวัติ below is the SEPARATE, explicit path to full version
+        // history, so the two affordances stay distinct rather than both
+        // routing through the drawer.
+        <a
+          href={pictureUrl(property, row.auditKey, attachment.latestVersion)}
+          target="_blank"
+          rel="noreferrer"
+          className="relative shrink-0"
+          title="ดูรูปเต็ม"
+        >
           <img
             src={thumbUrl(property, row.auditKey, attachment.latestVersion)}
             alt={`สลิปล่าสุดของ ${row.auditKey}`}
@@ -324,7 +439,7 @@ function AttachedCard({ property, row, onAddMore, onReplace, onShowHistory }: At
           <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-500 px-1 text-[10px] font-semibold text-white">
             {attachment.count}
           </span>
-        </button>
+        </a>
       ) : (
         <div className="h-14 w-14 shrink-0 rounded-md bg-tint" />
       )}

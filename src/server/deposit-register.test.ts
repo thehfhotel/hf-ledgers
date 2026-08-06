@@ -1017,3 +1017,195 @@ describe("buildDepositRegisterData (row-level, end to end)", () => {
     });
   });
 });
+
+// ── HF Ville parity (live 2026-08-06 survey) ───────────────────────────────
+// The customer-join zero-padding bug itself (ledger_cust_no 'C0720' vs
+// 'C720') is a SQL-JOIN-layer concern, fixed and pinned in
+// customer-join.test.ts — `RawDepositLedgerRow` never carries
+// `ledger_cust_no` at all (the join has already happened by the time a row
+// reaches this module). What DOES reach this layer, and DOES genuinely
+// differ by property per the survey, is: (1) which `ht_customers` column
+// carries the surname and which sentinel means "no title" (buildGuestName's
+// own doc comment — hf: surname in cust_name2, null title; hfville: surname
+// in cust_lastname directly, empty-string title), and (2) which raw tender
+// column normally carries the money (hfville: ledger_tran 64% of rows,
+// ledger_credit only 0.4%; hf spreads more evenly across all four). These
+// tests prove this module produces CORRECT output — thread guest names,
+// tender identification, monthly footing, all three exception buckets —
+// when fed hfville's real shape, not just hf's, closing the exact class of
+// gap ("every fixture in the suite was HF-shaped") this task exists to fix.
+
+/** HF Ville–shaped default row: same "everything else zeroed" base as
+ * `row()`, redefaulted to hfville's own real conventions — transfer tender
+ * (never credit, hfville's near-absent 0.4% tender) and the empty-string
+ * "no title" sentinel. Individual tests still override
+ * cust_lastname/cust_name2/ledger_cin_no/etc. as needed — this only fixes
+ * the property-realistic DEFAULTS, mirroring `row()`'s own role for hf. */
+function hfvilleRow(overrides: Partial<RawDepositLedgerRow>): RawDepositLedgerRow {
+  return row({
+    ledger_pay_no: "R2510-0079", // a real observed hfville ledger_pay_no
+    ledger_cash: "0",
+    ledger_tran: "890.00",
+    ledger_amount: "890.00",
+    cust_title: "",
+    ...overrides,
+  });
+}
+
+describe("HF Ville parity — guestName conventions (buildGuestName reuse)", () => {
+  test("surname lives directly in cust_lastname (hfville's 61.6%-populated real column), not via cust_name2 fallback", () => {
+    const classified = classifyDepositRow(
+      hfvilleRow({ cust_title: "นาง", cust_firstname: "อรุณี", cust_lastname: "แสงทอง", cust_name2: "" }),
+    );
+    expect(classified!.event.guestName).toBe("นางอรุณี แสงทอง");
+  });
+
+  test("cust_name2 mirroring cust_lastname exactly (the 69.5%-common shape when both are present) resolves once, never doubled", () => {
+    const classified = classifyDepositRow(
+      hfvilleRow({ cust_title: "นาย", cust_firstname: "วีระ", cust_lastname: "ศรีสุข", cust_name2: "ศรีสุข" }),
+    );
+    expect(classified!.event.guestName).toBe("นายวีระ ศรีสุข");
+  });
+
+  test("empty-string title sentinel (hfville's own convention, 33.4% of rows) resolves identically to hf's null-title convention (25.6% of rows)", () => {
+    const viaHfville = classifyDepositRow(hfvilleRow({ cust_title: "", cust_firstname: "มานพ", cust_lastname: "ดีใจ" }));
+    const viaHf = classifyDepositRow(row({ cust_title: null, cust_firstname: "มานพ", cust_lastname: "", cust_name2: "ดีใจ" }));
+    expect(viaHfville!.event.guestName).toBe("มานพ ดีใจ");
+    expect(viaHf!.event.guestName).toBe("มานพ ดีใจ");
+  });
+
+  test("no ht_customers match at all: guestName null on an hfville-shaped row too, event still fully classified", () => {
+    const classified = classifyDepositRow(hfvilleRow({ cust_title: "", cust_firstname: "", cust_lastname: "", cust_name2: "" }));
+    expect(classified!.event.guestName).toBeNull();
+  });
+});
+
+describe("HF Ville parity — tender identification (transfer-dominant, credit near-absent)", () => {
+  test("จ่ายล่วงหน้า via ledger_tran (hfville's dominant real column, 64% of rows) resolves tender 'transfer'", () => {
+    const classified = classifyDepositRow(hfvilleRow({ ledger_cin_no: "R001511" })); // real hfville book_no shape
+    expect(classified!.event.tender).toBe("transfer");
+    expect(classified!.event.amountSatang).toBe(89_000);
+  });
+
+  test("web-tendered receipt (hfville's 2nd-most-common tender, 26% of rows) still resolves correctly", () => {
+    const classified = classifyDepositRow(
+      hfvilleRow({ ledger_tran: "0", ledger_web: "500.00", ledger_amount: "500.00", ledger_cin_no: "R001453" }),
+    );
+    expect(classified!.event.tender).toBe("web");
+  });
+
+  test("คืนเงินจองห้อง refund via ledger_tran (negated column) resolves tender 'transfer' the same way as a received row", () => {
+    const classified = classifyDepositRow(
+      hfvilleRow({
+        ledger_ds_name: "คืนเงินจองห้อง",
+        ledger_cin_no: "R001511",
+        ledger_tran: "-500.00",
+        ledger_amount: "-500.00",
+      }),
+    );
+    expect(classified!.event.kind).toBe("refunded");
+    expect(classified!.event.tender).toBe("transfer");
+    expect(classified!.event.amountSatang).toBe(50_000);
+  });
+});
+
+describe("buildDepositRegisterData: HF Ville parity, end to end", () => {
+  test("hfville-shaped received+applied thread: correct guest name (the exact regression class), thread status, receivedTenders", () => {
+    const rows: RawDepositLedgerRow[] = [
+      row({
+        ledger_legacy_id: 100,
+        ledger_pay_no: "R2510-0079",
+        ledger_ds_name: "จ่ายล่วงหน้า",
+        ledger_cin_no: "R001511",
+        ledger_pay_date: "2026-07-10T08:00:00.000Z",
+        ledger_cash: "0",
+        ledger_tran: "500.00",
+        ledger_amount: "500.00",
+        cust_title: "นาง",
+        cust_firstname: "พิมพ์ใจ",
+        cust_lastname: "รุ่งเรือง",
+        cust_name2: "รุ่งเรือง",
+      }),
+      row({
+        ledger_legacy_id: 101,
+        ledger_pay_no: "R2510-0080",
+        ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R001511",
+        ledger_cin_no: "CH25-001234",
+        ledger_pay_date: "2026-07-20T08:00:00.000Z",
+        ledger_cash: "0",
+        ledger_amount: "500.00",
+        ledger_free: "500.00",
+        cust_title: "",
+      }),
+    ];
+    const data = buildDepositRegisterData(rows);
+    const thread = data.threads.find((t) => t.rNumber === "R001511")!;
+    expect(thread.receivedSatang).toBe(50_000);
+    expect(thread.appliedSatang).toBe(50_000);
+    expect(thread.outstandingSatang).toBe(0);
+    expect(thread.status).toBe("applied");
+    expect(thread.guestName).toBe("นางพิมพ์ใจ รุ่งเรือง"); // the received event's guest, hfville's own name-field shape
+    expect(thread.receivedTenders).toEqual([{ tender: "transfer", amountSatang: 50_000 }]);
+  });
+
+  // Finding #8: hfville's live sample never showed a cancelled row, but the
+  // status column allows it on both properties identically — this must not
+  // regress just because no live hfville example exists yet.
+  test("hfville voided received row (ledger_status ยกเลิก): excluded from receivedSatang, still present in voided", () => {
+    const rows: RawDepositLedgerRow[] = [
+      row({
+        ledger_legacy_id: 110,
+        ledger_pay_no: "R2510-0090",
+        ledger_ds_name: "จ่ายล่วงหน้า",
+        ledger_cin_no: "R001600",
+        ledger_status: "ยกเลิก",
+        ledger_cash: "0",
+        ledger_tran: "300.00",
+        ledger_amount: "300.00",
+      }),
+    ];
+    const data = buildDepositRegisterData(rows);
+    const thread = data.threads.find((t) => t.rNumber === "R001600")!;
+    expect(thread.receivedSatang).toBe(0);
+    expect(data.voided).toEqual([{ rNumber: "R001600", kind: "received", amountSatang: 30_000, dateBangkok: expect.any(String) }]);
+  });
+
+  // The three exception buckets, driven entirely by hfville-shaped rows —
+  // buildDepositExceptions itself has no property-specific branching, but
+  // the ORIGINAL suite never proved that with anything but hf-shaped data
+  // (the exact "every fixture was HF-shaped" gap this task closes).
+  test("mismatched / orphanApplied / overRefunded all fire correctly from hfville-shaped raw rows", () => {
+    const rows: RawDepositLedgerRow[] = [
+      // mismatched: received 300.00, applied 600.00 (an hfville-scale R015834 analog).
+      row({ ledger_legacy_id: 200, ledger_pay_no: "R2510-0200", ledger_ds_name: "จ่ายล่วงหน้า", ledger_cin_no: "R002000", ledger_cash: "0", ledger_tran: "300.00", ledger_amount: "300.00" }),
+      row({ ledger_legacy_id: 201, ledger_pay_no: "R2510-0201", ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R002000", ledger_cin_no: "CH25-002000", ledger_cash: "0", ledger_amount: "600.00", ledger_free: "600.00" }),
+      // orphanApplied: applied with zero receipt on record.
+      row({ ledger_legacy_id: 202, ledger_pay_no: "R2510-0202", ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R002001", ledger_cin_no: "CH25-002001", ledger_cash: "0", ledger_amount: "400.00", ledger_free: "400.00" }),
+      // overRefunded: voided receipt, active refund (the R015832 shape, hfville scale).
+      row({ ledger_legacy_id: 203, ledger_pay_no: "R2510-0203", ledger_ds_name: "จ่ายล่วงหน้า", ledger_cin_no: "R002002", ledger_status: "ยกเลิก", ledger_cash: "0", ledger_tran: "200.00", ledger_amount: "200.00" }),
+      row({ ledger_legacy_id: 204, ledger_pay_no: "R2510-0204", ledger_ds_name: "คืนเงินจองห้อง", ledger_cin_no: "R002002", ledger_cash: "0", ledger_tran: "-200.00", ledger_amount: "-200.00" }),
+    ];
+    const data = buildDepositRegisterData(rows);
+    const { mismatched, orphanApplied, overRefunded } = buildDepositExceptions(data.threads);
+    expect(mismatched).toEqual([{ rNumber: "R002000", receivedSatang: 30_000, appliedSatang: 60_000, diffSatang: 30_000 }]);
+    expect(orphanApplied).toEqual([{ rNumber: "R002001", appliedSatang: 40_000 }]);
+    expect(overRefunded).toEqual([{ rNumber: "R002002", receivedSatang: 0, refundedSatang: 20_000, diffSatang: -20_000 }]);
+  });
+
+  // Monthly roll-forward at hfville's own scale — a much smaller property
+  // (2,995 ledger rows total vs hf's 28,779) but the SAME opening/closing
+  // chain math must foot correctly across several months.
+  test("monthly roll-forward foots correctly across three months of hfville-shaped activity", () => {
+    const rows: RawDepositLedgerRow[] = [
+      row({ ledger_legacy_id: 300, ledger_pay_no: "R2506-0001", ledger_ds_name: "จ่ายล่วงหน้า", ledger_cin_no: "R003000", ledger_pay_date: "2026-06-05T08:00:00.000Z", ledger_cash: "0", ledger_tran: "500.00", ledger_amount: "500.00" }),
+      row({ ledger_legacy_id: 301, ledger_pay_no: "R2507-0001", ledger_ds_name: "จ่ายล่วงหน้า", ledger_cin_no: "R003001", ledger_pay_date: "2026-07-05T08:00:00.000Z", ledger_cash: "0", ledger_tran: "300.00", ledger_amount: "300.00" }),
+      row({ ledger_legacy_id: 302, ledger_pay_no: "R2508-0001", ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R003000", ledger_cin_no: "CH25-003000", ledger_pay_date: "2026-08-01T08:00:00.000Z", ledger_cash: "0", ledger_amount: "500.00", ledger_free: "500.00" }),
+    ];
+    const monthly = buildDepositRegisterData(rows).monthly;
+    expect(monthly).toEqual([
+      { month: "2026-06", openingSatang: 0, receivedSatang: 50_000, appliedSatang: 0, refundedSatang: 0, closingSatang: 50_000 },
+      { month: "2026-07", openingSatang: 50_000, receivedSatang: 30_000, appliedSatang: 0, refundedSatang: 0, closingSatang: 80_000 },
+      { month: "2026-08", openingSatang: 80_000, receivedSatang: 0, appliedSatang: 50_000, refundedSatang: 0, closingSatang: 30_000 },
+    ]);
+  });
+});

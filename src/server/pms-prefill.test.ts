@@ -19,6 +19,7 @@
 // override could affect a later file that imports server.ts.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { PROPERTIES, type Property } from "../shared/types.ts";
 import {
   _internal,
   bangkokDayWindow,
@@ -29,8 +30,32 @@ import {
   pmsConfigured,
   type LedgerDsName,
   type MapLedgerRowsResult,
+  type PrefillCandidate,
   type RawLedgerRow,
 } from "./pms-prefill.ts";
+
+// candidateTenderPatch (the AUTO-PLACEMENT POLICY — see db.ts's own doc
+// comment on that function) lives in db.ts, not here, but this is the right
+// place to pin its property split against realistic PrefillCandidate
+// fixtures (see the "AUTO-PLACEMENT POLICY" describe block below) — it's
+// the very next step every candidate this module builds takes on the
+// IMPORTER path. db.ts is a genuine process-wide singleton that calls
+// migrate() UNCONDITIONALLY at module import time (server.test.ts's own
+// top-of-file note) — importing it safely requires the exact protocol
+// server.test.ts/analytics-push.test.ts already established: set DB_PATH
+// to :memory: BEFORE a DYNAMIC import (a static `import` is hoisted above
+// every other statement in this file and would run migrate() against
+// whatever DB_PATH happens to be — e.g. this repo's real local
+// ./data/ledger.db — before a plain assignment on an earlier line ever
+// executed). `??` leaves an earlier-loaded file's own :memory: setting
+// alone; every file in this suite that ever sets DB_PATH agrees on the
+// same value, so there is no conflict either way. candidateTenderPatch
+// itself is PURE (property + candidate in, plain object out) — grep its
+// body: it never reads or writes the `db` singleton — so calling it here
+// cannot pollute, or depend on, shared DB state from any other test file
+// sharing this process.
+process.env.DB_PATH = process.env.DB_PATH ?? ":memory:";
+const { candidateTenderPatch } = await import("./db.ts");
 
 const ORIGINAL_HF = process.env.PMS_DB_URL_HF;
 const ORIGINAL_HFVILLE = process.env.PMS_DB_URL_HFVILLE;
@@ -135,6 +160,73 @@ function row(overrides: RowOverrides): RawLedgerRow {
 
 function map(rows: RawLedgerRow[]): MapLedgerRowsResult {
   return mapLedgerRows(rows);
+}
+
+/** hf shorthand for the property-parity blocks below — row()'s own
+ * defaults are already a fine hf-shaped fixture wherever the guest-name
+ * pattern specifically isn't under test (every block except "guest name
+ * assembly", which already has its own dedicated hf/hfville-pattern rows).
+ * Never change row()'s defaults themselves — every hf-shaped test above
+ * this point already depends on them exactly as they are. */
+const hfRow = row;
+
+/** hfville-realistic overrides layered on row()'s defaults (2026-08-06 live
+ * survey — see the calling agent's brief for the full data): real name
+ * pattern (surname lives in `cust_lastname`, `cust_name2` usually mirrors
+ * it when both are present — FIXTURE ADVICE #6), `""` as hfville's own real
+ * "no title" sentinel (survey section 6 — hf's is NULL, the OPPOSITE
+ * convention, which is what row()'s own default already exercises).
+ * `ledger_status: "1"` mirrors hfville's live sample, which is ALWAYS "1"
+ * (never NULL) — unlike row()'s own `null` default, which exercises the
+ * defense-in-depth NULL-counts-as-active branch instead (both are real
+ * Postgres possibilities; NULL is simply not what hfville's live sample
+ * happens to show). `ledger_ds_id` stays "P001" by default — still
+ * hfville's dominant real shape for every ds_name except ค่าปรับ (survey
+ * section 2) — the SEV-016/ITM-007/-1/BRK-002 variety is exercised
+ * explicitly wherever ds_id itself is the point under test, never as a
+ * silent default (the exact "always P001" bug pattern one level down that
+ * FIXTURE ADVICE #3 warns against). */
+function hfvilleRow(overrides: RowOverrides): RawLedgerRow {
+  return row({
+    cust_title: "",
+    cust_firstname: "ธัญญาลักษณ์",
+    cust_lastname: "ศรีสุข",
+    cust_name2: "ศรีสุข",
+    ledger_status: "1",
+    ...overrides,
+  });
+}
+
+/** Per-property row-fixture lookup for the table-driven parity blocks below
+ * (RULES: "prefer a shared table-driven helper... over copy-pasted
+ * blocks"). */
+const PROPERTY_ROW: Record<Property, (overrides: RowOverrides) => RawLedgerRow> = {
+  hf: hfRow,
+  hfville: hfvilleRow,
+};
+
+/** Minimal PrefillCandidate fixture for the candidateTenderPatch (db.ts)
+ * tests below — this module's own OUTPUT shape, built directly rather than
+ * via `map()`, since candidateTenderPatch takes a candidate, not raw rows. */
+function candidate(overrides: Partial<PrefillCandidate>): PrefillCandidate {
+  return {
+    pmsRef: "R2604-9000",
+    bookingNo: "CH26-009000",
+    guestName: "ทดสอบ ทดสอบ",
+    roomNo: "101",
+    roomCount: 1,
+    nights: 1,
+    grossRoomSatang: 100_000,
+    grossOtherSatang: 0,
+    cashSatang: 0,
+    webSatang: 0,
+    unplacedCreditSatang: 0,
+    unplacedTranSatang: 0,
+    appliedDepositSatang: 0,
+    appliedDepositBookingNos: [],
+    isRefund: false,
+    ...overrides,
+  };
 }
 
 describe("LEDGER_DS_NAMES", () => {
@@ -319,6 +411,224 @@ describe("SEV-016/ITM-007 regression: classification is by ds_name, never ds_id"
   });
 });
 
+describe("hfville real ds_id values (SEV-016, ITM-007) carry room/nights too, not just gross (2026-08-06 survey section 2)", () => {
+  test("SEV-016: a real sampled hfville row (cash 300 + credit 1150 BOTH nonzero on the SAME line) counts as room revenue with room/nights intact", () => {
+    // Exact real row from the live survey (masked, no PII in this table):
+    // {ds_id:"SEV-016", ds_name:"ค่าห้อง", ledger_cash:300.00, ledger_credit:1150.00, ledger_amount:300.00, pay_no:"R2607-0306"}
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 200,
+        ledger_pay_no: "R2607-0306",
+        ledger_ds_name: "ค่าห้อง",
+        ledger_ds_id: "SEV-016",
+        ledger_ds_label: "V201",
+        ledger_ds_num: "1",
+        ledger_amount: "300.00",
+        ledger_cash: "300.00",
+        ledger_credit: "1150.00",
+      }),
+    ]);
+    expect(result.bookingCandidates).toHaveLength(1);
+    const c = result.bookingCandidates[0]!;
+    expect(c.grossRoomSatang).toBe(30_000);
+    expect(c.roomNo).toBe("V201");
+    expect(c.roomCount).toBe(1);
+    expect(c.nights).toBe(1);
+    expect(c.cashSatang).toBe(30_000);
+    expect(c.unplacedCreditSatang).toBe(115_000); // same-line cash AND credit both nonzero — a real hfville shape
+  });
+
+  test("ITM-007: a real sampled hfville row counts as room revenue with room/nights intact", () => {
+    // Exact real row: {ds_id:"ITM-007", ds_name:"ค่าห้อง", ledger_tran:300.00, ledger_amount:300.00, pay_no:"R2604-0276"}
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 201,
+        ledger_pay_no: "R2604-0276",
+        ledger_ds_name: "ค่าห้อง",
+        ledger_ds_id: "ITM-007",
+        ledger_ds_label: "112",
+        ledger_ds_num: "1",
+        ledger_amount: "300.00",
+        ledger_tran: "300.00",
+      }),
+    ]);
+    const c = result.bookingCandidates[0]!;
+    expect(c.grossRoomSatang).toBe(30_000);
+    expect(c.roomNo).toBe("112");
+    expect(c.roomCount).toBe(1);
+    expect(c.nights).toBe(1);
+    expect(c.unplacedTranSatang).toBe(30_000);
+  });
+});
+
+describe("hfville ค่าปรับ (penalty): real, ACTIVE ds_id variety ('-1' and 'BRK-002') — the exact inverse of hf, which has ZERO live ค่าปรับ rows at all", () => {
+  test("ds_id '-1': folds into grossOtherSatang (real sampled row)", () => {
+    // {ds_id:"-1", ds_name:"ค่าปรับ", ledger_tran:150.00, ledger_amount:150.00, pay_no:"R2510-0079", status:"1"}
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 210,
+        ledger_pay_no: "R2510-0079",
+        ledger_ds_name: "ค่าปรับ",
+        ledger_ds_id: "-1",
+        ledger_amount: "150.00",
+        ledger_tran: "150.00",
+      }),
+    ]);
+    expect(result.bookingCandidates[0]!.grossOtherSatang).toBe(15_000);
+  });
+
+  test("ds_id 'BRK-002': folds into grossOtherSatang (real sampled row)", () => {
+    // {ds_id:"BRK-002", ds_name:"ค่าปรับ", ledger_cash:300.00, ledger_amount:300.00, pay_no:"R2512-0033"}
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 211,
+        ledger_pay_no: "R2512-0033",
+        ledger_ds_name: "ค่าปรับ",
+        ledger_ds_id: "BRK-002",
+        ledger_amount: "300.00",
+        ledger_cash: "300.00",
+      }),
+    ]);
+    expect(result.bookingCandidates[0]!.grossOtherSatang).toBe(30_000);
+  });
+});
+
+describe("mapLedgerRows: each of the 7 recognized events (hfville-shaped fixtures, 2026-08-06 survey — not just hf)", () => {
+  test("ค่าห้อง -> booking candidate, real SEV-016 ds_id, room/guest/nights (hfville pattern: surname lives in cust_lastname)", () => {
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 300,
+        ledger_pay_no: "R2607-0001",
+        ledger_ds_name: "ค่าห้อง",
+        ledger_ds_id: "SEV-016",
+        ledger_ds_label: "V203",
+        ledger_ds_num: "2",
+        ledger_amount: "2500.00",
+        ledger_cash: "2500.00",
+      }),
+    ]);
+    expect(result.depositCandidates).toEqual([]);
+    expect(result.anomalies).toEqual([]);
+    expect(result.bookingCandidates).toHaveLength(1);
+    expect(result.bookingCandidates[0]).toMatchObject({
+      pmsRef: "R2607-0001",
+      guestName: "ธัญญาลักษณ์ ศรีสุข",
+      roomNo: "V203",
+      roomCount: 1,
+      nights: 2,
+      grossRoomSatang: 250_000,
+      grossOtherSatang: 0,
+      cashSatang: 250_000,
+      appliedDepositSatang: 0,
+      appliedDepositBookingNos: [],
+      isRefund: false,
+    });
+  });
+
+  test("จ่ายล่วงหน้า -> deposit candidate, kind received, ledger_tran (hfville's dominant electronic tender, never ledger_credit as a default)", () => {
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 301,
+        ledger_pay_no: "R2607-0002",
+        ledger_ds_name: "จ่ายล่วงหน้า",
+        ledger_cin_no: "R001511", // real hfville book_no shape (bare R+6-digits, survey section 7)
+        ledger_ds_label: null,
+        ledger_amount: "890.00",
+        ledger_tran: "890.00",
+      }),
+    ]);
+    expect(result.bookingCandidates).toEqual([]);
+    expect(result.anomalies).toEqual([]);
+    expect(result.depositCandidates).toEqual([
+      {
+        pmsRef: "R2607-0002",
+        kind: "received",
+        bookingNo: "R001511",
+        guestName: "ธัญญาลักษณ์ ศรีสุข",
+        tender: "transfer",
+        amountSatang: 89_000,
+        note: null,
+      },
+    ]);
+  });
+
+  test("ตัดยอดล่วงหน้า -> booking candidate, using one of hfville's own real raw labels (Booking No:R002243 — only 2 raw variants ever observed there, survey section 3)", () => {
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 302,
+        ledger_pay_no: "R2607-0003",
+        ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R002243",
+        ledger_cin_no: "CH26-100003",
+        ledger_ds_label: null,
+        ledger_amount: "890.00",
+        ledger_free: "890.00",
+      }),
+    ]);
+    expect(result.depositCandidates).toEqual([]);
+    expect(result.anomalies).toEqual([]);
+    const c = result.bookingCandidates[0]!;
+    expect(c.grossRoomSatang).toBe(0);
+    expect(c.appliedDepositSatang).toBe(89_000);
+    expect(c.appliedDepositBookingNos).toEqual(["R002243"]);
+  });
+
+  test("ยกเลิกห้อง -> grossRoomSatang reduced, ds_id P001 (the ONLY ds_id hfville ever pairs with this ds_name live)", () => {
+    const result = map([
+      hfvilleRow({ ledger_legacy_id: 303, ledger_pay_no: "R2607-0004", ledger_ds_name: "ยกเลิกห้อง", ledger_ds_id: "P001", ledger_amount: "500.00" }),
+    ]);
+    expect(result.bookingCandidates[0]!.grossRoomSatang).toBe(-50_000);
+  });
+
+  test("คืนเงินส่วนเกิน -> folds into grossOtherSatang; a same-line negative cash tender flags isRefund", () => {
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 304,
+        ledger_pay_no: "R2607-0005",
+        ledger_ds_name: "คืนเงินส่วนเกิน",
+        ledger_amount: "-200.00",
+        ledger_cash: "-200.00",
+      }),
+    ]);
+    const c = result.bookingCandidates[0]!;
+    expect(c.grossOtherSatang).toBe(-20_000);
+    expect(c.isRefund).toBe(true);
+  });
+
+  test("คืนเงินจองห้อง -> deposit candidate, kind refunded, magnitude only", () => {
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 305,
+        ledger_pay_no: "R2607-0006",
+        ledger_ds_name: "คืนเงินจองห้อง",
+        ledger_cin_no: "R001453", // real hfville book_no shape
+        ledger_ds_label: null,
+        ledger_amount: "-395.00",
+        ledger_tran: "-395.00",
+        ledger_free: "0",
+      }),
+    ]);
+    expect(result.bookingCandidates).toEqual([]);
+    expect(result.depositCandidates).toEqual([
+      {
+        pmsRef: "R2607-0006",
+        kind: "refunded",
+        bookingNo: "R001453",
+        guestName: "ธัญญาลักษณ์ ศรีสุข",
+        tender: "transfer",
+        amountSatang: 39_500,
+        note: null,
+      },
+    ]);
+  });
+
+  test("ค่าปรับ -> folds into grossOtherSatang, real ds_id '-1' (hf has ZERO live ค่าปรับ rows — the exact inverse of hfville)", () => {
+    const result = map([
+      hfvilleRow({ ledger_legacy_id: 306, ledger_pay_no: "R2607-0007", ledger_ds_name: "ค่าปรับ", ledger_ds_id: "-1", ledger_amount: "150.00" }),
+    ]);
+    expect(result.bookingCandidates[0]!.grossOtherSatang).toBe(15_000);
+  });
+});
+
 describe("sign anomaly (ยกเลิกห้อง): ค่าห้อง 2000 + ยกเลิกห้อง 500, both raw signs -> gross 1500", () => {
   test("raw ledger_amount +500 (the buggy stored sign) still SUBTRACTS", () => {
     const result = map([
@@ -339,6 +649,30 @@ describe("sign anomaly (ยกเลิกห้อง): ค่าห้อง 2
   });
 });
 
+describe("sign anomaly (ยกเลิกห้อง) parity: both properties, both raw stored signs (hfville has 9 real ยกเลิกห้อง rows live — not hypothetical)", () => {
+  for (const property of PROPERTIES) {
+    const mk = PROPERTY_ROW[property];
+
+    test(`${property}: raw ledger_amount +500 (the buggy stored sign) still SUBTRACTS`, () => {
+      const result = map([
+        mk({ ledger_legacy_id: 1, ledger_pay_no: `R-${property}-signA`, ledger_ds_name: "ค่าห้อง", ledger_amount: "2000.00" }),
+        mk({ ledger_legacy_id: 2, ledger_pay_no: `R-${property}-signA`, ledger_ds_name: "ยกเลิกห้อง", ledger_amount: "500.00" }),
+      ]);
+      expect(result.bookingCandidates).toHaveLength(1);
+      expect(result.bookingCandidates[0]!.grossRoomSatang).toBe(150_000);
+    });
+
+    test(`${property}: raw ledger_amount -500 also SUBTRACTS (never doubles to -1000)`, () => {
+      const result = map([
+        mk({ ledger_legacy_id: 3, ledger_pay_no: `R-${property}-signB`, ledger_ds_name: "ค่าห้อง", ledger_amount: "2000.00" }),
+        mk({ ledger_legacy_id: 4, ledger_pay_no: `R-${property}-signB`, ledger_ds_name: "ยกเลิกห้อง", ledger_amount: "-500.00" }),
+      ]);
+      expect(result.bookingCandidates).toHaveLength(1);
+      expect(result.bookingCandidates[0]!.grossRoomSatang).toBe(150_000);
+    });
+  }
+});
+
 describe("applied-deposit group: ค่าห้อง 2000 + ตัดยอดล่วงหน้า (free 790) in ONE payment", () => {
   test("gross stays 2000, appliedDepositSatang is 790, NEVER 2790 (the live double-booking bug this rewrite fixes)", () => {
     const result = map([
@@ -357,6 +691,30 @@ describe("applied-deposit group: ค่าห้อง 2000 + ตัดยอด
     expect(c.appliedDepositSatang).toBe(79_000);
     expect(c.appliedDepositBookingNos).toEqual(["R014843"]);
   });
+});
+
+describe("applied-deposit group parity: ค่าห้อง + ตัดยอดล่วงหน้า in ONE payment never double-books gross, both properties", () => {
+  for (const property of PROPERTIES) {
+    const mk = PROPERTY_ROW[property];
+
+    test(`${property}: gross stays 2000, appliedDepositSatang is 790, NEVER 2790`, () => {
+      const result = map([
+        mk({ ledger_legacy_id: 20, ledger_pay_no: `R-${property}-applied`, ledger_ds_name: "ค่าห้อง", ledger_amount: "2000.00" }),
+        mk({
+          ledger_legacy_id: 21,
+          ledger_pay_no: `R-${property}-applied`,
+          ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R014843",
+          ledger_amount: "790.00",
+          ledger_free: "790.00",
+        }),
+      ]);
+      expect(result.bookingCandidates).toHaveLength(1);
+      const c = result.bookingCandidates[0]!;
+      expect(c.grossRoomSatang).toBe(200_000);
+      expect(c.appliedDepositSatang).toBe(79_000);
+      expect(c.appliedDepositBookingNos).toEqual(["R014843"]);
+    });
+  }
 });
 
 describe("free-without-applied anomaly", () => {
@@ -571,6 +929,43 @@ describe("voided rows: dropped in the PURE layer (defense in depth), NULL status
   });
 });
 
+describe("voided rows parity: dropped in the PURE layer for both properties (defense in depth — hfville's live sample shows zero cancelled rows, but the column allows it)", () => {
+  for (const property of PROPERTIES) {
+    const mk = PROPERTY_ROW[property];
+
+    test(`${property}: ledger_status = 'ยกเลิก' is dropped even without the SQL WHERE ever running`, () => {
+      const result = map([
+        mk({ ledger_legacy_id: 10, ledger_pay_no: `R-${property}-void1`, ledger_status: "ยกเลิก", ledger_amount: "9999.00" }),
+      ]);
+      expect(result.bookingCandidates).toEqual([]);
+      expect(result.depositCandidates).toEqual([]);
+      expect(result.anomalies).toEqual([]);
+    });
+
+    test(`${property}: ledger_status = NULL counts as active`, () => {
+      const result = map([mk({ ledger_legacy_id: 11, ledger_pay_no: `R-${property}-void2`, ledger_status: null, ledger_amount: "1000.00" })]);
+      expect(result.bookingCandidates).toHaveLength(1);
+    });
+
+    test(`${property}: a voided line is dropped even when it shares a payment key with an active line`, () => {
+      const result = map([
+        mk({ ledger_legacy_id: 12, ledger_pay_no: `R-${property}-void3`, ledger_ds_name: "ค่าห้อง", ledger_amount: "1000.00" }),
+        mk({
+          ledger_legacy_id: 13,
+          ledger_pay_no: `R-${property}-void3`,
+          ledger_ds_name: "ค่าปรับ",
+          ledger_ds_id: property === "hfville" ? "-1" : "P001", // real per-property ค่าปรับ ds_id (survey section 2/4)
+          ledger_status: "ยกเลิก",
+          ledger_amount: "9999.00",
+        }),
+      ]);
+      expect(result.bookingCandidates).toHaveLength(1);
+      expect(result.bookingCandidates[0]!.grossRoomSatang).toBe(100_000);
+      expect(result.bookingCandidates[0]!.grossOtherSatang).toBe(0);
+    });
+  }
+});
+
 describe("received deposit split across cash + transfer -> two candidates", () => {
   test("one จ่ายล่วงหน้า line with both ledger_cash and ledger_tran nonzero yields two received DepositCandidates, same pmsRef", () => {
     const result = map([
@@ -684,6 +1079,86 @@ describe("the money-gotcha dedup: tenders taken ONCE per booking candidate, neve
   test("null pay_no also falls back to lid:", () => {
     const result = map([row({ ledger_legacy_id: 557, ledger_pay_no: null })]);
     expect(result.bookingCandidates[0]!.pmsRef).toBe("lid:557");
+  });
+});
+
+describe("multi-line general ค่าห้อง receipt, hfville-shaped: tender-replication dedup on ledger_tran, hfville's DOMINANT electronic tender (64% of rows) — not cash, and never ledger_credit (only 0.4%)", () => {
+  test("hfville: 2-line ค่าห้อง group with replicated ledger_tran read ONCE, room amounts still itemized and summed (general multi-line receipts are ~86% single-line on BOTH properties — survey section 5 — so this is not an hf-only trap)", () => {
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 30,
+        ledger_pay_no: "R2607-0100",
+        ledger_ds_name: "ค่าห้อง",
+        ledger_ds_id: "SEV-016",
+        ledger_ds_label: "V101",
+        ledger_ds_num: "2",
+        ledger_amount: "1500.00",
+        ledger_tran: "3000.00",
+      }),
+      hfvilleRow({
+        ledger_legacy_id: 31,
+        ledger_pay_no: "R2607-0100",
+        ledger_ds_name: "ค่าห้อง",
+        ledger_ds_id: "SEV-016",
+        ledger_ds_label: "V102",
+        ledger_ds_num: "2",
+        ledger_amount: "1500.00",
+        ledger_tran: "3000.00", // replicated identically — must NOT be summed to 6000
+      }),
+    ]);
+    expect(result.bookingCandidates).toHaveLength(1);
+    const c = result.bookingCandidates[0]!;
+    expect(c.grossRoomSatang).toBe(300_000); // 1500 + 1500, itemized and summed correctly
+    expect(c.unplacedTranSatang).toBe(300_000); // read ONCE (3000.00), never 600_000
+    expect(c.roomCount).toBe(2);
+  });
+});
+
+// SYNTHETIC — flagged explicitly per FIXTURE ADVICE #5: the 2026-08-06 live
+// survey found ZERO multi-line deposit-lifecycle groups on hfville (all 9
+// observed there are single-line); hf has an 11-line real example to crib
+// from (constant ledger_tran/ledger_free across lines, ledger_amount
+// itemized per line, per survey section 5). This fixture MIRRORS that
+// confirmed hf shape on the reasonable assumption iHOTEL's tender-
+// replication behavior is code-driven, not property-driven — it is NOT
+// presented as sampled from hfville production, and maintainers should
+// treat this specific claim as unverified for hfville until a live example
+// turns up.
+describe("SYNTHETIC hfville deposit-lifecycle multi-line (no live hfville example exists — mirrors the confirmed real hf shape)", () => {
+  test("hfville: 3-line ตัดยอดล่วงหน้า group, ledger_free itemized per line (summed), replicated ledger_tran read ONCE", () => {
+    const result = map([
+      hfvilleRow({
+        ledger_legacy_id: 40,
+        ledger_pay_no: "R2607-9100",
+        ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R001511", // real hfville book_no shape, survey section 7
+        ledger_amount: "300.00",
+        ledger_free: "300.00",
+        ledger_tran: "1300.00",
+      }),
+      hfvilleRow({
+        ledger_legacy_id: 41,
+        ledger_pay_no: "R2607-9100",
+        ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R001512",
+        ledger_amount: "350.00",
+        ledger_free: "350.00",
+        ledger_tran: "1300.00", // replicated identically across lines — the money gotcha
+      }),
+      hfvilleRow({
+        ledger_legacy_id: 42,
+        ledger_pay_no: "R2607-9100",
+        ledger_ds_name: "ตัดยอดล่วงหน้า Booking No:R001513",
+        ledger_amount: "400.00",
+        ledger_free: "400.00",
+        ledger_tran: "1300.00",
+      }),
+    ]);
+    expect(result.bookingCandidates).toHaveLength(1);
+    expect(result.anomalies).toEqual([]);
+    const c = result.bookingCandidates[0]!;
+    expect(c.grossRoomSatang).toBe(0); // never invented from ledger_amount
+    expect(c.appliedDepositSatang).toBe(105_000); // 300 + 350 + 400 itemized, summed
+    expect(c.appliedDepositBookingNos).toEqual(["R001511", "R001512", "R001513"]);
+    expect(c.unplacedTranSatang).toBe(130_000); // read ONCE from the first line (1300.00), never 3900.00
   });
 });
 
@@ -811,6 +1286,13 @@ describe("guest name assembly", () => {
     const result = map([row({ cust_title: "นาย", cust_firstname: "", cust_lastname: null, cust_name2: null })]);
     expect(result.bookingCandidates[0]!.guestName).toBe("นาย");
   });
+
+  test("both properties' real 'no title' sentinels (hf: NULL, hfville: empty string — opposite conventions, survey section 6) produce the identical result", () => {
+    const hfResult = map([row({ cust_title: null, cust_firstname: "สมชาย", cust_lastname: "ใจดี" })]);
+    const hfvilleResult = map([row({ cust_title: "", cust_firstname: "สมชาย", cust_lastname: "ใจดี" })]);
+    expect(hfResult.bookingCandidates[0]!.guestName).toBe("สมชาย ใจดี");
+    expect(hfvilleResult.bookingCandidates[0]!.guestName).toBe("สมชาย ใจดี");
+  });
 });
 
 describe("roomCount/roomNo/nights derive from ค่าห้อง lines only", () => {
@@ -862,6 +1344,66 @@ describe("deterministic ordering", () => {
       row({ ledger_legacy_id: 11, ledger_pay_no: "R2604-0011", ledger_ds_name: "จ่ายล่วงหน้า", ledger_cash: "100.00" }),
     ]).depositCandidates.map((c) => c.pmsRef);
     expect(keys).toEqual(["R2604-0011", "R2604-0012"]);
+  });
+});
+
+// ── AUTO-PLACEMENT POLICY (candidateTenderPatch, db.ts) ────────────────────
+// Not this module's own code, but the direct next step every PrefillCandidate
+// takes on the IMPORTER path (db.ts's insertPmsBookingLines) — see db.ts's
+// own "AUTO-PLACEMENT POLICY" doc comment, evidence-based, set 2026-07-31.
+// transfer_kbank ALWAYS gets unplacedTranSatang on BOTH properties (every
+// recorded transfer on either property has been โอน/กสิกร historically);
+// credit_kbank gets unplacedCreditSatang ONLY on hfville (its credit-card
+// history is single-bank in practice, matching survey section 4's near-zero
+// 0.4% credit incidence there) — hf genuinely has two credit-acquiring banks
+// historically, so an hf credit payment stays UNPLACED (bank unknown) for a
+// human to hand-place. No PMS candidate on EITHER property ever writes
+// `deposit`, `credit_icbc`, `transfer_icbc`, or `other`.
+describe("candidateTenderPatch (db.ts): AUTO-PLACEMENT POLICY is property-specific", () => {
+  test("hf: unplacedTranSatang auto-places to transfer_kbank; unplacedCreditSatang stays UNPLACED (bank unknown, never guessed)", () => {
+    const patch = candidateTenderPatch(
+      "hf",
+      candidate({ unplacedTranSatang: 30_000, unplacedCreditSatang: 70_000, cashSatang: 10_000, webSatang: 5_000, appliedDepositSatang: 2_000 }),
+    );
+    expect(patch.transfer_kbank).toBe(30_000);
+    expect(patch.credit_kbank).toBe(0);
+    expect(patch.cash).toBe(10_000);
+    expect(patch.web).toBe(5_000);
+    expect(patch.deposit_applied).toBe(2_000);
+    expect(patch.deposit).toBe(0);
+    expect(patch.credit_icbc).toBe(0);
+    expect(patch.transfer_icbc).toBe(0);
+    expect(patch.other).toBe(0);
+  });
+
+  test("hfville: unplacedTranSatang auto-places to transfer_kbank AND unplacedCreditSatang auto-places to credit_kbank", () => {
+    const patch = candidateTenderPatch(
+      "hfville",
+      candidate({ unplacedTranSatang: 30_000, unplacedCreditSatang: 70_000, cashSatang: 10_000, webSatang: 5_000, appliedDepositSatang: 2_000 }),
+    );
+    expect(patch.transfer_kbank).toBe(30_000);
+    expect(patch.credit_kbank).toBe(70_000); // hfville: single-bank in practice, safe to auto-place
+    expect(patch.cash).toBe(10_000);
+    expect(patch.web).toBe(5_000);
+    expect(patch.deposit_applied).toBe(2_000);
+    expect(patch.deposit).toBe(0);
+    expect(patch.credit_icbc).toBe(0);
+    expect(patch.transfer_icbc).toBe(0);
+    expect(patch.other).toBe(0);
+  });
+
+  test("hfville with zero unplacedCreditSatang writes an explicit 0 to credit_kbank, not undefined", () => {
+    const patch = candidateTenderPatch("hfville", candidate({ unplacedCreditSatang: 0 }));
+    expect(patch.credit_kbank).toBe(0);
+  });
+
+  test("a realistic hfville candidate (near-zero credit, per survey section 4) places identically to the same-shaped hf candidate on transfer_kbank", () => {
+    const hfPatch = candidateTenderPatch("hf", candidate({ unplacedTranSatang: 90_000, unplacedCreditSatang: 0 }));
+    const hfvillePatch = candidateTenderPatch("hfville", candidate({ unplacedTranSatang: 90_000, unplacedCreditSatang: 0 }));
+    expect(hfPatch.transfer_kbank).toBe(90_000);
+    expect(hfvillePatch.transfer_kbank).toBe(90_000);
+    expect(hfPatch.credit_kbank).toBe(0);
+    expect(hfvillePatch.credit_kbank).toBe(0);
   });
 });
 

@@ -150,11 +150,72 @@ describe("Wave B โอน/เครดิต split migration (migrateTransferCr
     expect(byKey(income, "deposit_applied").name).toBe("มัดจำล่วงหน้า (ตัดยอด)");
   });
 
+  // Category seeding parity (task brief): both properties must land on the
+  // SAME set of fifteen category keys in the SAME sort order once migrate()
+  // has run — hf gets there via the legacy-shape roll-back + real
+  // migration path exercised above, hfville gets there because its fresh
+  // seed is already pre-split (the "no rename needed" test above), but the
+  // END STATE the office actually sees must be identical either way. A
+  // property-blind assertion here would have missed a bug where the two
+  // paths silently diverge in ORDER even though both happen to have length
+  // 15 (e.g. deposit_applied landing in a different slot relative to its
+  // siblings on one property but not the other).
+  test("both properties: identical ordered list of fifteen category keys after migrate() — hf's real migration path and hfville's pre-split fresh seed converge on the same shape", () => {
+    const hfKeys = afterFirstMigrate.hf.map((c) => c.key);
+    const hfvilleKeys = afterFirstMigrate.hfville.map((c) => c.key);
+    expect(hfKeys).toHaveLength(15);
+    expect(hfKeys).toEqual(hfvilleKeys);
+    // Spelled out explicitly (not just "arrays match") so a future reorder
+    // of INCOME_SEED/the migration splice order shows up as a readable
+    // diff, not just "expected [...] to equal [...]" noise.
+    expect(hfKeys).toEqual([
+      "deposit",
+      "deposit_credit",
+      "deposit_applied",
+      "room_cash",
+      "credit_kbank",
+      "credit_icbc",
+      "transfer_kbank",
+      "transfer_icbc",
+      "web",
+      "other_cash",
+      "other_transfer",
+      "other_credit",
+      "bar_cash",
+      "bar_transfer",
+      "bar_credit",
+    ]);
+  });
+
+  // deposit_applied seeded on both properties (task brief), immediately
+  // after its deposit_credit sibling — hf via the migration path (already
+  // covered above by "seeds the three เครดิต siblings..."), hfville via the
+  // pre-split fresh seed. Asserted explicitly for both rather than assumed
+  // from the ordered-list equality above, since that's the one field the
+  // task brief calls out by name.
+  for (const property of ["hf", "hfville"] as const) {
+    test(`${property}: deposit_applied is seeded, non-cash, immediately after deposit_credit`, () => {
+      const income = afterFirstMigrate[property];
+      const applied = byKey(income, "deposit_applied");
+      expect(applied.name).toBe("มัดจำล่วงหน้า (ตัดยอด)");
+      expect(applied.isCash).toBe(false);
+      const indexOf = (key: string) => income.findIndex((c) => c.key === key);
+      expect(indexOf("deposit_applied")).toBe(indexOf("deposit_credit") + 1);
+    });
+  }
+
   test("idempotent: calling migrate() again (twice more) does not duplicate categories, re-touch names, or disturb sort", () => {
     expect(afterIdempotentMigrate.hf).toHaveLength(afterFirstMigrate.hf.length);
     expect(afterIdempotentMigrate.hfville).toHaveLength(afterFirstMigrate.hfville.length);
     expect(afterIdempotentMigrate.hf).toEqual(afterFirstMigrate.hf);
     expect(byKey(afterIdempotentMigrate.hf, "other_transfer").name).toBe(CUSTOM_OTHER_TRANSFER_NAME);
+    // hfville had only a length check here before — extended to the same
+    // full deep-equality hf already gets, since hfville's own idempotence
+    // (its migrations are all no-ops from a fresh, already-split seed) is
+    // just as much part of the "safe to call on every boot" contract as
+    // hf's is, and a length-only check would miss a drifted name or sort
+    // value while still reporting green.
+    expect(afterIdempotentMigrate.hfville).toEqual(afterFirstMigrate.hfville);
   });
 });
 
@@ -166,6 +227,28 @@ describe("Wave B โอน/เครดิต split migration (migrateTransferCr
 // restart:unless-stopped crash-looped the container. This must now be
 // structurally impossible: skip the individual colliding operation, log
 // it, and complete everything else.
+//
+// KNOWN GAP (property parity, task brief): this collision scenario is only
+// exercised against "hf" — db-migration-fixture.ts's "collision" mode rolls
+// ONLY hf back to a legacy shape and plants blocker categories only there
+// (see that file); hfville is left at its normal fresh (already fully
+// split) seed for the whole run, so every one of splitTransferCreditCategory/
+// migrateDepositAppliedCategoryForProperty's collision-guard branches for
+// hfville short-circuit on the (harmless, real) "already seeded" no-op path
+// before ever reaching activeNameCollision() — there is no live code path in
+// THIS fixture run that would exercise hfville hitting the actual
+// collision-and-skip branch, and this test file's touch-scope for this task
+// does not include modifying db-migration-fixture.ts to add an hfville
+// collision scenario. splitTransferCreditCategory/
+// migrateDepositAppliedCategoryForProperty are themselves per-property pure
+// functions called in an identical `for (const property of PROPERTIES)`
+// loop for both collision-guard checks (see db.ts), so there is no
+// property-conditional code here to miss — but that symmetry is inferred
+// from reading db.ts, not independently verified by a passing hfville
+// collision test. A follow-up that extends the fixture script to also roll
+// hfville back to legacy shape (with its own blocker categories) would close
+// this gap for real; flagging it here rather than silently claiming
+// "collision guard: covered for both properties".
 describe("F2 collision guard: a manager-created category blocking a target name", () => {
   const collisionResult = runFixture("collision");
 

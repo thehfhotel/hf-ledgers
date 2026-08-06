@@ -10,6 +10,7 @@ process.env.DEV_USER = "tester@thehfhotel.org";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { DayAuditCheckinRow, DayAuditDepositRow, DayAuditRefundRow, DayAuditRow } from "../server/day-audit.ts";
 import type { RawDepositLedgerRow } from "../server/deposit-register.ts";
+import { PROPERTIES } from "../shared/types.ts";
 const { _internal: dayAuditInternal, buildDayAuditRows } = await import("../server/day-audit.ts");
 const { buildSlipQueue, needsSlipProof } = await import("./queue.ts");
 const { createAttachment, supersede } = await import("./storage.ts");
@@ -227,6 +228,116 @@ describe("buildSlipQueue", () => {
 
     dayAuditInternal.setFetchDayAuditForTests(async () => auditRows);
     const queue = await buildSlipQueue("hf", "2026-08-03");
+    expect(queue.map((r) => r.auditKey)).toEqual(expectedOrder);
+    expect(queue.map((r) => r.paidAtIso)).toEqual(auditRows.filter(needsSlipProof).map((r) => r.paidAtIso));
+  });
+
+  // ── HF Ville parity (live 2026-08-06 survey) ─────────────────────────────
+  // Every test above hardcodes "hf" — buildSlipQueue's own math
+  // (needsSlipProof, refs, amount split) has no property branching, but
+  // storage.ts's attachment lookups (summarize/listCurrentBatch) DO filter
+  // by property in every query, and that plumbing had never been proven
+  // against hfville at all. Table-driven across PROPERTIES below, plus a
+  // dedicated cross-property isolation test — the storage-scoping analog of
+  // the exact class of bug ("every fixture was HF-shaped, so a property-
+  // specific path went untested") this task exists to close.
+
+  test("cash-only rows never enter the queue — table-driven across hf and hfville", async () => {
+    for (const property of PROPERTIES) {
+      const rows: DayAuditRow[] = [
+        checkinRow({ auditKey: `CASH-${property}`, chRef: `CASH-${property}` }),
+        depositRow({ auditKey: `DEP-${property}`, tender: "cash" }),
+      ];
+      dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+      const queue = await buildSlipQueue(property, "2026-08-03");
+      expect(queue).toEqual([]);
+    }
+  });
+
+  test("transfer-tendered rows enter the queue on both properties — hfville's real tender profile (tran-dominant, credit near-absent) never blocks this", async () => {
+    for (const property of PROPERTIES) {
+      const rows: DayAuditRow[] = [
+        checkinRow({
+          auditKey: `TXN-${property}`,
+          chRef: `TXN-${property}`,
+          composition: { cashSatang: 0, transferSatang: 100_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
+        }),
+        refundRow({ auditKey: `REF-${property}`, tender: "transfer" }),
+      ];
+      dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+      const queue = await buildSlipQueue(property, "2026-08-03");
+      expect(queue.map((r) => r.auditKey).sort()).toEqual([`REF-${property}`, `TXN-${property}`]);
+    }
+  });
+
+  test("attachment state is scoped per property — an hfville attachment never leaks into hf's queue for the same auditKey, and vice versa", async () => {
+    const sharedAuditKey = "CH_SHARED_001"; // deliberately the SAME auditKey on both properties' (independent) PMS
+    await createAttachment({
+      property: "hfville",
+      auditKey: sharedAuditKey,
+      auditDate: "2026-08-03",
+      by: "hfville-reception@thehfhotel.org",
+      buffer: new Uint8Array([9]),
+      thumbBuffer: new Uint8Array([9]),
+      width: 10,
+      height: 10,
+      format: "jpeg",
+      engine: "jimp",
+    });
+
+    const rows: DayAuditRow[] = [
+      checkinRow({
+        auditKey: sharedAuditKey,
+        chRef: sharedAuditKey,
+        composition: { cashSatang: 0, transferSatang: 50_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
+      }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+
+    const hfQueue = await buildSlipQueue("hf", "2026-08-03");
+    expect(hfQueue[0]!.attachment.count).toBe(0); // hf's own attachment table has nothing at this key
+    expect(hfQueue[0]!.currentAttachments).toEqual([]);
+
+    const hfvilleQueue = await buildSlipQueue("hfville", "2026-08-03");
+    expect(hfvilleQueue[0]!.attachment.count).toBe(1);
+    expect(hfvilleQueue[0]!.currentAttachments).toHaveLength(1);
+  });
+
+  test("preserves paidAtIso newest-first on hfville-shaped raw rows too — buildSlipQueue and buildDayAuditRows never disagree on order regardless of property", async () => {
+    function hfvilleRawRow(overrides: Partial<RawDepositLedgerRow>): RawDepositLedgerRow {
+      return {
+        ledger_legacy_id: 1,
+        ledger_pay_no: "R2510-0900",
+        ledger_cin_no: "R002900",
+        ledger_ds_name: "จ่ายล่วงหน้า",
+        ledger_pay_date: "2026-08-03T04:00:00.000Z",
+        ledger_status: null,
+        ledger_cash: "0",
+        ledger_credit: "0",
+        ledger_tran: "500.00", // hfville's dominant tender — never credit
+        ledger_web: "0",
+        ledger_amount: "500.00",
+        ledger_free: "0",
+        ledger_note: null,
+        cust_title: "", // hfville's own "no title" sentinel
+        cust_firstname: null,
+        cust_lastname: null,
+        cust_name2: null,
+        ...overrides,
+      };
+    }
+    const raw: RawDepositLedgerRow[] = [
+      hfvilleRawRow({ ledger_legacy_id: 1, ledger_pay_no: "R2510-0910", ledger_cin_no: "R002910", ledger_pay_date: "2026-08-03T02:00:00.000Z" }), // earliest
+      hfvilleRawRow({ ledger_legacy_id: 2, ledger_pay_no: "R2510-0911", ledger_cin_no: "R002911", ledger_pay_date: "2026-08-03T08:00:00.000Z" }), // latest
+      hfvilleRawRow({ ledger_legacy_id: 3, ledger_pay_no: "R2510-0912", ledger_cin_no: "R002912", ledger_pay_date: "2026-08-03T05:00:00.000Z" }), // middle
+    ];
+
+    const auditRows = buildDayAuditRows(raw, new Map(), new Map());
+    const expectedOrder = auditRows.filter(needsSlipProof).map((r) => r.auditKey);
+    expect(expectedOrder).toEqual(["R2510-0911", "R2510-0912", "R2510-0910"]); // newest-first, sanity check
+
+    dayAuditInternal.setFetchDayAuditForTests(async () => auditRows);
+    const queue = await buildSlipQueue("hfville", "2026-08-03");
     expect(queue.map((r) => r.auditKey)).toEqual(expectedOrder);
     expect(queue.map((r) => r.paidAtIso)).toEqual(auditRows.filter(needsSlipProof).map((r) => r.paidAtIso));
   });

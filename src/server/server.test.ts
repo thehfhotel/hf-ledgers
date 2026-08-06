@@ -53,9 +53,16 @@ function zeroTenders(): Record<Tender, number> {
 }
 
 const PROPERTY = "hf";
+// The hfville-parity constant this task adds — used by every new
+// property-parity/isolation describe block below (existing hf-only
+// describe blocks are left untouched, per the "don't weaken existing
+// assertions" rule; new coverage is additive).
+const HFVILLE: Property = "hfville";
 
 let categories: Category[];
 let categoryIdByKey: Map<CategoryKey, number>;
+let hfvilleCategories: Category[];
+let hfvilleCategoryIdByKey: Map<CategoryKey, number>;
 
 function categoryId(key: CategoryKey): number {
   const id = categoryIdByKey.get(key);
@@ -63,11 +70,32 @@ function categoryId(key: CategoryKey): number {
   return id;
 }
 
+function hfvilleCategoryId(key: CategoryKey): number {
+  const id = hfvilleCategoryIdByKey.get(key);
+  if (id === undefined) throw new Error(`no seeded hfville category for key ${key}`);
+  return id;
+}
+
+/** categoryId()/hfvilleCategoryId() dispatcher for table-driven tests that
+ * loop over both properties — see the task brief's "prefer a shared
+ * table-driven helper" guidance. */
+function categoryIdFor(property: Property, key: CategoryKey): number {
+  return property === "hf" ? categoryId(key) : hfvilleCategoryId(key);
+}
+
 beforeAll(async () => {
   const res = await call<{ categories: Category[] }>("GET", `/${PROPERTY}/categories`);
   categories = res.body.categories;
   categoryIdByKey = new Map(
     categories.filter((c): c is Category & { categoryKey: CategoryKey } => c.categoryKey !== null).map((c) => [c.categoryKey, c.id]),
+  );
+
+  const hfvilleRes = await call<{ categories: Category[] }>("GET", `/${HFVILLE}/categories`);
+  hfvilleCategories = hfvilleRes.body.categories;
+  hfvilleCategoryIdByKey = new Map(
+    hfvilleCategories
+      .filter((c): c is Category & { categoryKey: CategoryKey } => c.categoryKey !== null)
+      .map((c) => [c.categoryKey, c.id]),
   );
 });
 
@@ -107,6 +135,32 @@ describe("category seed and category_key", () => {
 
   test("refuses to archive a category with a non-null category_key", async () => {
     const res = await call("PATCH", `/${PROPERTY}/categories/${categoryId("room_cash")}`, { archived: true });
+    expect(res.status).toBe(400);
+  });
+
+  // hfville category-seed parity (task brief): both properties must land on
+  // the SAME fifteen category keys, in the SAME order, via the LIVE API
+  // (categories.ts already covers this via the migration fixture — this is
+  // the server-level confirmation that GET /:property/categories actually
+  // serves that shape end-to-end, not just what migrate() writes to SQLite).
+  test("hfville reaches the same fifteen income categories, in the same key order, as hf", () => {
+    const hfKeys = categories.filter((c) => c.kind === "income").map((c) => c.categoryKey);
+    const hfvilleKeys = hfvilleCategories.filter((c) => c.kind === "income").map((c) => c.categoryKey);
+    expect(hfvilleKeys).toHaveLength(15);
+    expect(hfvilleKeys).toEqual(hfKeys);
+  });
+
+  for (const property of ["hf", "hfville"] as const) {
+    test(`${property}: seeds deposit_applied immediately after deposit_credit`, () => {
+      const income = (property === "hf" ? categories : hfvilleCategories).filter((c) => c.kind === "income");
+      expect(income.find((c) => c.categoryKey === "deposit_applied")?.nameTh).toBe("มัดจำล่วงหน้า (ตัดยอด)");
+      const indexOf = (key: string) => income.findIndex((c) => c.categoryKey === key);
+      expect(indexOf("deposit_applied")).toBe(indexOf("deposit_credit") + 1);
+    });
+  }
+
+  test("refuses to archive a category with a non-null category_key, for hfville too", async () => {
+    const res = await call("PATCH", `/${HFVILLE}/categories/${hfvilleCategoryId("room_cash")}`, { archived: true });
     expect(res.status).toBe(400);
   });
 
@@ -3177,5 +3231,334 @@ describe("Wave 1: payment_audits CRUD (POST/DELETE /:property/audit/:auditKey/ch
     expect(del.status).toBe(204);
 
     await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+  });
+});
+
+// ── HF Ville parity coverage (task brief) ──────────────────────────────────
+// Everything below is ADDITIVE: existing hf-only describe blocks above are
+// left untouched (per the "don't weaken existing assertions" rule). All
+// dates here use 2027, a year no pre-existing test in this file touches
+// (grepped), so these tests can never collide with another describe block's
+// fixture data regardless of bun:test's execution order within the file.
+
+describe("HF Ville property parity: endpoints accept hfville, isolated from hf", () => {
+  describe("cross-property isolation: hf and hfville share no data for the same date", () => {
+    test("a booking line created on hf is invisible on hfville for the same date, and vice versa", async () => {
+      const DATE = "2027-01-15";
+      await call("POST", `/${PROPERTY}/day/${DATE}/bookings`, { guestName: "hf เท่านั้น", tenders: zeroTenders() });
+      await call("POST", `/${HFVILLE}/day/${DATE}/bookings`, { guestName: "hfville เท่านั้น", tenders: zeroTenders() });
+
+      const hfBookings = await call<{ lines: Array<{ guestName: string | null }> }>(
+        "GET",
+        `/${PROPERTY}/day/${DATE}/bookings`,
+      );
+      const hfvilleBookings = await call<{ lines: Array<{ guestName: string | null }> }>(
+        "GET",
+        `/${HFVILLE}/day/${DATE}/bookings`,
+      );
+      expect(hfBookings.body.lines.map((l) => l.guestName)).toEqual(["hf เท่านั้น"]);
+      expect(hfvilleBookings.body.lines.map((l) => l.guestName)).toEqual(["hfville เท่านั้น"]);
+    });
+
+    test("an other-income item on hfville is invisible on hf for the same date", async () => {
+      const DATE = "2027-01-16";
+      await call("POST", `/${HFVILLE}/day/${DATE}/other-income`, {
+        description: "hfville เท่านั้น",
+        amountSatang: 3_000,
+        isCash: true,
+      });
+
+      const hfDay = await call<{ otherIncome: unknown[] }>("GET", `/${PROPERTY}/day/${DATE}`);
+      const hfvilleDay = await call<{ otherIncome: Array<{ description: string | null }> }>(
+        "GET",
+        `/${HFVILLE}/day/${DATE}`,
+      );
+      expect(hfDay.body.otherIncome).toEqual([]);
+      expect(hfvilleDay.body.otherIncome).toHaveLength(1);
+      expect(hfvilleDay.body.otherIncome[0]?.description).toBe("hfville เท่านั้น");
+    });
+
+    test("a hand-entered deposit event on hf is invisible on hfville for the same date — cash block isolation too", async () => {
+      const DATE = "2027-01-17"; // post accrual-cutover (2026-07-31)
+      await call("POST", `/${PROPERTY}/day/${DATE}/deposits`, {
+        kind: "received",
+        bookingNo: "R270017",
+        guestName: null,
+        tender: "cash",
+        amountSatang: 45_000,
+        note: null,
+      });
+
+      const hfDay = await call<{ deposits: unknown[]; cashBlock: { depositCashInSatang: number } }>(
+        "GET",
+        `/${PROPERTY}/day/${DATE}`,
+      );
+      const hfvilleDay = await call<{ deposits: unknown[]; cashBlock: { depositCashInSatang: number } }>(
+        "GET",
+        `/${HFVILLE}/day/${DATE}`,
+      );
+      expect(hfDay.body.deposits).toHaveLength(1);
+      expect(hfDay.body.cashBlock.depositCashInSatang).toBe(45_000);
+      expect(hfvilleDay.body.deposits).toEqual([]);
+      expect(hfvilleDay.body.cashBlock.depositCashInSatang).toBe(0);
+    });
+
+    test("an income cell PUT on hf's room_cash category never appears on hfville's day, even though both properties share the categoryKey", async () => {
+      const DATE = "2027-01-18";
+      await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, {
+        amountSatang: 20_000,
+        note: null,
+      });
+
+      const hfvilleDay = await call<{ income: Record<number, { amountSatang: number }> }>(
+        "GET",
+        `/${HFVILLE}/day/${DATE}`,
+      );
+      // hf and hfville have DIFFERENT category ids for the same categoryKey
+      // (separate seeded rows per property — see db.ts's seedIfEmpty) — the
+      // hfville day's income map must have no entry at all for hfville's own
+      // room_cash id, since nothing was ever written to hfville that date.
+      expect(hfvilleDay.body.income[hfvilleCategoryId("room_cash")]).toBeUndefined();
+    });
+  });
+
+  describe("PMS config gates (pull-from-pms / audit/day / deposits/register) are per-property independent 503s", () => {
+    afterEach(() => {
+      pmsPrefillInternal.setFetchDayPaymentsForTests(null);
+      dayAuditInternal.setFetchDayAuditForTests(null);
+      depositRegisterInternal.setFetchDepositRegisterForTests(null);
+      delete process.env.PMS_DB_URL_HF;
+      delete process.env.PMS_DB_URL_HFVILLE;
+    });
+
+    test("pull-from-pms: 503 for hfville when PMS_DB_URL_HFVILLE is unset (existing coverage above only exercises hf)", async () => {
+      delete process.env.PMS_DB_URL_HFVILLE;
+      const res = await call("POST", `/${HFVILLE}/day/2027-01-20/pull-from-pms`);
+      expect(res.status).toBe(503);
+      expect((res.body as { error: string }).error).toBe("pms prefill not configured");
+    });
+
+    test("pull-from-pms: hf configured + hfville unset — hf succeeds while hfville still 503s, proving the gate reads its OWN property's env var only", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      delete process.env.PMS_DB_URL_HFVILLE;
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () => ({ bookingCandidates: [], depositCandidates: [], anomalies: [] }));
+
+      const hfRes = await call("POST", `/${PROPERTY}/day/2027-01-21/pull-from-pms`);
+      expect(hfRes.status).toBe(200);
+
+      const hfvilleRes = await call("POST", `/${HFVILLE}/day/2027-01-21/pull-from-pms`);
+      expect(hfvilleRes.status).toBe(503);
+    });
+
+    test("audit/day: 503 for hfville when PMS_DB_URL_HFVILLE is unset, independent of hf's own (configured) state", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      delete process.env.PMS_DB_URL_HFVILLE;
+      dayAuditInternal.setFetchDayAuditForTests(async () => []);
+
+      const hfRes = await call("GET", `/${PROPERTY}/audit/day/2027-01-22`);
+      expect(hfRes.status).toBe(200);
+
+      const hfvilleRes = await call("GET", `/${HFVILLE}/audit/day/2027-01-22`);
+      expect(hfvilleRes.status).toBe(503);
+      expect((hfvilleRes.body as { error: string }).error).toBe("pms prefill not configured");
+    });
+
+    test("deposits/register: 503 for hfville when PMS_DB_URL_HFVILLE is unset, independent of hf's own (configured) state", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      delete process.env.PMS_DB_URL_HFVILLE;
+      depositRegisterInternal.setFetchDepositRegisterForTests(async () => ({
+        threads: [],
+        monthly: [],
+        unparsedAppliedRows: 0,
+        zeroTenderRows: 0,
+        blankBookingNoRows: 0,
+        undatedRows: 0,
+        voided: [],
+        events: [],
+      }));
+
+      const hfRes = await call("GET", `/${PROPERTY}/deposits/register`);
+      expect(hfRes.status).toBe(200);
+
+      const hfvilleRes = await call("GET", `/${HFVILLE}/deposits/register`);
+      expect(hfvilleRes.status).toBe(503);
+    });
+
+    // Symmetric direction: hfville configured, hf unset — proves the gate
+    // isn't secretly "is EITHER property's env var set", but each
+    // property's own var exclusively.
+    test("pull-from-pms: hfville configured + hf unset — hfville succeeds while hf still 503s", async () => {
+      process.env.PMS_DB_URL_HFVILLE = "postgresql://readonly@fake-pms-test/hfville";
+      delete process.env.PMS_DB_URL_HF;
+      pmsPrefillInternal.setFetchDayPaymentsForTests(async () => ({ bookingCandidates: [], depositCandidates: [], anomalies: [] }));
+
+      const hfvilleRes = await call("POST", `/${HFVILLE}/day/2027-01-23/pull-from-pms`);
+      expect(hfvilleRes.status).toBe(200);
+
+      const hfRes = await call("POST", `/${PROPERTY}/day/2027-01-23/pull-from-pms`);
+      expect(hfRes.status).toBe(503);
+    });
+  });
+
+  describe("month close: per-property isolation", () => {
+    test("closing hf's month leaves hfville's SAME month open, and hfville writes still succeed while hf's are blocked", async () => {
+      const MONTH = "2027-02";
+      const DATE = "2027-02-10";
+
+      const closed = await call<{ closed: boolean }>("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: true });
+      expect(closed.body.closed).toBe(true);
+
+      const hfvilleStatus = await call<{ closed: boolean }>("GET", `/${HFVILLE}/months/${MONTH}/close`);
+      expect(hfvilleStatus.body.closed).toBe(false);
+
+      const hfvilleWrite = await call(
+        "PUT",
+        `/${HFVILLE}/day/${DATE}/income/${hfvilleCategoryId("room_cash")}`,
+        { amountSatang: 5_000, note: null },
+      );
+      expect(hfvilleWrite.status).toBe(200);
+
+      const hfWrite = await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, {
+        amountSatang: 5_000,
+        note: null,
+      });
+      expect(hfWrite.status).toBe(409);
+
+      await call("PUT", `/${PROPERTY}/months/${MONTH}/close`, { closed: false });
+    });
+
+    test("closing hfville's month leaves hf's SAME month open (the reverse direction)", async () => {
+      const MONTH = "2027-03";
+      const DATE = "2027-03-10";
+
+      await call("PUT", `/${HFVILLE}/months/${MONTH}/close`, { closed: true });
+
+      const hfStatus = await call<{ closed: boolean }>("GET", `/${PROPERTY}/months/${MONTH}/close`);
+      expect(hfStatus.body.closed).toBe(false);
+
+      const hfWrite = await call("PUT", `/${PROPERTY}/day/${DATE}/income/${categoryId("room_cash")}`, {
+        amountSatang: 5_000,
+        note: null,
+      });
+      expect(hfWrite.status).toBe(200);
+
+      await call("PUT", `/${HFVILLE}/months/${MONTH}/close`, { closed: false });
+    });
+  });
+
+  describe("deposit notes: per-property isolation (same R-number, independent note threads)", () => {
+    afterEach(() => {
+      depositRegisterInternal.setFetchDepositRegisterForTests(null);
+      delete process.env.PMS_DB_URL_HF;
+      delete process.env.PMS_DB_URL_HFVILLE;
+    });
+
+    // deposit_notes' PK is (property, r_number) — see db.ts. Proven here
+    // through the ONLY read surface a note actually reaches (GET
+    // .../deposits/register merges it onto the matching `aging` row by
+    // rNumber — there is no standalone GET-one-note endpoint), with an
+    // IDENTICAL fake register thread stubbed for both properties so any
+    // difference in the two responses' note fields can only come from the
+    // note storage itself, never from different underlying thread data.
+    test("a note written on hf's R-number never leaks onto hfville's SAME R-number, and vice versa", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      process.env.PMS_DB_URL_HFVILLE = "postgresql://readonly@fake-pms-test/hfville";
+      const R_NUMBER = "R270099";
+      const sameRegisterForBothProperties = async (): Promise<DepositRegisterData> => ({
+        threads: [
+          {
+            rNumber: R_NUMBER,
+            receivedSatang: 10_000,
+            appliedSatang: 0,
+            refundedSatang: 0,
+            outstandingSatang: 10_000,
+            firstEventDate: "2027-01-01",
+            events: [],
+            status: "waitingCheckin",
+            guestName: null,
+            receivedTenders: [],
+          },
+        ],
+        monthly: [],
+        unparsedAppliedRows: 0,
+        zeroTenderRows: 0,
+        blankBookingNoRows: 0,
+        undatedRows: 0,
+        voided: [],
+        events: [],
+      });
+      depositRegisterInternal.setFetchDepositRegisterForTests(sameRegisterForBothProperties);
+
+      await call("PUT", `/${PROPERTY}/deposits/${R_NUMBER}/note`, { note: "hf note", resolved: false });
+      await call("PUT", `/${HFVILLE}/deposits/${R_NUMBER}/note`, { note: "hfville note", resolved: true });
+
+      const hfReg = await call<{ aging: Array<{ rNumber: string; note: string | null; resolvedAt: string | null }> }>(
+        "GET",
+        `/${PROPERTY}/deposits/register`,
+      );
+      const hfvilleReg = await call<{
+        aging: Array<{ rNumber: string; note: string | null; resolvedAt: string | null }>;
+      }>("GET", `/${HFVILLE}/deposits/register`);
+
+      const hfRow = hfReg.body.aging.find((r) => r.rNumber === R_NUMBER)!;
+      const hfvilleRow = hfvilleReg.body.aging.find((r) => r.rNumber === R_NUMBER)!;
+      expect(hfRow.note).toBe("hf note");
+      expect(hfRow.resolvedAt).toBeNull(); // hf's own resolved:false — not hfville's true
+      expect(hfvilleRow.note).toBe("hfville note");
+      expect(hfvilleRow.resolvedAt).not.toBeNull(); // hfville's own resolved:true — not hf's false
+
+      // Deleting hfville's thread's note must not touch hf's.
+      await call("DELETE", `/${HFVILLE}/deposits/${R_NUMBER}/note`);
+      const hfRegAfter = await call<{ aging: Array<{ rNumber: string; note: string | null }> }>(
+        "GET",
+        `/${PROPERTY}/deposits/register`,
+      );
+      expect(hfRegAfter.body.aging.find((r) => r.rNumber === R_NUMBER)?.note).toBe("hf note");
+
+      await call("DELETE", `/${PROPERTY}/deposits/${R_NUMBER}/note`);
+    });
+  });
+
+  describe("payment_audits (audit ticks): per-property isolation (same auditKey, independent checked state)", () => {
+    afterEach(() => {
+      dayAuditInternal.setFetchDayAuditForTests(null);
+      delete process.env.PMS_DB_URL_HF;
+      delete process.env.PMS_DB_URL_HFVILLE;
+    });
+
+    test("ticking an auditKey on hf leaves the SAME auditKey unchecked on hfville", async () => {
+      process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+      process.env.PMS_DB_URL_HFVILLE = "postgresql://readonly@fake-pms-test/hfville";
+      const DATE = "2027-01-25";
+      const AUDIT_KEY = "CH27-000001";
+      const sameRowForBothProperties = async (): Promise<DayAuditRow[]> => [
+        auditCheckinRow({ auditKey: AUDIT_KEY, chRef: AUDIT_KEY }),
+      ];
+      dayAuditInternal.setFetchDayAuditForTests(sameRowForBothProperties);
+
+      await call("POST", `/${PROPERTY}/audit/${AUDIT_KEY}/check`, { date: DATE });
+
+      const hfRes = await call<{ rows: Array<{ auditKey: string; checked: boolean }> }>(
+        "GET",
+        `/${PROPERTY}/audit/day/${DATE}`,
+      );
+      const hfvilleRes = await call<{ rows: Array<{ auditKey: string; checked: boolean }> }>(
+        "GET",
+        `/${HFVILLE}/audit/day/${DATE}`,
+      );
+      expect(hfRes.body.rows.find((r) => r.auditKey === AUDIT_KEY)?.checked).toBe(true);
+      expect(hfvilleRes.body.rows.find((r) => r.auditKey === AUDIT_KEY)?.checked).toBe(false);
+
+      // Ticking hfville's copy of the SAME auditKey must not un-tick hf's.
+      await call("POST", `/${HFVILLE}/audit/${AUDIT_KEY}/check`, { date: DATE });
+      const hfResAfter = await call<{ rows: Array<{ auditKey: string; checked: boolean }> }>(
+        "GET",
+        `/${PROPERTY}/audit/day/${DATE}`,
+      );
+      expect(hfResAfter.body.rows.find((r) => r.auditKey === AUDIT_KEY)?.checked).toBe(true);
+
+      await call("DELETE", `/${PROPERTY}/audit/${AUDIT_KEY}/check`);
+      await call("DELETE", `/${HFVILLE}/audit/${AUDIT_KEY}/check`);
+    });
   });
 });

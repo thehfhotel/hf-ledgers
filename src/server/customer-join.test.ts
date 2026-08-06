@@ -119,3 +119,53 @@ describe("extractLegacyIdFromCustNo — pure mirror of CUSTOMER_JOIN_ON's CASE e
     expect(extractLegacyIdFromCustNo(undefined)).toBeNull();
   });
 });
+
+// Real per-property ledger_cust_no shapes (2026-08-06 live survey, run
+// directly against both PMS Postgres mirrors via hf-slips) — FIXTURE ADVICE
+// #1/#2: never hand-invent a value, and give BOTH properties a realistic
+// MIX of padded and unpadded forms, since hf is NOT padding-free either
+// (5.6% of its own rows pad too — just far rarer than hfville's 36.9%). The
+// join's numeric-extraction rule is intentionally property-agnostic (see
+// CUSTOMER_JOIN_ON's own doc comment: "padding can never matter again, in
+// either direction"), so these two lists exist to pin the literal values
+// this feature actually sees per property, not to exercise a different code
+// path per property.
+describe("extractLegacyIdFromCustNo — real per-property ledger_cust_no shapes", () => {
+  // hf: 94.4% unpadded live, but a real 5.6% padded minority too — a
+  // fixture asserting "hf never pads" would itself be wrong (this is the
+  // exact class of gap the calling brief flags: HF-shaped fixtures hid a
+  // real hfville bug once already).
+  const hfSamples: ReadonlyArray<readonly [string, number]> = [
+    ["C830", 830],
+    ["C578", 578],
+    ["C242", 242],
+    ["C0830", 830], // hf's own padded minority (~5.6% of hf's ht_payment_ledger rows)
+    ["C0578", 578],
+    ["C0242", 242],
+    ["C0564", 564],
+    ["C0068", 68],
+  ];
+  for (const [input, expected] of hfSamples) {
+    test(`hf: ${JSON.stringify(input)} -> ${expected}`, () => {
+      expect(extractLegacyIdFromCustNo(input)).toBe(expected);
+    });
+  }
+
+  // hfville: padding is the LARGER share (36.9%) but still a minority
+  // overall (63.1% unpadded) — both real shapes must resolve to the same id.
+  const hfvilleSamples: ReadonlyArray<readonly [string, number]> = [
+    ["C0578", 578],
+    ["C0830", 830],
+    ["C0564", 564],
+    ["C0195", 195],
+    ["C0074", 74],
+    ["C578", 578], // hfville's unpadded majority-of-the-minority shape (63.1%)
+    ["C830", 830],
+    ["C195", 195],
+  ];
+  for (const [input, expected] of hfvilleSamples) {
+    test(`hfville: ${JSON.stringify(input)} -> ${expected}`, () => {
+      expect(extractLegacyIdFromCustNo(input)).toBe(expected);
+    });
+  }
+});

@@ -59,6 +59,7 @@
 import { RECONCILE_TOLERANCE_SATANG } from "../shared/bookings.ts";
 import type { DepositTender, Property } from "../shared/types.ts";
 import {
+  CUSTOMER_JOIN_ON,
   DEPOSIT_APPLIED_PREFIX,
   DS_NAME_DEPOSIT_RECEIVED,
   DS_NAME_DEPOSIT_REFUND,
@@ -116,8 +117,7 @@ export const DAY_AUDIT_LEDGER_QUERY = `
     c.cust_name2
   FROM ht_payment_ledger l
   LEFT JOIN ht_customers c
-    ON l.ledger_cust_no = 'C' || c.legacy_id::text
-    OR l.ledger_cust_no = c.legacy_id::text
+  ${CUSTOMER_JOIN_ON}
   WHERE l.ledger_pay_date >= $1
     AND l.ledger_pay_date < $2
     AND l.ledger_status IS DISTINCT FROM 'ยกเลิก'
@@ -722,8 +722,7 @@ async function fetchReceivedLookup(
       c.cust_name2
     FROM ht_payment_ledger l
     LEFT JOIN ht_customers c
-      ON l.ledger_cust_no = 'C' || c.legacy_id::text
-      OR l.ledger_cust_no = c.legacy_id::text
+    ${CUSTOMER_JOIN_ON}
     WHERE l.ledger_ds_name = '${DS_NAME_DEPOSIT_RECEIVED}'
       AND l.ledger_cin_no IN (${sqlStringList(rRefs)})
     ORDER BY l.ledger_pay_date, l.ledger_legacy_id

@@ -193,6 +193,80 @@ export interface RawLedgerRow {
 }
 
 /**
+ * The `ht_payment_ledger` -> `ht_customers` join condition, shared by
+ * EVERY query in this feature that needs a guest name off a ledger row
+ * (`LEDGER_QUERY` below; `DEPOSIT_LEDGER_QUERY`/`DAY_AUDIT_LEDGER_QUERY`/
+ * `fetchReceivedLookup`'s own inline query in the sibling modules) — kept
+ * as ONE exported fragment so those queries can never drift apart on it
+ * again. They already did, silently: this fragment replaces a bug that
+ * shipped identically copy-pasted into all four call sites.
+ *
+ * `ledger_cust_no` is a 'C'-prefixed string, but iHOTEL is NOT consistent
+ * about zero-padding the digits: hotelnew (HF) mostly writes the bare
+ * integer ('C720'), hotelville pads to 4 digits for ~37% of its rows
+ * ('C0720') — confirmed live 2026-08-06, 1,105 of 2,995 hotelville
+ * `ht_payment_ledger` rows match `^C0`. The original join compared by
+ * STRING CONCATENATION (`'C' || legacy_id::text`), which only ever
+ * produces the UNPADDED form, so every padded row silently failed to
+ * match and `buildGuestName` fell back to "ไม่ทราบชื่อ" (owner-reported;
+ * R2608-0036 / `ledger_cust_no='C0720'` was the confirmed case — its
+ * customer, legacy_id=720, นาย ศตพล วรกำเเหง, exists and now resolves).
+ *
+ * Fixed by comparing NUMERICALLY instead: strip a leading C/c and cast the
+ * remainder to `int`, which discards leading zeros for free
+ * (`'0720'::int = 720`) — so padding can never matter again, in either
+ * direction. The whole-string regex guard (`^[Cc]?[0-9]+$`) runs BEFORE
+ * the cast so a non-numeric or empty remainder (a corrupt value, or NULL,
+ * for which `~` yields NULL, not TRUE) falls through the `CASE` to NULL
+ * instead of throwing `invalid input syntax for integer` and failing the
+ * whole query — verified live against EVERY row on both properties
+ * 2026-08-06 (zero cast errors across 28,779 + 2,995 rows) and by this
+ * module's own tests (`'C0720'`, `'C720'`, `'720'` all match; `'CXYZ'`,
+ * `''`, `null` all yield no match, never a throw). The bare-digit shape
+ * (no C prefix at all) is folded into this SAME expression, not a second
+ * OR branch — the optional `[Cc]?` in the guard means `regexp_replace` is
+ * simply a no-op when there is no leading C to strip.
+ *
+ * `c.legacy_id` is compared BARE (never wrapped in an expression) so an
+ * index on `ht_customers.legacy_id`, if one exists, stays usable.
+ */
+export const CUSTOMER_JOIN_ON = `
+    ON c.legacy_id = CASE
+      WHEN l.ledger_cust_no ~ '^[Cc]?[0-9]+$'
+      THEN regexp_replace(l.ledger_cust_no, '^[Cc]', '')::int
+      ELSE NULL
+    END`;
+
+/**
+ * Pure-JS mirror of `CUSTOMER_JOIN_ON`'s `CASE` expression. SQL text has no
+ * unit-test surface of its own in this repo — there is no local Postgres in
+ * `bun test` and `fetchDayPayments` is only ever exercised through its
+ * `_internal` override, never a real PMS connection (see this module's
+ * top-of-file "no network" note) — so this function exists purely to pin
+ * the join's INTENDED numeric-extraction rule behind a fast, deterministic
+ * test (`pms-prefill.test.ts`). It is NEVER called from the SQL path; the
+ * two are independent expressions of the same rule, kept in lockstep by
+ * hand — changing one always means updating the other (and its fixtures)
+ * to match. The claim that they agree is backed by live-DB verification
+ * (2026-08-06: zero cast errors and identical match sets across every row
+ * of both properties' `ht_payment_ledger`), not by this function calling
+ * into the SQL or vice versa.
+ *
+ * Same guard order as the SQL: the whole-string regex test runs BEFORE any
+ * parsing, so a non-numeric remainder ('CXYZ'), an empty string, or
+ * null/undefined all return `null` rather than throwing or producing
+ * `NaN` — mirroring `NULL ~ pattern` being NULL (falsy for `WHEN`), not an
+ * error, in Postgres.
+ */
+export function extractLegacyIdFromCustNo(custNo: string | null | undefined): number | null {
+  if (custNo == null) return null;
+  if (!/^[Cc]?[0-9]+$/.test(custNo)) return null;
+  const digits = custNo.replace(/^[Cc]/, "");
+  const n = Number(digits);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/**
  * The one query this whole feature depends on getting right, kept as a
  * single exported string so a review can read it end to end. Excludes
  * cancelled lines (`IS DISTINCT FROM`, not `<>`, so a NULL status — which
@@ -227,11 +301,7 @@ export const LEDGER_QUERY = `
     c.cust_name2
   FROM ht_payment_ledger l
   LEFT JOIN ht_customers c
-    -- ledger_cust_no is a C-prefixed string ('C22006'); legacy_id is the bare
-    -- integer (22006). Verified against live data 2026-07-30 (183/183 of a
-    -- week's payments join); the naive equality is a type error in Postgres.
-    ON l.ledger_cust_no = 'C' || c.legacy_id::text
-    OR l.ledger_cust_no = c.legacy_id::text
+  ${CUSTOMER_JOIN_ON}
   WHERE l.ledger_pay_date >= $1
     AND l.ledger_pay_date < $2
     AND l.ledger_status IS DISTINCT FROM 'ยกเลิก'

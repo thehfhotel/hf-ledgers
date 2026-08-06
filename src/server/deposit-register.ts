@@ -20,6 +20,7 @@
 import type { DepositThreadStatus, DepositTender, Property } from "../shared/types.ts";
 import { RECONCILE_TOLERANCE_SATANG } from "../shared/bookings.ts";
 import {
+  CUSTOMER_JOIN_ON,
   DEPOSIT_APPLIED_PREFIX,
   DS_NAME_DEPOSIT_RECEIVED,
   DS_NAME_DEPOSIT_REFUND,
@@ -78,10 +79,11 @@ export interface RawDepositLedgerRow {
  * applied line's amount (same V1 rule as pms-prefill.ts).
  *
  * The `ht_customers` LEFT JOIN (owner ask, 2026-08-01, deposit register
- * guest name) is copied VERBATIM from pms-prefill.ts's `LEDGER_QUERY` — the
- * same C-prefix join condition verified live 2026-07-30 (183/183 of a
- * week's payments join) — never re-derived, so the two queries can never
- * disagree on how a payment line finds its customer.
+ * guest name) reuses pms-prefill.ts's own exported `CUSTOMER_JOIN_ON`
+ * fragment — never re-derived, so this query and `LEDGER_QUERY` can never
+ * disagree on how a payment line finds its customer (they already did,
+ * silently, before that fragment existed — see its own doc comment for the
+ * zero-padding bug this now guards against).
  */
 export const DEPOSIT_LEDGER_QUERY = `
   SELECT
@@ -104,11 +106,7 @@ export const DEPOSIT_LEDGER_QUERY = `
     c.cust_name2
   FROM ht_payment_ledger l
   LEFT JOIN ht_customers c
-    -- ledger_cust_no is a C-prefixed string ('C22006'); legacy_id is the bare
-    -- integer (22006). Verified against live data 2026-07-30 (183/183 of a
-    -- week's payments join); the naive equality is a type error in Postgres.
-    ON l.ledger_cust_no = 'C' || c.legacy_id::text
-    OR l.ledger_cust_no = c.legacy_id::text
+  ${CUSTOMER_JOIN_ON}
   WHERE l.ledger_ds_name = '${DS_NAME_DEPOSIT_RECEIVED}'
      OR l.ledger_ds_name = '${DS_NAME_DEPOSIT_REFUND}'
      OR l.ledger_ds_name LIKE '${DEPOSIT_APPLIED_PREFIX}%'

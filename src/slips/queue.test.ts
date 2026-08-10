@@ -14,6 +14,7 @@ import { PROPERTIES } from "../shared/types.ts";
 const { _internal: dayAuditInternal, buildDayAuditRows } = await import("../server/day-audit.ts");
 const { buildSlipQueue, needsSlipProof } = await import("./queue.ts");
 const { createAttachment, supersede } = await import("./storage.ts");
+const { markCash, unmarkCash } = await import("./cash-marks.ts");
 
 function checkinRow(overrides: Partial<DayAuditCheckinRow> = {}): DayAuditCheckinRow {
   return {
@@ -180,6 +181,36 @@ describe("buildSlipQueue", () => {
     dayAuditInternal.setFetchDayAuditForTests(async () => rows);
     const queue = await buildSlipQueue("hf", "2026-08-03");
     expect(queue[0]!.currentAttachments).toEqual([]);
+  });
+
+  test("cashMark is null for a row that was never marked paid-in-cash", async () => {
+    const rows: DayAuditRow[] = [
+      checkinRow({ auditKey: "CH000007", chRef: "CH000007", composition: { cashSatang: 0, transferSatang: 50_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 } }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    const queue = await buildSlipQueue("hf", "2026-08-03");
+    expect(queue[0]!.cashMark).toBeNull();
+  });
+
+  test("cashMark reflects a real mark event — ยืนยันชำระเงินสด surfaces on the queue row", async () => {
+    markCash("hf", "CH000008", "2026-08-03", "reception@thehfhotel.org");
+    const rows: DayAuditRow[] = [
+      checkinRow({ auditKey: "CH000008", chRef: "CH000008", composition: { cashSatang: 0, transferSatang: 50_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 } }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    const queue = await buildSlipQueue("hf", "2026-08-03");
+    expect(queue[0]!.cashMark).toEqual({ at: expect.any(String), by: "reception@thehfhotel.org" });
+  });
+
+  test("cashMark reverts to null once unmarked — the queue row is live, not a frozen snapshot", async () => {
+    markCash("hf", "CH000009", "2026-08-03", "reception@thehfhotel.org");
+    unmarkCash("hf", "CH000009", "2026-08-03", "manager@thehfhotel.org");
+    const rows: DayAuditRow[] = [
+      checkinRow({ auditKey: "CH000009", chRef: "CH000009", composition: { cashSatang: 0, transferSatang: 50_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 } }),
+    ];
+    dayAuditInternal.setFetchDayAuditForTests(async () => rows);
+    const queue = await buildSlipQueue("hf", "2026-08-03");
+    expect(queue[0]!.cashMark).toBeNull();
   });
 
   test("a PMS query failure rejects — the route (not this function) turns that into a 502", async () => {

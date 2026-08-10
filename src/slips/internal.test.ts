@@ -8,6 +8,7 @@ process.env.SLIPS_DATA_DIR = `/tmp/slips-internal-test-${Date.now()}-${Math.rand
 import { afterEach, describe, expect, test } from "bun:test";
 const { buildStatusResponse, constantTimeEqual, isValidIngressToken, latestThumbPath, parseStatusKeys } = await import("./internal.ts");
 const { createAttachment } = await import("./storage.ts");
+const { markCash, unmarkCash } = await import("./cash-marks.ts");
 
 describe("constantTimeEqual", () => {
   test("equal strings match", () => {
@@ -67,7 +68,7 @@ describe("parseStatusKeys", () => {
 describe("buildStatusResponse", () => {
   test("every requested key is present, zero-valued when unknown", () => {
     const res = buildStatusResponse("hf", ["CH-UNKNOWN"]);
-    expect(res["CH-UNKNOWN"]).toEqual({ count: 0, latestAt: null, latestVersion: null, superseded: 0 });
+    expect(res["CH-UNKNOWN"]).toEqual({ count: 0, latestAt: null, latestVersion: null, superseded: 0, cashMarkedAt: null, cashMarkedBy: null });
   });
 
   test("reflects a real attachment", async () => {
@@ -86,6 +87,23 @@ describe("buildStatusResponse", () => {
     const res = buildStatusResponse("hf", ["CH-STATUS-1"]);
     expect(res["CH-STATUS-1"]!.count).toBe(1);
     expect(res["CH-STATUS-1"]!.latestAt).not.toBeNull();
+  });
+
+  test("cashMarkedAt/cashMarkedBy are null for an unmarked key, populated for a marked one", () => {
+    markCash("hf", "CH-STATUS-CASH-1", "2026-08-03", "reception@thehfhotel.org");
+    const res = buildStatusResponse("hf", ["CH-STATUS-CASH-1", "CH-STATUS-CASH-NEVER"]);
+    expect(res["CH-STATUS-CASH-1"]!.cashMarkedAt).not.toBeNull();
+    expect(res["CH-STATUS-CASH-1"]!.cashMarkedBy).toBe("reception@thehfhotel.org");
+    expect(res["CH-STATUS-CASH-NEVER"]!.cashMarkedAt).toBeNull();
+    expect(res["CH-STATUS-CASH-NEVER"]!.cashMarkedBy).toBeNull();
+  });
+
+  test("cashMarkedAt/cashMarkedBy revert to null once unmarked", () => {
+    markCash("hf", "CH-STATUS-CASH-2", "2026-08-03", "a@x.com");
+    unmarkCash("hf", "CH-STATUS-CASH-2", "2026-08-03", "b@x.com");
+    const res = buildStatusResponse("hf", ["CH-STATUS-CASH-2"]);
+    expect(res["CH-STATUS-CASH-2"]!.cashMarkedAt).toBeNull();
+    expect(res["CH-STATUS-CASH-2"]!.cashMarkedBy).toBeNull();
   });
 });
 

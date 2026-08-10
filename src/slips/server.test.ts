@@ -65,6 +65,14 @@ function blobPart(bytes: Uint8Array): ArrayBuffer {
   return bytes as unknown as ArrayBuffer;
 }
 
+/** `fetch`/`Request` default to `text/plain` for a plain string body — the
+ * cash-mark/cash-unmark routes need an explicit `application/json`
+ * content-type for Elysia's `t.Object` body parser to engage, same as the
+ * ledger's own `call()` helper (src/server/server.test.ts) does automatically. */
+function jsonInit(body: unknown): RequestInit {
+  return { body: JSON.stringify(body), headers: { "content-type": "application/json" } };
+}
+
 function checkinRow(overrides: Partial<DayAuditCheckinRow> = {}): DayAuditCheckinRow {
   return {
     kind: "checkin",
@@ -304,6 +312,91 @@ describe("attach -> re-encode -> serve -> supersede -> history round-trip", () =
     expect(res.headers.get("cache-control")).toBe("private, no-store");
     const thumbRes = await callRaw(api, "GET", "/slips-api/hf/picture/CH900100/1/thumb");
     expect(thumbRes.headers.get("cache-control")).toBe("private, no-store");
+  });
+});
+
+describe("POST /slips-api/:property/cash-mark & cash-unmark — ยืนยันชำระเงินสด (paid-in-cash reversal)", () => {
+  afterEach(() => {
+    dayAuditInternal.setFetchDayAuditForTests(null);
+    delete process.env.PMS_DB_URL_HF;
+  });
+
+  test("400 on an invalid property, auditKey, or date — both routes", async () => {
+    expect((await call(api, "POST", "/slips-api/xx/cash-mark/CH1", jsonInit({ date: "2026-08-03" }))).status).toBe(400);
+    expect((await call(api, "POST", `/slips-api/hf/cash-mark/${"X".repeat(999)}`, jsonInit({ date: "2026-08-03" }))).status).toBe(400);
+    expect((await call(api, "POST", "/slips-api/hf/cash-mark/CH1", jsonInit({ date: "not-a-date" }))).status).toBe(400);
+
+    expect((await call(api, "POST", "/slips-api/xx/cash-unmark/CH1", jsonInit({ date: "2026-08-03" }))).status).toBe(400);
+    expect((await call(api, "POST", `/slips-api/hf/cash-unmark/${"X".repeat(999)}`, jsonInit({ date: "2026-08-03" }))).status).toBe(400);
+    expect((await call(api, "POST", "/slips-api/hf/cash-unmark/CH1", jsonInit({ date: "not-a-date" }))).status).toBe(400);
+  });
+
+  test("mark: 200 { auditKey, cashMark } and the day queue reflects it", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    dayAuditInternal.setFetchDayAuditForTests(async () => [checkinRow({ auditKey: "CH900400", chRef: "CH900400" })]);
+
+    const mark = await call<{ auditKey: string; cashMark: { at: string; by: string } }>(
+      api,
+      "POST",
+      "/slips-api/hf/cash-mark/CH900400",
+      jsonInit({ date: "2026-08-03" }),
+    );
+    expect(mark.status).toBe(200);
+    expect(mark.body.auditKey).toBe("CH900400");
+    expect(mark.body.cashMark.by).toBe("tester@thehfhotel.org");
+    expect(mark.body.cashMark.at).toBeTruthy();
+
+    const queue = await call<{ rows: Array<{ auditKey: string; cashMark: { at: string; by: string } | null }> }>(
+      api,
+      "GET",
+      "/slips-api/hf/day/2026-08-03",
+    );
+    expect(queue.body.rows[0]!.cashMark).toEqual(mark.body.cashMark);
+  });
+
+  test("re-marking is idempotent over HTTP too: the response is the SAME original mark", async () => {
+    const first = await call<{ cashMark: { at: string; by: string } }>(api, "POST", "/slips-api/hf/cash-mark/CH900401", jsonInit({ date: "2026-08-03" }));
+    const second = await call<{ cashMark: { at: string; by: string } }>(api, "POST", "/slips-api/hf/cash-mark/CH900401", jsonInit({ date: "2026-08-03" }));
+    expect(second.body.cashMark).toEqual(first.body.cashMark);
+  });
+
+  test("unmark: 200 { auditKey, cashMark: null } and the queue reverts to pending", async () => {
+    process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
+    dayAuditInternal.setFetchDayAuditForTests(async () => [checkinRow({ auditKey: "CH900402", chRef: "CH900402" })]);
+
+    await call(api, "POST", "/slips-api/hf/cash-mark/CH900402", jsonInit({ date: "2026-08-03" }));
+
+    const unmark = await call<{ auditKey: string; cashMark: null }>(api, "POST", "/slips-api/hf/cash-unmark/CH900402", jsonInit({ date: "2026-08-03" }));
+    expect(unmark.status).toBe(200);
+    expect(unmark.body.auditKey).toBe("CH900402");
+    expect(unmark.body.cashMark).toBeNull();
+
+    const queue = await call<{ rows: Array<{ auditKey: string; cashMark: unknown }> }>(api, "GET", "/slips-api/hf/day/2026-08-03");
+    expect(queue.body.rows[0]!.cashMark).toBeNull();
+  });
+
+  test("un-marking a never-marked settlement is a harmless 200 no-op", async () => {
+    const res = await call<{ cashMark: null }>(api, "POST", "/slips-api/hf/cash-unmark/CH900403-NEVER-MARKED", jsonInit({ date: "2026-08-03" }));
+    expect(res.status).toBe(200);
+    expect(res.body.cashMark).toBeNull();
+  });
+});
+
+describe("/slips-internal/:property/status — cashMarkedAt/cashMarkedBy", () => {
+  test("carries cashMarkedAt/cashMarkedBy for a marked key, nulls for an unmarked one", async () => {
+    await call(api, "POST", "/slips-api/hf/cash-mark/CH900500", jsonInit({ date: "2026-08-03" }));
+
+    const res = await call<Record<string, { cashMarkedAt: string | null; cashMarkedBy: string | null }>>(
+      internalApi,
+      "GET",
+      "/slips-internal/hf/status?keys=CH900500,CH900500-NEVER-MARKED",
+      { headers: { authorization: "Bearer test-ingress-token" } },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body["CH900500"]!.cashMarkedAt).not.toBeNull();
+    expect(res.body["CH900500"]!.cashMarkedBy).toBe("tester@thehfhotel.org");
+    expect(res.body["CH900500-NEVER-MARKED"]!.cashMarkedAt).toBeNull();
+    expect(res.body["CH900500-NEVER-MARKED"]!.cashMarkedBy).toBeNull();
   });
 });
 

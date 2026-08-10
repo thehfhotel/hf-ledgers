@@ -59,6 +59,17 @@ export interface SlipQueueRow {
    * the full reasoning). `currentAttachments.length === attachment.count`
    * always. */
   currentAttachments: { version: number; createdAt: string; createdBy: string }[];
+  /** เงินสด — "paid in cash, no slip exists" state for this settlement,
+   * derived server-side from cash_mark_events (src/slips/cash-marks.ts):
+   * the LATEST event per (property, auditKey) — `null` when unmarked (no
+   * events yet, or the latest event is an unmark). A row can be cash-marked
+   * with `attachment.count === 0` (the common case a slip will never turn
+   * up) or with attachments already present (a slip surfaced after the
+   * mark; the mark is left in place, not auto-cleared — see App.tsx's
+   * ยกเลิกเงินสด for the only path that clears it). partition.ts treats
+   * `cashMark !== null` the same as "has a slip" for the รอแนบสลิป/จัดการสลิป
+   * split. */
+  cashMark: { at: string; by: string } | null;
 }
 
 export function getSlipQueue(property: Property, date: string): Promise<{ rows: SlipQueueRow[] }> {
@@ -92,6 +103,32 @@ export function supersedeSlip(property: Property, auditKey: string, version: num
 
 export function restoreSlip(property: Property, auditKey: string, version: number): Promise<AttachmentWire> {
   return request(`/${property}/restore/${encodeURIComponent(auditKey)}/${version}`, { method: "POST" });
+}
+
+export interface CashMarkResponse {
+  auditKey: string;
+  cashMark: { at: string; by: string } | null;
+}
+
+/** จ่ายเงินสด — ไม่มีสลิป: records that this settlement was paid in cash, no
+ * slip will ever be attached. Idempotent server-side (src/slips/cash-
+ * marks.ts's `markCash`) — safe to call again on an already-marked row. */
+export function markCash(property: Property, auditKey: string, date: string): Promise<CashMarkResponse> {
+  return request(`/${property}/cash-mark/${encodeURIComponent(auditKey)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ date }),
+  });
+}
+
+/** ยกเลิกเงินสด — undoes a cash mark, returning the row to รอแนบสลิป. Also
+ * idempotent (`unmarkCash` inserts nothing when already unmarked). */
+export function unmarkCash(property: Property, auditKey: string, date: string): Promise<CashMarkResponse> {
+  return request(`/${property}/cash-unmark/${encodeURIComponent(auditKey)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ date }),
+  });
 }
 
 export function pictureUrl(property: Property, auditKey: string, version: number): string {

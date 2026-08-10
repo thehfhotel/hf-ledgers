@@ -26,6 +26,16 @@ Product of a design interview with the owner; the visual design lives at the Cla
   (notification-hub pattern) and shows thumbnails inline or a รอสลิป chip — a missing slip is an
   audit signal on both sides. Slip pictures originate on the reception kiosk PC.
 
+  **Correction (2026-08-10):** owner-decided reversal of the line above — some queued
+  settlements are genuinely settled in CASH and no bank slip will ever exist for them, so
+  without an escape hatch they sit in ส่งสลิป's pending queue forever. ส่งสลิป gained a
+  reversible ยืนยันชำระเงินสด mark (reception asserts cash was received; un-markable, only
+  reversible; full audit trail — who/when, append-only event log). A cash-marked settlement
+  is the ONE case where a missing slip is deliberately NOT an audit signal: the office's
+  ตรวจสอบ hub renders it as a calm เงินสด chip instead of the red รอสลิป chip. Every other
+  missing-slip case is unchanged — the audit signal still stands. Wire contract:
+  `src/shared/api.md`'s "Wave 2: ยืนยันชำระเงินสด — cash-mark reversal" section.
+
 ## Waves
 
 **Wave 1 — ledger-side audit hub (no new infra, ships alone).** payment_audits table

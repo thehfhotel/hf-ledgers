@@ -728,14 +728,26 @@ export interface DayAuditDepositApplied {
 }
 
 /** The audit-state fields the server merges onto EVERY row kind from
- * `payment_audits` (by `auditKey`) — `proofCount`/`proofsPending` are
- * Wave-2 seam placeholders, always `0`/`false` in Wave 1. */
+ * `payment_audits` (by `auditKey`) — `proofCount`/`proofsPending` are live
+ * since Wave 2 (ส่งสลิป's status endpoint via `fetchSlipProofStatus`;
+ * `0`/`false` only when the slip service is dark). `cashMarkedAt`/
+ * `cashMarkedBy` are reception's PAID IN CASH mark on a queued settlement
+ * with no slip (src/slips/cash-marks.ts, via the same `fetchSlipProofStatus`
+ * round trip server-side) — both `null` whenever this row was never
+ * eligible for a slip, was never cash-marked, or the slip service itself is
+ * dark/unreachable (fail-silent, same as `proofCount` staying `0`). Setting
+ * this pair does NOT change `proofsPending` — an attachment, not a cash
+ * mark, is what clears that — so `DayAuditQueue.tsx`'s `SlipProofCell`
+ * reads both fields together to decide between the red รอสลิป chip and a
+ * calm neutral เงินสด one. */
 interface DayAuditStateFields {
   checked: boolean;
   checkedAt: string | null;
   checkedBy: string | null;
   proofCount: number;
   proofsPending: boolean;
+  cashMarkedAt: string | null;
+  cashMarkedBy: string | null;
 }
 
 /** One เช็คอิน row — a check-in's ค่าห้อง payment(s) and its (at most one)

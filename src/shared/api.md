@@ -1248,10 +1248,28 @@ means.
     full-precision ISO-8601 instant, `null` only on a `ledger_pay_date` parse
     failure, never expected in practice) plus the merged audit-state quartet
     `checked: boolean`, `checkedAt: string | null`, `checkedBy: string |
-    null`, and the Wave-2 seam placeholders `proofCount: number` (always
-    `0`), `proofsPending: boolean` (always `false` in Wave 1 — the slip
-    inbox is a separate wave, see the plan doc's "Wave 2"/"Not doing"
-    split):
+    null`, and the Wave-2 slip-inbox pair `proofCount: number`,
+    `proofsPending: boolean`, merged onto every row by THIS route from
+    ส่งสลิป's own internal status endpoint (`fetchSlipProofStatus`,
+    `src/server/server.ts` — bearer-token server-to-server, fail-silent: an
+    unreachable/unconfigured slip service just means `proofCount` stays `0`
+    for that request, never a 502 for the whole route). `proofCount` is the
+    settlement's current attachment count; `proofsPending` is
+    `needsSlipProof(row) && proofCount === 0`, computed unconditionally from
+    the row itself — a row that never needed a slip (cash tender only)
+    always reads `proofCount: 0, proofsPending: false`.
+
+    The SAME round trip (2026-08-10, `docs/plan-audit-hub-slips.md`'s
+    reception paid-in-cash reversal — see "Wave 2: ยืนยันชำระเงินสด" below)
+    also merges `cashMarkedAt: string | null`, `cashMarkedBy: string | null`
+    onto every row — `null`/`null` together for a row that never needed a
+    slip, was never asked about (the slip service is dark/unreachable), or
+    simply was never cash-marked; both populated together once reception
+    marks it. Deliberately does NOT change `proofsPending`: a cash-marked
+    settlement with no attachment still reads `proofsPending: true`
+    underneath its own `cashMarkedAt` — the client swaps the red รอสลิป chip
+    for a calm เงินสด one using `cashMarkedAt` alone, nothing downstream that
+    keys off `proofsPending` needs to change.
 
     - **`kind: "checkin"`** (`DayAuditCheckinRow`) — ONE row per STAY, keyed
       by the CH (check-in) number (`auditKey === chRef`). A check-in's
@@ -1405,6 +1423,88 @@ UNVERIFIED and wrapped in try/catch. Both cross-history lookups build their
 doubling) rather than a bound array parameter — chosen because this module
 has no live PMS connection available to verify Bun.SQL's array-binding
 behavior against.
+
+## Wave 2: ยืนยันชำระเงินสด — cash-mark reversal (`src/slips/`, `docs/plan-audit-hub-slips.md`, added 2026-08-10)
+
+ส่งสลิป (`slips.thehfhotel.org`, `src/slips/`) is reception's own slip inbox
+— a SEPARATE process/origin from this ledger (Wave 2's binding "separate
+process/origin is non-negotiable" rule), sharing only pure/side-effect-free
+code (`day-audit.ts`'s stay-merge, `pms-prefill.ts`'s config check). Its
+browser-facing routes live under `/slips-api/*` (Cloudflare Access +
+`identify()` — this SERVICE's own audience, not this ledger's `/api/*`
+identity — 401 without a verified one, no extra role beyond that); its
+server-to-server routes live under `/slips-internal/*` (bearer-token
+`SLIPS_INGRESS_TOKEN`, fails closed when unset, NEVER behind Cloudflare
+Access — a private Docker-network hop between the two containers). This
+section documents ONLY the reversible cash-mark added 2026-08-10; the rest
+of ส่งสลิป's surface (`attach`/`supersede`/`restore`/`history`/`picture`/
+`day`) predates this section and is not repeated here.
+
+**Why:** some queued settlements were actually settled in CASH — no bank
+slip will ever exist for them — so without a resolution they sit in
+ส่งสลิป's pending queue forever. Reception marks such a row "paid in cash",
+reversibly, with a full audit trail; the office's ตรวจสอบ hub sees the same
+state via the existing internal status endpoint (endpoint 34 above).
+
+- **`POST /slips-api/:property/cash-mark/:auditKey`** — body `{ date:
+  string }` → 200 `{ auditKey: string, cashMark: { at: string, by: string }
+  }`. Auth: `/slips-api/*`'s standard identity gate. Validation mirrors the
+  existing `attach` route exactly: 400 `{ error: "invalid property" }` for
+  an unrecognized property, 400 `{ error: "invalid auditKey" }` when
+  `auditKey` exceeds `BOOKING_NO_MAX_LEN`, 400 `{ error: "invalid date" }`
+  when `date` fails `isValidIso`. `date` is the audited day the mark was
+  made FROM — informational provenance only (same role as `attach`'s own
+  `date` body field / `payment_audits.date` above), never part of the
+  mark's identity, which is `(property, auditKey)` alone. **Idempotent**:
+  marking an already-marked settlement inserts no new event and returns the
+  ORIGINAL mark's `at`/`by` unchanged — a second tap, or a second reception
+  worker, can never steal the first mark's attribution.
+
+- **`POST /slips-api/:property/cash-unmark/:auditKey`** — body `{ date:
+  string }` → 200 `{ auditKey: string, cashMark: null }`. Same auth/
+  validation as `cash-mark` above. Reverses a mark, putting the settlement
+  back into the pending queue. **Idempotent**: un-marking an already-
+  unmarked (or never-marked) settlement is a harmless no-op — always 200,
+  never a 404 (same "not worth a 404" convention as `DELETE
+  .../audit/:auditKey/check`, endpoint 36 above).
+
+**`SlipQueueRow.cashMark`** (`src/slips/queue.ts`, part of `GET
+/slips-api/:property/day/:date`'s `{ rows: SlipQueueRow[] }`) gains:
+`cashMark: { at: string, by: string } | null` — non-null once reception has
+marked the settlement, `null` when never marked or currently un-marked.
+Batched via `cash-marks.ts`'s `cashMarkStates()` (one query for the whole
+day, never N+1), the same discipline `attachment`/`currentAttachments`
+already follow via `storage.ts`. A marked row is **not** filtered out of
+`rows` by this endpoint — the pending/resolved split is a client-side
+concern, kept separate the same way the attachment fields already are.
+
+**`StatusResponseEntry`** (`src/slips/internal.ts`, the per-key value shape
+of `GET /slips-internal/:property/status?keys=...`, bearer-token gated) gains:
+`cashMarkedAt: string | null`, `cashMarkedBy: string | null` — both `null`
+together when unmarked (including for a key with no cash-mark history at
+all), both populated together when marked; there is no state where only one
+of the pair carries a value. Every requested key is present with these two
+fields, same "every requested key present" guarantee `count`/`latestAt`/
+`latestVersion`/`superseded` already carry — the ledger's own
+`fetchSlipProofStatus` (`src/server/server.ts`, see endpoint 34 above) never
+needs an existence check before reading them.
+
+**Data model.** New table `cash_mark_events` (`src/slips/db.ts`) — append-
+only EVENT LOG, same philosophy as `supersede_events`: `id` PK, `property`
+(`hf`|`hfville`), `audit_key`, `audit_date`, `action` (`'mark'|'unmark'`),
+`by`, `at` (default `datetime('now')`); index on `(property, audit_key)`.
+No UNIQUE constraint — the same key accumulates many events over its life.
+Current state = the LATEST event (highest `id`) for a `(property,
+audit_key)`: `'mark'` → marked, `'unmark'` or no rows at all → unmarked;
+never a row is UPDATEd or DELETEd. `src/slips/cash-marks.ts` fns:
+`markCash(property, auditKey, auditDate, by): CashMark` (`{ at, by }`,
+idempotent as documented above), `unmarkCash(property, auditKey, auditDate,
+by): void` (idempotent), `cashMarkStates(property, keys): Map<string,
+CashMark>` — batch; a key **absent from the returned map** means unmarked
+(deliberately UNLIKE `storage.ts`'s `summarize`/`listCurrentBatch`, which
+pre-seed every requested key with a zero-valued placeholder instead — this
+function's own locked contract is "absent = unmarked", and both call sites
+above resolve that absence to `null` themselves).
 
 ## Shared types (`src/shared/types.ts`, verbatim, READ-ONLY)
 

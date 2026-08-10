@@ -13,6 +13,18 @@
 // storage.test.ts asserts this by scanning every file's own `node:fs`
 // import line for a banned name, so this comment is free to name those
 // functions in prose without tripping that check.
+//
+// `cash_mark_events` (2026-08-10, docs/plan-audit-hub-slips.md's reception
+// "paid in cash, no slip exists" reversal) is the SAME event-log philosophy
+// applied to a settlement's cash-mark state instead of a picture version:
+// marking/unmarking INSERTs an event, never an UPDATE, so "was this ever
+// toggled and by whom" survives forever — see cash-marks.ts for the
+// current-state derivation (latest event by id, mirroring
+// `supersede_events`'s own "latest event wins" rule) and its idempotence
+// contract (a redundant mark/unmark writes no row at all, unlike
+// `supersede`/`restore` above, which write a fresh event even when the
+// caller repeats an action — see cash-marks.ts's own doc comments for why
+// this table's idempotence is stricter).
 
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
@@ -84,6 +96,27 @@ export function migrate(): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_supersede_events_version ON supersede_events (property, audit_key, version);
+
+    -- Append-only EVENT LOG for reception's ยืนยันชำระเงินสด (paid-in-cash)
+    -- reversal — a queue row can be marked and unmarked any number of times,
+    -- and every toggle is its OWN INSERTed row, never an UPDATE to a prior
+    -- one (same "current = latest event by id" shape as supersede_events
+    -- above, minus the version dimension: a cash-mark is keyed to the
+    -- SETTLEMENT, not a picture version). No UNIQUE index on
+    -- (property, audit_key) — the whole point is that the SAME key can
+    -- accumulate many events over its life. See cash-marks.ts for the
+    -- current-state query and idempotence rules.
+    CREATE TABLE IF NOT EXISTS cash_mark_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property TEXT NOT NULL CHECK (property IN ('hf', 'hfville')),
+      audit_key TEXT NOT NULL,
+      audit_date TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('mark', 'unmark')),
+      by TEXT NOT NULL,
+      at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cash_mark_events_key ON cash_mark_events (property, audit_key);
   `);
 
   migrateSupersedeEventsToActionLog();

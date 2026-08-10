@@ -6,6 +6,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import type { Property } from "../shared/types.ts";
+import { cashMarkStates } from "./cash-marks.ts";
 import { latestCurrent, summarize } from "./storage.ts";
 
 /**
@@ -64,16 +65,32 @@ export interface StatusResponseEntry {
   latestAt: string | null;
   latestVersion: number | null;
   superseded: number;
+  /** ยืนยันชำระเงินสด (docs/plan-audit-hub-slips.md, 2026-08-10) — the
+   * settlement's current cash-mark state, mirrored from cash-marks.ts's
+   * `cashMarkStates` (the SAME "absent key = unmarked" batch it powers
+   * queue.ts's own `SlipQueueRow.cashMark`). Both fields are `null`
+   * together (never one null and the other set) when unmarked; both are
+   * populated together when marked — there is no state where only one of
+   * the pair carries a value. */
+  cashMarkedAt: string | null;
+  cashMarkedBy: string | null;
 }
 
 /** GET /slips-internal/:property/status?keys=... response body — every
  * requested key present (storage.ts's `summarize` already guarantees
- * this), so the ledger never needs an existence check before reading. */
+ * this), so the ledger never needs an existence check before reading.
+ * `cashMarkStates` itself omits an unmarked key entirely (its own "absent =
+ * unmarked" contract) — that omission is resolved to `cashMarkedAt: null,
+ * cashMarkedBy: null` right here, so this function's own "every key
+ * present" guarantee still holds for the cash-mark fields too. */
 export function buildStatusResponse(property: Property, keys: readonly string[]): Record<string, StatusResponseEntry> {
   const summaries = summarize(property, keys);
+  const cashMarks = cashMarkStates(property, keys);
   const out: Record<string, StatusResponseEntry> = {};
   for (const key of keys) {
-    out[key] = summaries.get(key) ?? { count: 0, latestAt: null, latestVersion: null, superseded: 0 };
+    const summary = summaries.get(key) ?? { count: 0, latestAt: null, latestVersion: null, superseded: 0 };
+    const cashMark = cashMarks.get(key) ?? null;
+    out[key] = { ...summary, cashMarkedAt: cashMark?.at ?? null, cashMarkedBy: cashMark?.by ?? null };
   }
   return out;
 }

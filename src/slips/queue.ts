@@ -11,6 +11,7 @@
 import { fetchDayAudit, needsSlipProof, type DayAuditRow } from "../server/day-audit.ts";
 import { pmsConfigured } from "../server/pms-prefill.ts";
 import type { Property } from "../shared/types.ts";
+import { cashMarkStates, type CashMark } from "./cash-marks.ts";
 import { listCurrentBatch, summarize, type AttachmentSummary } from "./storage.ts";
 
 export { needsSlipProof };
@@ -70,6 +71,16 @@ export interface SlipQueueRow {
    * caller can trust `currentAttachments.length === attachment.count`
    * without re-deriving it. */
   currentAttachments: SlipQueueCurrentAttachment[];
+  /** ยืนยันชำระเงินสด (docs/plan-audit-hub-slips.md, 2026-08-10): non-null
+   * when reception has marked this settlement as actually paid in cash — no
+   * slip will ever exist for it. Reversible (cash-marks.ts's `unmarkCash`);
+   * this field simply mirrors whatever the LATEST cash_mark_events row says
+   * for this key, `null` when never marked (or currently un-marked). This
+   * module does not filter a marked row out of the queue itself — the
+   * pending/resolved split is a client-side (จัดการสลิป) concern, same
+   * separation `attachment`/`currentAttachments` already keep from any
+   * pending/done UI grouping. */
+  cashMark: CashMark | null;
 }
 
 /**
@@ -86,6 +97,7 @@ export async function buildSlipQueue(property: Property, date: string): Promise<
   const auditKeys = needing.map((r) => r.auditKey);
   const summaries = summarize(property, auditKeys);
   const currentByKey = listCurrentBatch(property, auditKeys);
+  const cashMarksByKey = cashMarkStates(property, auditKeys);
 
   return needing.map((row) => ({
     auditKey: row.auditKey,
@@ -101,6 +113,7 @@ export async function buildSlipQueue(property: Property, date: string): Promise<
       createdAt: a.createdAt,
       createdBy: a.createdBy,
     })),
+    cashMark: cashMarksByKey.get(row.auditKey) ?? null,
   }));
 }
 

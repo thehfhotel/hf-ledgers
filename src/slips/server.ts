@@ -17,6 +17,7 @@ import { pmsConfigured } from "../server/pms-prefill.ts";
 import { isValidIso } from "../shared/date.ts";
 import { BOOKING_NO_MAX_LEN, isProperty } from "../shared/types.ts";
 import type { Property } from "../shared/types.ts";
+import { markCash, unmarkCash } from "./cash-marks.ts";
 import { encodeSlipImage, SlipImageError } from "./image.ts";
 import { buildStatusResponse, isValidIngressToken, latestThumbPath, parseStatusKeys } from "./internal.ts";
 import { buildSlipQueue } from "./queue.ts";
@@ -214,6 +215,45 @@ export const api = new Elysia({ prefix: "/slips-api" })
     if (!result) return status(404, { error: "attachment not found" });
     return toWireAttachment(result);
   })
+
+  // POST /slips-api/:property/cash-mark/:auditKey — ยืนยันชำระเงินสด: reception
+  // resolves a pending queue row that has no slip because it was actually
+  // paid in CASH. Idempotent (cash-marks.ts's `markCash`): re-marking an
+  // already-marked settlement is a no-op, returning the ORIGINAL mark's
+  // at/by unchanged. `date` (body) is the audited day the mark was made
+  // FROM — same provenance role as `attach`'s own `date` field, never part
+  // of the mark's identity.
+  .post(
+    "/:property/cash-mark/:auditKey",
+    ({ params, body, identity, status }) => {
+      const { property, auditKey } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (!isValidAuditKey(auditKey)) return status(400, { error: "invalid auditKey" });
+      if (!isValidIso(body.date)) return status(400, { error: "invalid date" });
+
+      const cashMark = markCash(property, auditKey, body.date, identity!.email);
+      return { auditKey, cashMark };
+    },
+    { body: t.Object({ date: t.String() }) },
+  )
+
+  // POST /slips-api/:property/cash-unmark/:auditKey — reverses cash-mark:
+  // puts the settlement back into the pending queue. Idempotent
+  // (`unmarkCash`): un-marking an already-unmarked (or never-marked)
+  // settlement is a harmless no-op.
+  .post(
+    "/:property/cash-unmark/:auditKey",
+    ({ params, body, identity, status }) => {
+      const { property, auditKey } = params;
+      if (!isProperty(property)) return status(400, { error: "invalid property" });
+      if (!isValidAuditKey(auditKey)) return status(400, { error: "invalid auditKey" });
+      if (!isValidIso(body.date)) return status(400, { error: "invalid date" });
+
+      unmarkCash(property, auditKey, body.date, identity!.email);
+      return { auditKey, cashMark: null };
+    },
+    { body: t.Object({ date: t.String() }) },
+  )
 
   // GET /slips-api/:property/picture/:auditKey/:version — serves the
   // immutable original. Superseded versions stay servable (full history

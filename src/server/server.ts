@@ -351,6 +351,10 @@ function preCutoverDepositAppliedResponse(
 // error (network, non-200, bad JSON, timeout) degrades to "every row's
 // proofCount stays 0" rather than 502ing the whole day-audit route — a
 // slip-inbox outage must never take down the ledger's own audit hub.
+// `cashMarkedAt`/`cashMarkedBy` (reception's PAID IN CASH mark on a queued
+// settlement with no slip) ride this SAME status entry — one round trip,
+// not a second lookup — and inherit the identical dark/fail-silent default
+// of `null`/`null`.
 
 const SLIPS_STATUS_URL = () => process.env.SLIPS_STATUS_URL || "";
 const SLIPS_INGRESS_TOKEN = () => process.env.SLIPS_INGRESS_TOKEN || "";
@@ -360,6 +364,11 @@ interface SlipProofStatusEntry {
   latestAt: string | null;
   latestVersion: number | null;
   superseded: number;
+  // Both null when this settlement has never been cash-marked, or when the
+  // slip service's own event log has no 'mark' as its LATEST cash_mark_events
+  // row for the (property, audit_key) — see src/slips/cash-marks.ts.
+  cashMarkedAt: string | null;
+  cashMarkedBy: string | null;
 }
 
 type SlipProofFetcher = (property: Property, auditKeys: readonly string[]) => Promise<Map<string, SlipProofStatusEntry>>;
@@ -1679,7 +1688,16 @@ export const api = new Elysia({ prefix: "/api" })
   // service actually answered) — the safer failure direction is "still
   // shows pending", never silently hiding a missing-slip signal. A row that
   // never needed a slip (cash-only) always reads `proofCount: 0,
-  // proofsPending: false`. `rows` sorts PENDING FIRST (`Array#sort` is
+  // proofsPending: false`. `cashMarkedAt`/`cashMarkedBy` ride the SAME
+  // `fetchSlipProofStatus` round trip — `null`/`null` for a row that was
+  // never eligible, was never asked about (dark/failed fetch), or simply
+  // was never cash-marked; otherwise reception's own mark timestamp/actor.
+  // The client uses this to swap the red รอสลิป chip for a calm เงินสด one
+  // WITHOUT touching `proofsPending` itself — a cash-marked settlement with
+  // an attachment still shows the attachment (thumbnail wins), and one with
+  // neither still reads `proofsPending: true` underneath the cash chip, so
+  // nothing downstream that keys off `proofsPending` needs to change.
+  // `rows` sorts PENDING FIRST (`Array#sort` is
   // stable, so each checked/pending bucket keeps `buildDayAuditRows`' own
   // newest-first-by-`paidAtIso` order — `sortDayAuditRows`, owner ask
   // 2026-08-04 — as a secondary key: within EITHER bucket, rows are date+time
@@ -1712,7 +1730,8 @@ export const api = new Elysia({ prefix: "/api" })
     const rows = rawRows.map((row) => {
       const own = checkedByKey.get(row.auditKey);
       const eligible = needsSlipProof(row);
-      const proofCount = eligible ? (proofByKey.get(row.auditKey)?.count ?? 0) : 0;
+      const proofEntry = eligible ? proofByKey.get(row.auditKey) : undefined;
+      const proofCount = proofEntry?.count ?? 0;
       const base = {
         ...row,
         checked: own !== undefined,
@@ -1720,6 +1739,8 @@ export const api = new Elysia({ prefix: "/api" })
         checkedBy: own?.checkedBy ?? null,
         proofCount,
         proofsPending: eligible && proofCount === 0,
+        cashMarkedAt: proofEntry?.cashMarkedAt ?? null,
+        cashMarkedBy: proofEntry?.cashMarkedBy ?? null,
       };
       if (base.kind === "checkin" && base.depositApplied !== null) {
         const { depositApplied } = base;

@@ -3039,18 +3039,20 @@ describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () =
     ];
     dayAuditInternal.setFetchDayAuditForTests(async () => rows);
 
-    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean }> }>(
-      "GET",
-      `/${PROPERTY}/audit/day/${DATE}`,
-    );
+    const res = await call<{
+      rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean; cashMarkedAt: string | null; cashMarkedBy: string | null }>;
+    }>("GET", `/${PROPERTY}/audit/day/${DATE}`);
     const byKey = new Map(res.body.rows.map((r) => [r.auditKey, r]));
     expect(byKey.get("CH26-400001")?.proofCount).toBe(0);
     expect(byKey.get("CH26-400001")?.proofsPending).toBe(true); // needs a slip (transfer), none reachable
+    expect(byKey.get("CH26-400001")?.cashMarkedAt).toBeNull(); // dark by default — never invented
+    expect(byKey.get("CH26-400001")?.cashMarkedBy).toBeNull();
     expect(byKey.get("R2608-0400")?.proofCount).toBe(0);
     expect(byKey.get("R2608-0400")?.proofsPending).toBe(false); // cash-tendered — never needed one
+    expect(byKey.get("R2608-0400")?.cashMarkedAt).toBeNull();
   });
 
-  test("real enrichment: reflects the slip service's own counts for eligible rows only", async () => {
+  test("real enrichment: reflects the slip service's own counts AND cash-mark state for eligible rows only", async () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";
     const rows: DayAuditRow[] = [
@@ -3060,6 +3062,11 @@ describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () =
         composition: { cashSatang: 0, transferSatang: 100_000, creditSatang: 0, webSatang: 0, penaltySatang: 0 },
       }),
       auditRefundRow({ auditKey: "R2607-0501", tender: "transfer" }),
+      // Cash-marked in the slips inbox (no slip exists) — proofCount stays 0
+      // and proofsPending stays true (an attachment, not a cash mark, is
+      // what clears proofsPending), but cashMarkedAt/By now carry reception's
+      // own mark for the client's เงินสด chip.
+      auditDepositRow({ auditKey: "R2608-0502", tender: "transfer" }),
     ];
     dayAuditInternal.setFetchDayAuditForTests(async () => rows);
 
@@ -3067,24 +3074,43 @@ describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () =
     serverInternal.setSlipProofFetchForTests(async (_property, keys) => {
       requestedKeys = keys;
       return new Map([
-        ["CH26-500001", { count: 2, latestAt: "2026-08-15 10:00:00", latestVersion: 2, superseded: 0 }],
-        // R2607-0501 deliberately absent — the route must default it to 0/pending.
+        [
+          "CH26-500001",
+          { count: 2, latestAt: "2026-08-15 10:00:00", latestVersion: 2, superseded: 0, cashMarkedAt: null, cashMarkedBy: null },
+        ],
+        // R2607-0501 deliberately absent — the route must default it to 0/pending/null.
+        [
+          "R2608-0502",
+          {
+            count: 0,
+            latestAt: null,
+            latestVersion: null,
+            superseded: 0,
+            cashMarkedAt: "2026-08-15 09:30:00",
+            cashMarkedBy: "reception@thehfhotel.org",
+          },
+        ],
       ]);
     });
 
-    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean }> }>(
-      "GET",
-      `/${PROPERTY}/audit/day/${DATE}`,
-    );
+    const res = await call<{
+      rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean; cashMarkedAt: string | null; cashMarkedBy: string | null }>;
+    }>("GET", `/${PROPERTY}/audit/day/${DATE}`);
     // Only the rows that actually need a slip are even asked about — a
     // cash-only row would waste a lookup.
-    expect([...requestedKeys].sort()).toEqual(["CH26-500001", "R2607-0501"]);
+    expect([...requestedKeys].sort()).toEqual(["CH26-500001", "R2607-0501", "R2608-0502"]);
 
     const byKey = new Map(res.body.rows.map((r) => [r.auditKey, r]));
     expect(byKey.get("CH26-500001")?.proofCount).toBe(2);
     expect(byKey.get("CH26-500001")?.proofsPending).toBe(false);
+    expect(byKey.get("CH26-500001")?.cashMarkedAt).toBeNull(); // has a slip, was never cash-marked
     expect(byKey.get("R2607-0501")?.proofCount).toBe(0);
     expect(byKey.get("R2607-0501")?.proofsPending).toBe(true);
+    expect(byKey.get("R2607-0501")?.cashMarkedAt).toBeNull(); // absent from the map entirely — defaults null, never invented
+    expect(byKey.get("R2608-0502")?.proofCount).toBe(0);
+    expect(byKey.get("R2608-0502")?.proofsPending).toBe(true); // still pending underneath — attachment presence, not cash mark, clears this
+    expect(byKey.get("R2608-0502")?.cashMarkedAt).toBe("2026-08-15 09:30:00");
+    expect(byKey.get("R2608-0502")?.cashMarkedBy).toBe("reception@thehfhotel.org");
   });
 
   test("office-side รอสลิป reversion: a settlement whose only current picture was taken out (นำออก) explicitly reports count 0, and proofsPending flips back to true", async () => {
@@ -3104,7 +3130,9 @@ describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () =
     // distinct from "never had one at all" (also count: 0, superseded: 0),
     // but the ledger's own `proofsPending` derivation treats both the same
     // way — count is 0, so a slip is still needed.
-    serverInternal.setSlipProofFetchForTests(async () => new Map([["CH26-550001", { count: 0, latestAt: null, latestVersion: null, superseded: 1 }]]));
+    serverInternal.setSlipProofFetchForTests(
+      async () => new Map([["CH26-550001", { count: 0, latestAt: null, latestVersion: null, superseded: 1, cashMarkedAt: null, cashMarkedBy: null }]]),
+    );
 
     const res = await call<{ rows: Array<{ auditKey: string; proofCount: number; proofsPending: boolean }> }>(
       "GET",
@@ -3115,7 +3143,7 @@ describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () =
     expect(row?.proofsPending).toBe(true); // reverts to รอสลิป, exactly like a settlement that never had a slip
   });
 
-  test("fail-silent: a throwing fetch degrades to proofCount 0 everywhere, never a 502", async () => {
+  test("fail-silent: a throwing fetch degrades to proofCount 0 and cashMarkedAt/By null everywhere, never a 502", async () => {
     process.env.PMS_DB_URL_HF = "postgresql://readonly@fake-pms-test/hf";
     process.env.SLIPS_STATUS_URL = "http://hf-slips:4060";
     const rows: DayAuditRow[] = [
@@ -3130,9 +3158,14 @@ describe("Wave 2: slip-proof enrichment on GET /:property/audit/day/:date", () =
       throw new Error("slips service unreachable");
     });
 
-    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number }> }>("GET", `/${PROPERTY}/audit/day/${DATE}`);
+    const res = await call<{ rows: Array<{ auditKey: string; proofCount: number; cashMarkedAt: string | null; cashMarkedBy: string | null }> }>(
+      "GET",
+      `/${PROPERTY}/audit/day/${DATE}`,
+    );
     expect(res.status).toBe(200); // never 502s the whole route
     expect(res.body.rows[0]!.proofCount).toBe(0);
+    expect(res.body.rows[0]!.cashMarkedAt).toBeNull(); // a throwing override degrades exactly like a real network failure
+    expect(res.body.rows[0]!.cashMarkedBy).toBeNull();
   });
 
   test("a row that never needs a slip never triggers a lookup at all", async () => {

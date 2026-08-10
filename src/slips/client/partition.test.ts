@@ -13,6 +13,7 @@ function row(overrides: Partial<SlipQueueRow> = {}): SlipQueueRow {
     transferSatang: 100_000,
     attachment: { count: 0, latestAt: null, latestVersion: null, superseded: 0 },
     currentAttachments: [],
+    cashMark: null,
     ...overrides,
   };
 }
@@ -67,5 +68,32 @@ describe("partitionSlipQueue", () => {
 
   test("an empty list partitions into two empty lists", () => {
     expect(partitionSlipQueue([])).toEqual({ pending: [], attached: [] });
+  });
+
+  test("a cash-marked row with zero attachments lands in attached (จัดการสลิป), not pending", () => {
+    const rows = [row({ auditKey: "CASH", cashMark: { at: "2026-08-10 10:00:00", by: "reception@thehfhotel.org" } })];
+    const { pending, attached } = partitionSlipQueue(rows);
+    expect(pending).toEqual([]);
+    expect(attached.map((r) => r.auditKey)).toEqual(["CASH"]);
+  });
+
+  test("unmarking (cashMark back to null) returns the row to pending", () => {
+    const rows = [row({ auditKey: "UNMARKED", cashMark: null })];
+    const { pending, attached } = partitionSlipQueue(rows);
+    expect(pending.map((r) => r.auditKey)).toEqual(["UNMARKED"]);
+    expect(attached).toEqual([]);
+  });
+
+  test("a row with BOTH an attachment and a cash mark stays attached (either condition alone is enough)", () => {
+    const rows = [
+      row({
+        auditKey: "BOTH",
+        attachment: { count: 1, latestAt: "2026-08-03T09:00:00.000Z", latestVersion: 1, superseded: 0 },
+        cashMark: { at: "2026-08-10 10:00:00", by: "reception@thehfhotel.org" },
+      }),
+    ];
+    const { pending, attached } = partitionSlipQueue(rows);
+    expect(pending).toEqual([]);
+    expect(attached.map((r) => r.auditKey)).toEqual(["BOTH"]);
   });
 });

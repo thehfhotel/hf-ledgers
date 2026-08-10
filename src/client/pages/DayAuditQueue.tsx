@@ -324,13 +324,16 @@ function needsSlipProof(row: DayAuditRow): boolean {
 /** สลิป cell (Wave 2): a settlement that never needed a transfer slip shows
  * a plain dash. One that does shows either a thumbnail + count (a ledger-
  * proxied, auth'd route — GET /api/:property/audit/proof-thumb/:auditKey —
- * so the office browser never needs the slips origin directly) or a
- * รอสลิป chip when `proofsPending` — a missing slip is an audit signal on
- * both sides, per the plan. The thumbnail img has no onError fallback
- * beyond simply not rendering broken-image chrome poorly — a 404/502 from
- * the proxy (slips service down, or genuinely no thumbnail yet) is exactly
- * as informative as รอสลิป would be, so this stays a thin `<img>`, never a
- * second network call to check existence first.
+ * so the office browser never needs the slips origin directly), a neutral
+ * เงินสด chip when reception marked it PAID IN CASH from the slips inbox
+ * (no slip exists, and none is coming), or a รอสลิป chip when `proofsPending`
+ * and no cash mark — a missing slip with no explanation is the actual audit
+ * signal, per the plan; a missing slip reception already accounted for as
+ * cash is not. The thumbnail img has no onError fallback beyond simply not
+ * rendering broken-image chrome poorly — a 404/502 from the proxy (slips
+ * service down, or genuinely no thumbnail yet) is exactly as informative as
+ * รอสลิป would be, so this stays a thin `<img>`, never a second network
+ * call to check existence first.
  *
  * `row.proofCount` is `SlipProofStatusEntry.count` from src/server/server.ts's
  * own `fetchSlipProofStatus` (server.ts endpoint 34), which is itself
@@ -347,11 +350,33 @@ function needsSlipProof(row: DayAuditRow): boolean {
  * fields for "how many pictures does this settlement currently have". A
  * settlement whose only current picture gets taken out (นำออก) drops
  * `count` to 0, which flips `proofsPending` back to `true` above — this
- * chip reverts to รอสลิป automatically, no separate wiring needed. */
+ * chip reverts to รอสลิป automatically (or to เงินสด, if it also carries a
+ * cash mark), no separate wiring needed.
+ *
+ * ATTACHMENT PRESENCE DOMINATES: `row.proofCount > 0` always wins and shows
+ * the thumbnail, regardless of `row.cashMarkedAt` — reception marking a
+ * settlement cash and then later actually finding/attaching its slip is a
+ * real sequence (the cash mark predates the slip), and the thumbnail is
+ * strictly more informative once a slip exists. The เงินสด chip is
+ * therefore only reachable through the SAME `row.proofsPending` branch the
+ * รอสลิป chip used to own alone — `row.cashMarkedAt` is a non-null
+ * `CashMark.at` timestamp (src/slips/cash-marks.ts's `markCash`/
+ * `cashMarkStates`) precisely when reception has marked this settlement,
+ * title-annotated with `row.cashMarkedBy` so a hover explains who. */
 function SlipProofCell({ row, property }: { row: DayAuditRow; property: Property }) {
   if (!needsSlipProof(row)) return <span className="text-ink-muted">-</span>;
 
   if (row.proofsPending) {
+    if (row.cashMarkedAt) {
+      return (
+        <span
+          className="rounded-full bg-tint px-2 py-0.5 text-[11px] font-medium text-ink-muted"
+          title={`บันทึกเงินสดโดย ${row.cashMarkedBy}`}
+        >
+          เงินสด
+        </span>
+      );
+    }
     return <span className="rounded-full bg-bad/15 px-2 py-0.5 text-[11px] font-semibold text-bad">รอสลิป</span>;
   }
 

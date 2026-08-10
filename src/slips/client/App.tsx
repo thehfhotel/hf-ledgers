@@ -9,13 +9,16 @@ import {
   attachSlip,
   getMe,
   getSlipQueue,
+  markCash,
   pictureUrl,
   supersedeSlip,
   thumbUrl,
+  unmarkCash,
   type Me,
   type SlipQueueRow,
 } from "./api.ts";
 import { AttachModal } from "./components/AttachModal.tsx";
+import { CashConfirmDialog } from "./components/CashConfirmDialog.tsx";
 import { HistoryDrawer } from "./components/HistoryDrawer.tsx";
 import { RemoveConfirmDialog } from "./components/RemoveConfirmDialog.tsx";
 import { historyCount, shouldShowCountBadge } from "./gallery.ts";
@@ -65,8 +68,24 @@ export function App() {
   const [tab, setTab] = useState<Tab>("pending");
   // Owner ask (2026-08-04): immediate, explicit feedback on a successful
   // attach — never let the row's move to จัดการสลิป read as a silent
-  // vanish. `true` shows the toast; auto-dismisses below.
-  const [showAttachToast, setShowAttachToast] = useState(false);
+  // vanish. Generalized from a boolean to the message's own leading text
+  // (`null` = hidden) so the same toast + jump-to-tab affordance also
+  // covers a successful cash mark, which lands the row in จัดการสลิป by
+  // exactly the same "moved, not vanished" logic as an attach. Auto-
+  // dismisses below.
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  // จ่ายเงินสด — ไม่มีสลิป: which pending row's confirm dialog is open, or
+  // `null` when closed. Holds the whole row (not just auditKey) so the
+  // confirm handler below never has to re-find it in `rows`.
+  const [cashConfirmRow, setCashConfirmRow] = useState<SlipQueueRow | null>(null);
+  // ยกเลิกเงินสด is a direct, non-dialog button (unlike the mark going in,
+  // and unlike นำออก) — nothing else on this page catches its rejection, so
+  // it needs its own busy/error state here rather than relying on a dialog's
+  // caller-side try/catch. Scoped by auditKey (not a single flag) since
+  // จัดการสลิป can list many cash-marked rows at once; mirrors
+  // HistoryDrawer.handleRestore's restoringVersion/restoreError pair.
+  const [unmarkingCashKey, setUnmarkingCashKey] = useState<string | null>(null);
+  const [unmarkCashError, setUnmarkCashError] = useState<{ auditKey: string; message: string } | null>(null);
 
   useEffect(() => {
     getMe()
@@ -128,14 +147,14 @@ export function App() {
     return () => window.removeEventListener("paste", onPaste);
   }, [pasteTargetKey, rows]);
 
-  // Auto-dismiss the attach-success toast — a lingering confirmation is as
-  // much noise as no confirmation at all; the tab pill itself (with its own
-  // live count) stays the permanent record of where the row went.
+  // Auto-dismiss the success toast — a lingering confirmation is as much
+  // noise as no confirmation at all; the tab pill itself (with its own live
+  // count) stays the permanent record of where the row went.
   useEffect(() => {
-    if (!showAttachToast) return;
-    const t = setTimeout(() => setShowAttachToast(false), 6000);
+    if (!toastMessage) return;
+    const t = setTimeout(() => setToastMessage(null), 6000);
     return () => clearTimeout(t);
-  }, [showAttachToast]);
+  }, [toastMessage]);
 
   const filtered = useMemo(() => (rows ?? []).filter((r) => matchesSearch(r, search)), [rows, search]);
   const { pending, attached } = useMemo(() => partitionSlipQueue(filtered), [filtered]);
@@ -148,7 +167,44 @@ export function App() {
     // the pending list still shows the stale (pre-attach) state.
     await reloadQueue();
     setModal(null);
-    setShowAttachToast(true);
+    setToastMessage("แนบสลิปแล้ว");
+  }
+
+  // จ่ายเงินสด — ไม่มีสลิป: CashConfirmDialog's own onConfirm. Same
+  // reload-before-close discipline as handleSave above — by the time the
+  // dialog disappears, `rows` already reflects the mark (the row has
+  // already moved into จัดการสลิป), so there is no window where the dialog
+  // is gone but the pending list still shows the stale (unmarked) state.
+  async function handleConfirmCashMark() {
+    if (!cashConfirmRow) return;
+    await markCash(property, cashConfirmRow.auditKey, date);
+    await reloadQueue();
+    setCashConfirmRow(null);
+    setToastMessage("บันทึกเงินสดแล้ว");
+  }
+
+  // ยกเลิกเงินสด — the undo IS the action (no confirm dialog, unlike
+  // marking): a mistaken cash mark just needs to come back off, and the
+  // mark itself already required a confirm on the way in. Reloads before
+  // returning so the row's move back to รอแนบสลิป is never behind stale
+  // state, same discipline as every other mutation on this page. try/catch
+  // + a visible Thai error mirrors HistoryDrawer.handleRestore — this is
+  // the only OTHER mutation on the page whose button isn't wrapped by a
+  // dialog's own catch, so it needs the exact same net.
+  async function handleUnmarkCash(row: SlipQueueRow) {
+    setUnmarkingCashKey(row.auditKey);
+    setUnmarkCashError(null);
+    try {
+      await unmarkCash(property, row.auditKey, date);
+      await reloadQueue();
+    } catch (err) {
+      setUnmarkCashError({
+        auditKey: row.auditKey,
+        message: err instanceof ApiError ? err.message : "ยกเลิกเงินสดไม่สำเร็จ",
+      });
+    } finally {
+      setUnmarkingCashKey(null);
+    }
   }
 
   // นำออก: supersedes exactly the one version the confirm dialog is asking
@@ -259,6 +315,7 @@ export function App() {
                       onFocusZone={() => setPasteTargetKey(row.auditKey)}
                       onBlurZone={() => setPasteTargetKey((prev) => (prev === row.auditKey ? null : prev))}
                       onFilesChosen={(files) => setModal({ row, initialFiles: files })}
+                      onRequestCashMark={() => setCashConfirmRow(row)}
                     />
                   ))}
                 </ul>
@@ -282,6 +339,9 @@ export function App() {
                       onAddMore={() => setModal({ row, initialFiles: [] })}
                       onShowHistory={() => setHistoryKey(row.auditKey)}
                       onRequestRemove={(version) => setRemoveTarget({ auditKey: row.auditKey, version })}
+                      onUnmarkCash={() => void handleUnmarkCash(row)}
+                      unmarkingCash={unmarkingCashKey === row.auditKey}
+                      unmarkCashError={unmarkCashError?.auditKey === row.auditKey ? unmarkCashError.message : null}
                     />
                   ))}
                 </ul>
@@ -309,21 +369,25 @@ export function App() {
 
       {removeTarget && <RemoveConfirmDialog onCancel={() => setRemoveTarget(null)} onConfirm={handleConfirmRemove} />}
 
-      {/* Attach-success toast (owner ask, 2026-08-04) — explicit "it went
-          HERE" feedback the instant a slip saves, with a direct jump. Never
-          blocks the UI (fixed, dismissible, auto-clears) and never appears
-          for a "replace"/supersede-only outcome differently — every
-          successful save (add or replace) lands the settlement in จัดการสลิป,
-          so the same message covers both. */}
-      {showAttachToast && (
+      {cashConfirmRow && <CashConfirmDialog onCancel={() => setCashConfirmRow(null)} onConfirm={handleConfirmCashMark} />}
+
+      {/* Success toast (owner ask, 2026-08-04, extended to cover the cash
+          mark) — explicit "it went HERE" feedback the instant a slip saves
+          OR a cash mark is recorded, with a direct jump. Never blocks the
+          UI (fixed, dismissible, auto-clears) and never distinguishes
+          "add"/"replace"/"cash mark" beyond the leading verb in
+          `toastMessage` — every successful save lands the settlement in
+          จัดการสลิป, so the trailing "ดูได้ที่แท็บ จัดการสลิป" + jump button is
+          shared verbatim by both messages. */}
+      {toastMessage && (
         <div className="fixed inset-x-3 bottom-3 z-40 flex items-center justify-between gap-3 rounded-lg bg-brand-800 px-4 py-3 text-sm text-white shadow-xl">
           <span>
-            แนบสลิปแล้ว — ดูได้ที่แท็บ{" "}
+            {toastMessage} — ดูได้ที่แท็บ{" "}
             <button
               type="button"
               onClick={() => {
                 setTab("manage");
-                setShowAttachToast(false);
+                setToastMessage(null);
               }}
               className="font-semibold underline underline-offset-2 hover:text-gold-200"
             >
@@ -332,7 +396,7 @@ export function App() {
           </span>
           <button
             type="button"
-            onClick={() => setShowAttachToast(false)}
+            onClick={() => setToastMessage(null)}
             aria-label="ปิดข้อความแจ้งเตือน"
             className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-white/70 hover:text-white"
           >
@@ -364,9 +428,13 @@ interface PendingCardProps {
   onFocusZone: () => void;
   onBlurZone: () => void;
   onFilesChosen: (files: File[]) => void;
+  /** Opens CashConfirmDialog for this row — the mark itself is App.tsx's
+   * job (handleConfirmCashMark), same "card requests, App owns the network
+   * call" split every other card action here already follows. */
+  onRequestCashMark: () => void;
 }
 
-function PendingCard({ row, onFocusZone, onBlurZone, onFilesChosen }: PendingCardProps) {
+function PendingCard({ row, onFocusZone, onBlurZone, onFilesChosen, onRequestCashMark }: PendingCardProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   return (
@@ -409,6 +477,22 @@ function PendingCard({ row, onFocusZone, onBlurZone, onFilesChosen }: PendingCar
           }}
         />
       </div>
+
+      {/* จ่ายเงินสด — ไม่มีสลิป: a SECONDARY action, deliberately quieter than
+          the dashed แนบสลิป zone above it (outline, not filled; muted ink,
+          not brand color) — the slip-photo path stays the default reception
+          reaches for, this is the escape hatch for the settlements that were
+          genuinely never going to have one. Opens CashConfirmDialog rather
+          than acting immediately, same "one tap isn't enough" gate นำออก
+          gets, since this is reception asserting a fact (cash was received)
+          the app cannot itself verify. */}
+      <button
+        type="button"
+        onClick={onRequestCashMark}
+        className="mt-1.5 rounded-md border border-line px-2 py-1 text-[11px] text-ink-muted hover:border-line-strong hover:bg-tint"
+      >
+        จ่ายเงินสด — ไม่มีสลิป
+      </button>
     </li>
   );
 }
@@ -419,6 +503,20 @@ interface AttachedCardProps {
   onAddMore: () => void;
   onShowHistory: () => void;
   onRequestRemove: (version: number) => void;
+  /** ยกเลิกเงินสด — App.tsx's handleUnmarkCash. No confirm dialog: the
+   * button press itself IS the undo (see the button's own inline comment
+   * below for why that's fine here but not for the mark going in). */
+  onUnmarkCash: () => void;
+  /** True while THIS row's ยกเลิกเงินสด round trip is in flight — disables
+   * the button so a slow/failed request can't be re-tapped into a pile of
+   * duplicate calls (unmarkCash is idempotent server-side, but there's no
+   * reason to invite the race). */
+  unmarkingCash: boolean;
+  /** Set only after a failed ยกเลิกเงินสด for THIS row (App.tsx scopes it by
+   * auditKey since จัดการสลิป can list many cash-marked rows at once);
+   * `null` clears it, same "does not hide anything else" discipline
+   * HistoryDrawer's restoreError follows. */
+  unmarkCashError: string | null;
 }
 
 /**
@@ -432,8 +530,27 @@ interface AttachedCardProps {
  * HistoryDrawer's own rows, so ประวัติ below stays the one SEPARATE,
  * explicit path to full version history/restore rather than overloading the
  * same tap gesture two different ways.
+ *
+ * A row lands here for either of two independent reasons (partition.ts):
+ * it has a current attachment, or it's cash-marked (`row.cashMark`), or
+ * both. Cash-marked-with-zero-attachments is the common case: the
+ * thumbnail strip then shows nothing but the "+ เพิ่มรูป" tile, which is
+ * left in place on purpose — a slip can still surface later without first
+ * requiring ยกเลิกเงินสด, since the two states (has a slip / was cash-
+ * settled) are independent facts, not a toggle between two exclusive ones.
+ * ประวัติ is hidden entirely in that case (`historyCount === 0`, nothing to
+ * show yet) rather than reading "ประวัติ (0 รายการ)".
  */
-function AttachedCard({ property, row, onAddMore, onShowHistory, onRequestRemove }: AttachedCardProps) {
+function AttachedCard({
+  property,
+  row,
+  onAddMore,
+  onShowHistory,
+  onRequestRemove,
+  onUnmarkCash,
+  unmarkingCash,
+  unmarkCashError,
+}: AttachedCardProps) {
   const { attachment, currentAttachments } = row;
   const showBadge = shouldShowCountBadge(attachment.count);
   const nHistory = historyCount(attachment);
@@ -451,6 +568,9 @@ function AttachedCard({ property, row, onAddMore, onShowHistory, onRequestRemove
         <div className="flex flex-col gap-0.5">
           <span className="flex items-center gap-1.5">
             <span className="rounded-full bg-tint px-2 py-0.5 text-[11px] font-medium text-ink-muted">{KIND_LABEL_TH[row.kind]}</span>
+            {row.cashMark && (
+              <span className="rounded-full bg-tint px-2 py-0.5 text-[11px] font-medium text-ink-muted">เงินสด</span>
+            )}
             {showBadge && (
               <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-brand-500 px-1 text-[10px] font-semibold text-white">
                 {attachment.count}
@@ -498,14 +618,50 @@ function AttachedCard({ property, row, onAddMore, onShowHistory, onRequestRemove
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-1">
-        <button type="button" onClick={onShowHistory} className="text-[11px] text-brand-500 hover:underline">
-          ประวัติ ({nHistory} รายการ)
-        </button>
-        {latest && (
-          <span className="text-[11px] text-ink-muted">
-            แนบล่าสุด {timeBangkok(latest.createdAt) ?? "-"} · {latest.createdBy}
-          </span>
+      <div className="flex flex-col gap-1">
+        {/* ประวัติ has nothing to show on a cash-marked, never-attached row
+            (nHistory === 0 — count + superseded, gallery.ts's own rule) —
+            hidden rather than reading "ประวัติ (0 รายการ)". แนบล่าสุด is
+            likewise only ever present when a current attachment exists. */}
+        {(nHistory > 0 || latest) && (
+          <div className="flex flex-wrap items-center justify-between gap-1">
+            {nHistory > 0 && (
+              <button type="button" onClick={onShowHistory} className="text-[11px] text-brand-500 hover:underline">
+                ประวัติ ({nHistory} รายการ)
+              </button>
+            )}
+            {latest && (
+              <span className="text-[11px] text-ink-muted">
+                แนบล่าสุด {timeBangkok(latest.createdAt) ?? "-"} · {latest.createdBy}
+              </span>
+            )}
+          </div>
+        )}
+        {row.cashMark && (
+          <div className="flex flex-col gap-0.5">
+            <div className="flex flex-wrap items-center justify-between gap-1">
+              <span className="text-[11px] text-ink-muted">
+                บันทึกเงินสด {timeBangkok(row.cashMark.at) ?? "-"} · {row.cashMark.by}
+              </span>
+              {/* No confirm dialog here — unlike the mark going in
+                  (CashConfirmDialog), taking it back off is non-destructive
+                  to any real record (it only ever un-does this app's own
+                  claim) and the mark itself already required a confirm on
+                  the way in. Same text-button idiom as ประวัติ above; disabled
+                  while in flight and on a visible error, same as
+                  HistoryDrawer's กู้คืน button, since this one has no dialog
+                  wrapper to catch a rejection on its behalf. */}
+              <button
+                type="button"
+                onClick={onUnmarkCash}
+                disabled={unmarkingCash}
+                className="text-[11px] text-brand-500 hover:underline disabled:opacity-50"
+              >
+                {unmarkingCash ? "กำลังยกเลิก..." : "ยกเลิกเงินสด"}
+              </button>
+            </div>
+            {unmarkCashError && <p className="text-[11px] text-bad">{unmarkCashError}</p>}
+          </div>
         )}
       </div>
     </li>

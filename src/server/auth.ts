@@ -4,7 +4,7 @@
 //   - development ONLY (NODE_ENV === "development"): DEV_USER env bypass.
 //     Any other NODE_ENV value ignores DEV_USER — fails closed.
 //   - else: verify the `cf-access-jwt-assertion` header (RS256, JWKS cached
-//     1h, iss/aud/exp/nbf) — pattern copied from /Users/nut/hf-mcp/src/auth.ts.
+//     1h, iss/aud/exp/nbf) — pattern copied from /Users/nut/HF/hf-mcp/src/auth.ts.
 //
 // There are no roles in this app — Cloudflare Access alone decides who may
 // reach income.thehfhotel.org, so identify() only resolves WHO the caller is

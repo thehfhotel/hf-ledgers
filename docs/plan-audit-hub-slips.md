@@ -60,7 +60,7 @@ slips carry bank account numbers).
 
 Port corrected 2026-08-03 (Opus security review, B1): originally spec'd as 4050, but 4050 is
 ALREADY the Expense Ledger's port on the estate map
-(`~/HF-erp/infra/cloudflare/hostnames.json` → `expense.thehfhotel.org` → `192.168.100.228:4050`,
+(`~/HF/HF-erp/infra/cloudflare/hostnames.json` → `expense.thehfhotel.org` → `192.168.100.228:4050`,
 its own engine on 4051) — publishing hf-slips on 4050 would collide with/take down Expense
 Ledger. hf-slips uses **4060** (internal container port and published host port both), verified
 free across the estate map.

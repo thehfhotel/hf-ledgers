@@ -1,8 +1,29 @@
+# PARKED — NOT A LIVE WORKFLOW.
+#
+# GitHub only loads `.github/workflows/*.yml`/`*.yaml`, so this `.pre-hf-ledgers`
+# suffix makes the file inert without deleting the one working copy of the
+# deploy pipeline. Parked during the income-ledger -> hf-ledgers monorepo merge
+# (2026-08-13): from the merge commit on, this file's assumptions are wrong —
+# the repo now holds two apps, the image build context needs `packages/`, and
+# `expense-ledger/` ships its own image. Left running, the first push to main
+# would have built and shipped a container whose `packages/shared` imports
+# resolve to nothing and crash-loop on boot.
+#
+# Same trick as the estate-ci pilot's `deploy.yml.pre-estate-ci` in
+# housekeeping. Restored (rewritten, path-filtered, per-app) by the monorepo
+# CI restructure step of M3 — see hf-tasks `tasks/consolidation.md`. Delete
+# this file once that lands and one real deploy has gone out green.
+#
+# Original content below, unchanged except for the disabled `on:` block.
+
 name: Build & Deploy
 
+# Triggers removed on purpose (see the PARKED note above). The original was:
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 # Mirrors the estate's forced-command SSH deploy pattern (room-daily-reporter,

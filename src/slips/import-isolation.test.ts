@@ -11,8 +11,15 @@
 // `import()` specifier — this codebase's convention is to always include
 // the literal `.ts`/`.tsx` extension, so no extension-guessing is needed)
 // starting from every non-test file under src/slips, transitively,
-// following into src/server/*.ts and src/shared/*.ts wherever those get
-// pulled in — and fails loudly if either forbidden file is ever reached.
+// following into src/server/*.ts, src/shared/*.ts and packages/shared
+// wherever those get pulled in — and fails loudly if either forbidden file
+// is ever reached.
+//
+// `@shared/*` is resolved here rather than skipped as a package import. It
+// is a tsconfig path alias to packages/shared/src, i.e. first-party source
+// in this repo, and treating it as an opaque package would put a hole in
+// exactly the graph this test exists to keep whole: a shared module that
+// grew an import of src/server/db.ts would become invisible to the walk.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -43,7 +50,11 @@ function extractSpecs(content: string): string[] {
   return specs;
 }
 
+const SHARED_ALIAS = "@shared/";
+const SHARED_ROOT = resolve(REPO_ROOT, "packages/shared/src");
+
 function resolveSpec(fromFile: string, spec: string): string | null {
+  if (spec.startsWith(SHARED_ALIAS)) return resolve(SHARED_ROOT, spec.slice(SHARED_ALIAS.length));
   if (!spec.startsWith(".")) return null; // bare package import (react, elysia, sharp, ...) — not part of THIS repo's graph
   return resolve(dirname(fromFile), spec);
 }
@@ -95,10 +106,13 @@ describe("import-graph isolation: src/slips never reaches the ledger's own serve
     expect(offenders).toEqual([]);
   });
 
-  test("sanity: the graph DOES legitimately reach the three side-effect-free src/server files this design deliberately reuses", () => {
+  test("sanity: the graph DOES legitimately reach the side-effect-free modules this design deliberately reuses", () => {
     const entryFiles = listSlipsSourceFiles(SLIPS_ROOT);
     const visited = walkImportGraph(entryFiles);
-    for (const expected of ["src/server/auth.ts", "src/server/day-audit.ts", "src/server/pms-prefill.ts"]) {
+    // packages/shared/src/access.ts is the CF Access verifier, which used to
+    // live at src/server/auth.ts — its presence here also proves the
+    // @shared/ alias is actually being followed, not silently skipped.
+    for (const expected of ["packages/shared/src/access.ts", "src/server/day-audit.ts", "src/server/pms-prefill.ts"]) {
       expect(visited.has(resolve(REPO_ROOT, expected))).toBe(true);
     }
   });

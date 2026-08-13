@@ -250,7 +250,7 @@ independently: `GET day`/`GET days`/`PUT income` all read through
 its own `isCash`), and `PUT .../income/:categoryId` 400s a direct write to
 either of those two categoryIds while items exist.
 
-## Auth (`src/server/auth.ts`)
+## Auth (`packages/shared/src/access.ts`)
 
 `identify(req)` resolves the caller to `{ email } | null` (`Identity`):
 
@@ -269,8 +269,16 @@ any verified identity, including the office-1 and reception kiosk logins.
 
 Elysia wiring: a scoped `derive` resolves identity and a top-level
 `onBeforeHandle` 401s when it is absent. Static assets and `GET /healthz`
-are unguarded — Cloudflare Access fronts the whole host, so the app-side
-check is defense in depth for the API, not the only gate.
+are unguarded.
+
+This app-side check is NOT merely defense in depth, and an earlier version of
+this paragraph saying so was wrong. Cloudflare Access fronts the public
+hostname, but `docker-compose.yml` binds this container on `0.0.0.0:4040`
+(and the slips container on `0.0.0.0:4060`), so any device already on the LAN
+reaches the process directly without passing through Cloudflare — and on that
+path `verifyAccessJwt` is the only gate there is. That is why an unset
+`ACCESS_AUD` fails CLOSED rather than skipping the audience check; see
+`packages/shared/src/access.ts`'s file header and its test suite.
 
 ## Error shape
 

@@ -1,7 +1,7 @@
 import { Elysia, t } from "elysia";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { identify } from "./auth.ts";
+import { identify } from "@shared/access.ts";
 import {
   applyPmsCandidateToBookingLine,
   categoriesForDay,

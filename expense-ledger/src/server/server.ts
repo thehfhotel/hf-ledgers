@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { identify } from "./access.ts";
+import { identify } from "@shared/access.ts";
 import * as apStore from "./apStore.ts";
 import {
   attachExpensePhoto,
@@ -68,7 +68,7 @@ function json(status: number, body: unknown): Response {
 
 // ── /api routes ────────────────────────────────────────────────────────
 // Every route is gated by identify() (Cf-Access-Jwt-Assertion, verified
-// RS256 — src/server/access.ts). For requests that arrive over Cloudflare
+// RS256 — packages/shared/src/access.ts). For requests that arrive over Cloudflare
 // Access this is a second layer behind the edge decision, but for LAN-path
 // requests (this container's host-port mapping is reachable directly by
 // anything already on the LAN, bypassing Cloudflare entirely) it is the

@@ -3,16 +3,17 @@
 // the income ledger (src/server/server.ts): this file never imports that
 // one (importing it would start a SECOND Bun.serve + open the LEDGER'S
 // SQLite database as an unwanted side effect of module top-level code) —
-// the only src/server/* files this reuses are the three that are pure/
-// side-effect-free at import time: auth.ts (identify()), day-audit.ts (the
-// stay-merge machinery, via queue.ts), pms-prefill.ts (pmsConfigured()).
+// the only src/server/* files this reuses are the two that are pure/
+// side-effect-free at import time: day-audit.ts (the stay-merge machinery,
+// via queue.ts) and pms-prefill.ts (pmsConfigured()). identify() comes from
+// packages/shared/src/access.ts, shared with the expense ledger.
 // This origin physically contains no ledger routes — grep this file: there
 // is no /api/* route here, only /slips-api/* and /slips-internal/*.
 
 import { Elysia, t } from "elysia";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { identify } from "../server/auth.ts";
+import { identify } from "@shared/access.ts";
 import { pmsConfigured } from "../server/pms-prefill.ts";
 import { isValidIso } from "@shared/date.ts";
 import { BOOKING_NO_MAX_LEN, isProperty } from "../shared/types.ts";

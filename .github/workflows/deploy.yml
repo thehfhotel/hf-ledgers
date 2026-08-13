@@ -4,9 +4,10 @@ name: Build & Deploy
 # the apps whose paths changed; the route job below is what decides, and every
 # deploy is gated on that app's own bun-ci run plus the shared-module guard.
 #
-# Replaces the two separate `deploy.yml` files the merged repos carried
-# (this repo's own, parked as .github/workflows/deploy.yml.pre-hf-ledgers, and
-# thehfhotel/expense-ledger's). Behaviour is preserved deliberately, including
+# Replaces the two separate `deploy.yml` files the merged repos carried (this
+# repo's own, parked for the merge as deploy.yml.pre-hf-ledgers and deleted
+# once this one deployed green, and thehfhotel/expense-ledger's — both are in
+# git history). Behaviour is preserved deliberately, including
 # the per-app concurrency group names (deploy-evergreen-income-ledger,
 # deploy-evergreen-expense-ledger), the image names, the shim each SSH key is
 # forced-command pinned to, and the exact container .env each stack ends up

@@ -34,7 +34,7 @@
 // process.env on every call.
 
 import { SQL } from "bun";
-import { parseAmountToSatang } from "../shared/money.ts";
+import { parseAmountToSatang } from "@shared/money.ts";
 import type { DepositEventKind, DepositTender, Property } from "../shared/types.ts";
 
 /** One row inserted onto the bookings sheet, derived from one PMS payment
@@ -342,7 +342,7 @@ export function bangkokDayWindow(date: string): { fromIso: string; toIso: string
 }
 
 /**
- * `parseAmountToSatang` (shared/money.ts) is deliberately non-negative-only
+ * `parseAmountToSatang` (packages/shared/src/money.ts) is deliberately non-negative-only
  * — a human never types a negative amount into an income cell. Raw PMS
  * ledger NUMERICs are not so constrained: a refund payment carries a
  * genuinely negative tender value (docs/pms-prefill-plan.md's "net-negative

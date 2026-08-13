@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createApPayment, EngineUnreachableError, SessionExpiredError } from "../api.ts";
 import { currentMonthBangkok, isoToThaiLong, todayBangkok } from "../../shared/date.ts";
-import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
+import { formatSatang, parseAmountToSatang } from "@shared/money.ts";
 import { paymentNeedsCategoryPicker, type ApRow } from "../../shared/apTypes.ts";
 import type { ExpenseCategoryCode } from "../../shared/categories.ts";
 import type { PaymentMethod } from "../../shared/types.ts";

@@ -7,7 +7,7 @@ import {
   shiftMonths,
   todayBangkok,
 } from "../../shared/date.ts";
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import { TENDER_TO_CATEGORY_KEY, type CategoryKey, type DaySummary, type Property } from "../../shared/types.ts";
 import { getDay, getMonthClose, listBookingLines, listDays, putMonthClose } from "../api.ts";
 import { navigate } from "../App.tsx";

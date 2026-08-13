@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isAccrualDay, visibleTendersForDate } from "../../shared/accrual.ts";
 import { isoToThaiLong, shiftDays } from "../../shared/date.ts";
-import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
+import { formatSatang, parseAmountToSatang } from "@shared/money.ts";
 import {
   RECONCILE_TOLERANCE_SATANG,
   depositCashTotals,

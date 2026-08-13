@@ -1,6 +1,6 @@
 // Pure(ish) control-flow logic extracted out of PmsPullResultDialog.tsx
 // (review fix 1 + 2) so it is directly unit-testable without a component-
-// rendering harness — this repo has none (see shared/money.ts's
+// rendering harness — neither app ships one (see packages/shared/src/money.ts's
 // shouldCommitAmount for the precedent: the exact same reasoning).
 
 import type { PmsBookingLineChange } from "../api.ts";

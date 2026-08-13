@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { daysBetween, isoToBuddhist, isValidIso, monthToThaiLong, shiftDays, todayBangkok } from "../../shared/date.ts";
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import {
   DEPOSIT_TENDER_LABELS_TH,
   DEPOSIT_THREAD_STATUS_LABELS_TH,

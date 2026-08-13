@@ -11,7 +11,7 @@ import {
 } from "../api.ts";
 import { categoryByCode, type ExpenseCategoryCode } from "../../shared/categories.ts";
 import { isoToBuddhist, isoToThaiLong } from "../../shared/date.ts";
-import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
+import { formatSatang, parseAmountToSatang } from "@shared/money.ts";
 import {
   apPhotoExtForFilename,
   computeGross,

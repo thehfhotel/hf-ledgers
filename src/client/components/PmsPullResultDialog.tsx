@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import type { Property } from "../../shared/types.ts";
 import { acceptPmsUpdate, type PmsBookingLineChange, type pullFromPms } from "../api.ts";
 import { normalizeChangedRows, runAcceptFlow } from "./pmsPullAccept.ts";

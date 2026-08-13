@@ -1,6 +1,8 @@
 // Money = integer satang end to end (1 baht = 100 satang). SQL SUMs stay
 // exact because nothing but this module ever converts to/from baht, and
-// only at the UI edge.
+// only at the UI edge. True of both ledgers: the income ledger's
+// `amount_satang INTEGER` columns and the expense ledger's engine postings
+// alike.
 
 /** 298380 -> "2,983.80" */
 export function formatSatang(satang: number): string {
@@ -15,8 +17,9 @@ export function formatSatang(satang: number): string {
  * Parse a user-typed baht amount ("2,983.80", "20", " 490.5 ") into satang.
  * Returns null for anything that isn't a valid non-negative amount with at
  * most 2 decimal places — including empty input. Callers treat null as
- * "clear this cell", per the PUT income/:categoryId null/0-deletes rule in
- * api.md.
+ * "clear this cell" or as a validation error, never as a coerced 0. A
+ * client-side `?? 0` fallback on this return value is a bug: it turns a
+ * clerk's typo into a silent zero.
  */
 export function parseAmountToSatang(input: string): number | null {
   const trimmed = input.trim().replace(/,/g, "");
@@ -32,7 +35,7 @@ export function parseAmountToSatang(input: string): number | null {
  * `onCommit` for a blur that parsed to `parsed`, given the field's current
  * controlled `value`. Extracted as a pure function so this no-op decision
  * — subtle, previously wrong for one real case — is unit-testable without
- * a component-rendering harness (this repo has none).
+ * a component-rendering harness (neither app ships one).
  *
  * Income cells and expense lines (`zeroIsMeaningful` false) treat a
  * committed 0 as equivalent to "empty" (the caller deletes the cell/row

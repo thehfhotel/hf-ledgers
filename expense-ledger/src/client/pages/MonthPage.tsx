@@ -9,7 +9,7 @@ import {
   type ExpenseCategoryCode,
 } from "../../shared/categories.ts";
 import { currentMonthBangkok, isoToBuddhist, monthToThaiLong, shiftMonths } from "../../shared/date.ts";
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import type { ExpenseTransaction, MonthExpensesResponse } from "../../shared/types.ts";
 import { EditDrawer } from "../components/EditDrawer.tsx";
 import { PhotoLightbox } from "../components/PhotoLightbox.tsx";

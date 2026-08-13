@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isAccrualDay } from "../../shared/accrual.ts";
 import { RECONCILE_TOLERANCE_SATANG, deriveIncomeFromBookings } from "../../shared/bookings.ts";
 import { shiftDays } from "../../shared/date.ts";
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "@shared/textAmount.ts";
 import { computeDayTotals } from "../../shared/totals.ts";
 import {

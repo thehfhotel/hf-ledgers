@@ -1,4 +1,4 @@
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import { TENDERS, type BookingTotals, type Tender } from "../../shared/types.ts";
 
 // The booking grid's FRAME: column widths, the three-row grouped header

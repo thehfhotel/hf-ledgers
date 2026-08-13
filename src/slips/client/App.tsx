@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { shiftDays, timeBangkok, todayBangkok } from "../../shared/date.ts";
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import { PROPERTIES, type Property } from "../../shared/types.ts";
 import { PROPERTY_BADGE_LABELS } from "../../client/labels.ts";
 import { DateBar } from "../../client/components/DateBar.tsx";

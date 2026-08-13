@@ -1,7 +1,7 @@
 // Tests for pmsPullAccept.ts (review fixes 1 + 2, extracted out of
 // PmsPullResultDialog.tsx so this control-flow logic is testable without a
 // component-rendering harness — this repo has none, same reasoning as
-// shared/money.ts's shouldCommitAmount tests).
+// packages/shared/src/money.ts's shouldCommitAmount tests).
 
 import { describe, expect, test } from "bun:test";
 import type { PmsBookingLineChange } from "../api.ts";

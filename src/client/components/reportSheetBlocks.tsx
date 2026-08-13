@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 import { isAccrualDay } from "../../shared/accrual.ts";
 import { isoToBuddhist, isoToThaiLong } from "../../shared/date.ts";
-import { formatSatang } from "../../shared/money.ts";
+import { formatSatang } from "@shared/money.ts";
 import {
   DEPOSIT_TENDER_LABELS_TH,
   DEPOSIT_TENDERS,

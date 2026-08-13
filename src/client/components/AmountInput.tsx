@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { formatSatang, parseAmountToSatang, shouldCommitAmount } from "../../shared/money.ts";
+import { formatSatang, parseAmountToSatang, shouldCommitAmount } from "@shared/money.ts";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -68,7 +68,7 @@ export function AmountInput({
   async function commit() {
     setEditing(false);
     const parsed = parseAmountToSatang(draft);
-    // See shouldCommitAmount's doc (shared/money.ts) for why
+    // See shouldCommitAmount's doc (packages/shared/src/money.ts) for why
     // zeroIsMeaningful changes this: without it, typing "0.00" into an
     // UNSET zeroIsMeaningful field (cash-block override/adjustment) would
     // never fire onCommit at all.

@@ -1,0 +1,636 @@
+// Client for the headless ezBookkeeping engine (container
+// `expense-ledger-engine`, reached over the compose `default` network at
+// ENGINE_URL — see docker-compose.yml and README "Identity table"). Every
+// call carries the engine's own API token (ENGINE_API_TOKEN, minted once at
+// first-boot — see README "First-boot procedure") as a bearer credential.
+//
+// Hard rule (see CLAUDE.md): ENGINE_API_TOKEN is a server-only secret.
+// Never forward it to the browser — every engine call must originate from
+// this server process, not from client-side code calling the engine (or
+// ENGINE_URL) directly.
+//
+// Dormant behaviour: ENGINE_API_TOKEN unset -> engineFetch() throws
+// EngineNotConfiguredError before any request leaves this process, and
+// engineConfigured() lets a route check first and answer accordingly.
+//
+// ezBookkeeping facts used below are verified against the upstream source
+// at tag v1.6.1 (github.com/mayswind/ezbookkeeping, mirrored by
+// github.com/thehfhotel/ezbookkeeping) — see README.md "ezBookkeeping API
+// notes" and transactionBuilder.ts's file-level note for the specific
+// citations (transaction type/category type enums, full-overwrite modify
+// semantics, Unix-seconds time, satang-equivalent sourceAmount).
+
+import { EXPENSE_CATEGORIES, type ExpenseCategoryCode } from "../shared/categories.ts";
+import { apTagName } from "../shared/apTypes.ts";
+import type { ExpenseInput, ExpensePhoto, ExpenseTransaction, PaymentMethod } from "../shared/types.ts";
+import { appendAttribution, parseAttribution } from "./attribution.ts";
+import {
+  ACCOUNT_CATEGORY_CASH,
+  ACCOUNT_CATEGORY_CHECKING,
+  CATEGORY_TYPE_EXPENSE,
+  TRANSACTION_TYPE_EXPENSE,
+  buildEngineTransactionPayload,
+  deriveDateFromEngineTime,
+  resolveAccountEngineId,
+  resolveCategoryEngineId,
+} from "./transactionBuilder.ts";
+
+const ENGINE_URL = (): string => (process.env.ENGINE_URL || "http://expense-ledger-engine:8080").replace(/\/+$/, "");
+const ENGINE_API_TOKEN = (): string => process.env.ENGINE_API_TOKEN || "";
+
+export function engineConfigured(): boolean {
+  return !!ENGINE_API_TOKEN();
+}
+
+export class EngineNotConfiguredError extends Error {
+  constructor() {
+    super("ENGINE_API_TOKEN is not set - the ezBookkeeping engine client is dormant");
+    this.name = "EngineNotConfiguredError";
+  }
+}
+
+/** The JSON envelope every ezBookkeeping API response wraps its payload in
+ * (see https://ezbookkeeping.mayswind.net/httpapi/ and
+ * cmd/webserver.go's bindApi -> utils.PrintJsonSuccessResult /
+ * PrintJsonErrorResult in the upstream source). */
+export interface EngineEnvelope<T> {
+  success: boolean;
+  result?: T;
+  errorCode?: number;
+  errorMessage?: string;
+}
+
+/** Low-level fetch wrapper for the ezBookkeeping HTTP API. `path` is
+ * relative to /api/v1, e.g. "/accounts/list.json". Adds the bearer token, a
+ * JSON content-type unless the body is FormData (multipart uploads set
+ * their own boundary-bearing content-type), and BOTH timezone headers on
+ * every call — per scripts/lib/ezbk-client.ts's citation of
+ * pkg/core/context_web.go's GetClientTimezone(), every transaction- and
+ * account-mutating/listing endpoint requires a resolvable client timezone
+ * or errors with ErrClientTimezoneOffsetInvalid; sending both is harmless
+ * where only one is actually consulted. */
+export async function engineFetch<T = unknown>(
+  path: string,
+  init: RequestInit = {},
+): Promise<EngineEnvelope<T>> {
+  if (!engineConfigured()) throw new EngineNotConfiguredError();
+
+  const url = `${ENGINE_URL()}/api/v1${path.startsWith("/") ? path : `/${path}`}`;
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${ENGINE_API_TOKEN()}`);
+  headers.set("x-timezone-name", "Asia/Bangkok");
+  headers.set("x-timezone-offset", "420");
+  if (!(init.body instanceof FormData) && init.body !== undefined && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+
+  const res = await fetch(url, { ...init, headers });
+  return (await res.json()) as EngineEnvelope<T>;
+}
+
+/** Uploads a transaction receipt photo — POST
+ * /api/v1/transaction/pictures/upload.json, multipart/form-data, file field
+ * "picture" (see README "ezBookkeeping API notes" for the verified request
+ * shape / response). Returns the engine's pictureId + originalUrl on
+ * success; throws with the engine's errorMessage otherwise. */
+export async function uploadTransactionPicture(
+  file: Blob,
+  filename: string,
+): Promise<{ pictureId: string; originalUrl: string }> {
+  const form = new FormData();
+  form.append("picture", file, filename);
+
+  const res = await engineFetch<{ pictureId: string; originalUrl: string }>(
+    "/transaction/pictures/upload.json",
+    { method: "POST", body: form },
+  );
+  if (!res.success || !res.result) {
+    throw new Error(res.errorMessage || "transaction picture upload failed");
+  }
+  return res.result;
+}
+
+// ── Category id map: code (this app) <-> engine secondary-category id ─────
+// "As-code" seeding (frontend spec: "category-management UI" is explicitly
+// NOT built) means scripts/seed.ts creates the real tree: one PRIMARY
+// category per src/shared/categories.ts group, named by that group's Thai
+// `label`, holding one or more SECONDARY categories underneath — named by
+// `building` for the three building-scoped groups (water/electricity/
+// phone), or carrying that SAME label again for every other leaf (a
+// primary needs exactly one secondary purely so a transaction has
+// somewhere to post — see scripts/categories.json and scripts/seed.ts).
+// This module never hardcodes a numeric id: it walks the engine's live
+// category tree matching on (primary.name === label, secondary.name ===
+// building ?? label) — the same Thai text already in categories.ts, never
+// this app's internal `code` string, which the engine never sees — caching
+// the result and refreshing once on a lookup miss (a category seeded after
+// this server process started).
+
+interface EngineCategoryNode {
+  id: number | string;
+  name: string;
+  subCategories?: EngineCategoryNode[] | null;
+}
+
+interface CategoryCache {
+  codeToId: Map<ExpenseCategoryCode, string>;
+  idToCode: Map<string, ExpenseCategoryCode>;
+}
+
+let categoryCache: CategoryCache | null = null;
+
+async function loadCategoryCache(): Promise<CategoryCache> {
+  // CATEGORY_TYPE_EXPENSE=2 here — the transaction_category.go enum, NOT
+  // the transaction type enum (EXPENSE=3) — see transactionBuilder.ts. The
+  // response is keyed by stringified category type (e.g. result["2"]), per
+  // scripts/lib/ezbk-client.ts's citation — not a bare array.
+  const res = await engineFetch<Record<string, EngineCategoryNode[]>>(
+    `/transaction/categories/list.json?type=${CATEGORY_TYPE_EXPENSE}`,
+  );
+  if (!res.success || !res.result) {
+    throw new Error(res.errorMessage || "failed to list ezBookkeeping categories");
+  }
+  const primaries = res.result[String(CATEGORY_TYPE_EXPENSE)] ?? [];
+
+  const codeToId = new Map<ExpenseCategoryCode, string>();
+  const idToCode = new Map<string, ExpenseCategoryCode>();
+  for (const category of EXPENSE_CATEGORIES) {
+    const primary = primaries.find((p) => p.name === category.label);
+    const secondaryName = category.building ?? category.label;
+    const secondary = primary?.subCategories?.find((s) => s.name === secondaryName);
+    if (secondary) {
+      const id = String(secondary.id);
+      codeToId.set(category.code, id);
+      idToCode.set(id, category.code);
+    }
+  }
+  categoryCache = { codeToId, idToCode };
+  return categoryCache;
+}
+
+async function ensureCategoryCache(): Promise<CategoryCache> {
+  return categoryCache ?? loadCategoryCache();
+}
+
+async function categoryCodeToEngineId(code: ExpenseCategoryCode): Promise<string> {
+  const cache = await ensureCategoryCache();
+  if (cache.codeToId.has(code)) return cache.codeToId.get(code)!;
+  // Cache miss: refresh once (a category seeded after this process started)
+  // before giving up — see the module doc comment.
+  const fresh = await loadCategoryCache();
+  return resolveCategoryEngineId(fresh.codeToId, code);
+}
+
+/** Best-effort id -> code for rendering the month list. A foreign/legacy
+ * category (created directly in the engine's own UI, outside this app's
+ * seeded 21) falls back to "other" rather than breaking the whole month
+ * render. */
+function engineIdToCategoryCode(id: string): ExpenseCategoryCode {
+  return categoryCache?.idToCode.get(id) ?? "other";
+}
+
+// ── Account id map: "cash" | "bank" <-> engine sourceAccountId ─────────────
+// Same as-code seeding story as categories (scripts/seed.ts creates exactly
+// two: เงินสด / ธนาคาร), but matched on the engine's own AccountCategory
+// enum (pkg/models/account.go — CASH=1, CHECKING=2, confirmed via
+// scripts/lib/ezbk-client.ts) rather than by name, which is exact and
+// immune to a future rename of either account. Falls back positionally for
+// a plain two-account install that somehow carries neither category value,
+// so a seeding quirk doesn't leave the whole app unusable.
+
+interface EngineAccountNode {
+  id: number | string;
+  name: string;
+  category: number;
+  subAccounts?: EngineAccountNode[] | null;
+}
+
+interface AccountCache {
+  methodToId: Map<PaymentMethod, string>;
+  idToMethod: Map<string, PaymentMethod>;
+}
+
+let accountCache: AccountCache | null = null;
+
+function flattenAccounts(nodes: EngineAccountNode[]): { id: string; category: number }[] {
+  const out: { id: string; category: number }[] = [];
+  for (const node of nodes) {
+    out.push({ id: String(node.id), category: node.category });
+    if (node.subAccounts && node.subAccounts.length > 0) out.push(...flattenAccounts(node.subAccounts));
+  }
+  return out;
+}
+
+async function loadAccountCache(): Promise<AccountCache> {
+  const res = await engineFetch<EngineAccountNode[]>("/accounts/list.json");
+  if (!res.success || !res.result) {
+    throw new Error(res.errorMessage || "failed to list ezBookkeeping accounts");
+  }
+  const flat = flattenAccounts(res.result);
+  const methodToId = new Map<PaymentMethod, string>();
+  for (const account of flat) {
+    if (!methodToId.has("cash") && account.category === ACCOUNT_CATEGORY_CASH) methodToId.set("cash", account.id);
+    else if (!methodToId.has("bank") && account.category === ACCOUNT_CATEGORY_CHECKING) {
+      methodToId.set("bank", account.id);
+    }
+  }
+  if (flat.length === 2) {
+    if (!methodToId.has("cash")) methodToId.set("cash", flat[0]!.id);
+    if (!methodToId.has("bank")) methodToId.set("bank", flat[1]!.id);
+  }
+  const idToMethod = new Map<string, PaymentMethod>();
+  for (const [method, id] of methodToId) idToMethod.set(id, method);
+  accountCache = { methodToId, idToMethod };
+  return accountCache;
+}
+
+async function ensureAccountCache(): Promise<AccountCache> {
+  return accountCache ?? loadAccountCache();
+}
+
+async function paymentMethodToEngineId(method: PaymentMethod): Promise<string> {
+  const cache = await ensureAccountCache();
+  if (cache.methodToId.has(method)) return cache.methodToId.get(method)!;
+  const fresh = await loadAccountCache();
+  return resolveAccountEngineId(fresh.methodToId, method);
+}
+
+function engineIdToPaymentMethod(id: string): PaymentMethod {
+  return accountCache?.idToMethod.get(id) ?? "cash";
+}
+
+// ── Transaction mapping ────────────────────────────────────────────────────
+
+/** The subset of ezBookkeeping's TransactionInfoResponse this app reads —
+ * see the "get single transaction" citation in transactionBuilder.ts's
+ * file-level note. Picture object field names (`pictureId`/`originalUrl`
+ * vs `id`/`url`) are read defensively since the exact GET response field
+ * names for an attached picture were not pinned down against source. */
+interface EngineTransactionRaw {
+  id: number | string;
+  categoryId: number | string;
+  time: number;
+  sourceAccountId: number | string;
+  sourceAmount: number;
+  comment: string;
+  pictureIds?: (number | string)[];
+  pictures?: { pictureId?: number | string; id?: number | string; originalUrl?: string; url?: string }[];
+  /** scripts/import-workbook.ts tags every imported row with
+   * `import:<YYYY-MM>` (see transactionBuilder.ts's BuildEngineTransactionInput
+   * doc comment). Optional/defensive like pictureIds above since the exact
+   * get.json response shape for a transaction with no tags was not
+   * independently re-verified from source. */
+  tagIds?: (number | string)[];
+}
+
+function extractPictureIds(raw: EngineTransactionRaw): string[] {
+  if (Array.isArray(raw.pictureIds)) return raw.pictureIds.map(String);
+  if (Array.isArray(raw.pictures)) return raw.pictures.map((p) => String(p.pictureId ?? p.id));
+  return [];
+}
+
+/** H2 fix: modify.json is a full overwrite, so any single-field edit or
+ * photo attach/detach that doesn't resend the transaction's EXISTING tagIds
+ * silently wipes them — including scripts/import-workbook.ts's
+ * `import:<YYYY-MM>` idempotency tag, which would then double-count that
+ * row on a later `--force` re-import. Mirrors extractPictureIds above. */
+function extractTagIds(raw: EngineTransactionRaw): string[] {
+  return Array.isArray(raw.tagIds) ? raw.tagIds.map(String) : [];
+}
+
+function extractPhotos(raw: EngineTransactionRaw): ExpensePhoto[] {
+  if (!Array.isArray(raw.pictures)) return [];
+  return raw.pictures.map((p) => ({ id: String(p.pictureId ?? p.id), url: String(p.originalUrl ?? p.url ?? "") }));
+}
+
+function mapEngineTransaction(raw: EngineTransactionRaw): ExpenseTransaction {
+  const { display, by } = parseAttribution(raw.comment ?? "");
+  return {
+    id: String(raw.id),
+    date: deriveDateFromEngineTime(raw.time),
+    amountSatang: raw.sourceAmount,
+    categoryCode: engineIdToCategoryCode(String(raw.categoryId)),
+    paymentMethod: engineIdToPaymentMethod(String(raw.sourceAccountId)),
+    comment: display,
+    by,
+    photos: extractPhotos(raw),
+  };
+}
+
+/** GET /api/v1/transactions/list/by_month.json — the whole month in ONE
+ * call, verified from source (TransactionListInMonthByPageRequest has no
+ * page/count cap, unlike the general transactions/list.json which caps at
+ * 50 and would need a page-loop). `with_pictures=true` so photo thumbnails
+ * never need a second round trip per transaction. */
+export async function getMonthExpenseTransactions(monthIso: string): Promise<ExpenseTransaction[]> {
+  const [year, month] = monthIso.split("-").map(Number);
+  await Promise.all([ensureCategoryCache(), ensureAccountCache()]);
+  const res = await engineFetch<{ items: EngineTransactionRaw[]; totalCount: number }>(
+    `/transactions/list/by_month.json?year=${year}&month=${month}&type=${TRANSACTION_TYPE_EXPENSE}&with_pictures=true`,
+  );
+  if (!res.success || !res.result) {
+    throw new Error(res.errorMessage || "failed to list this month's transactions");
+  }
+  return res.result.items.map(mapEngineTransaction);
+}
+
+/** Thrown by getEngineTransaction/deleteExpenseTransaction when the engine
+ * responds (a well-formed JSON envelope) with success:false for a specific
+ * transaction id — as opposed to a network-level failure (fetch() itself
+ * throwing, or invalid JSON), which still surfaces as a plain Error. The AP
+ * payment-undo route (src/server/server.ts, H2b / L4 fix) catches this
+ * SPECIFICALLY: a missing/already-deleted engine transaction during undo
+ * means the desired end state (no ledger row, no local payment) is already
+ * reached, not a real failure. Every OTHER caller (ordinary expense
+ * edit/delete's current-month lock, the AP payment-create compensating
+ * delete) still just sees an Error via its existing generic catch — this is
+ * purely an additive discriminator, not a behavior change for them. */
+export class EngineTransactionNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EngineTransactionNotFoundError";
+  }
+}
+
+async function getEngineTransaction(id: string): Promise<EngineTransactionRaw> {
+  const res = await engineFetch<EngineTransactionRaw>(
+    `/transactions/get.json?id=${encodeURIComponent(id)}&with_pictures=true`,
+  );
+  if (!res.success || !res.result) throw new EngineTransactionNotFoundError(res.errorMessage || "transaction not found");
+  return res.result;
+}
+
+/** The Bangkok calendar date this transaction is really recorded on — used
+ * to enforce the "current month only" edit/delete lock (frontend spec §4)
+ * server-side, never trusting a client-supplied date. */
+export async function getExpenseTransactionDate(id: string): Promise<string> {
+  const existing = await getEngineTransaction(id);
+  return deriveDateFromEngineTime(existing.time);
+}
+
+/** True when transaction `id` carries any `ap:<rowId>` tag (H2 fix,
+ * orchestrator ruling): every route OUTSIDE the AP register's own
+ * apStore.ts/this file's AP payment-posting path must refuse to touch a
+ * transaction the register manages, so the register and the ordinary
+ * month view can never quietly disagree about what happened to a payment.
+ * Resolves the transaction's tagIds (numeric engine ids, no name attached)
+ * against the engine's own tag list — the same call getOrCreateApTag below
+ * already uses — rather than guessing a rowId from comment text. */
+export async function isApManagedTransaction(id: string): Promise<boolean> {
+  const existing = await getEngineTransaction(id);
+  const tagIds = extractTagIds(existing);
+  if (tagIds.length === 0) return false;
+  const listRes = await engineFetch<EngineTag[]>("/transaction/tags/list.json");
+  if (!listRes.success || !listRes.result) {
+    throw new Error(listRes.errorMessage || "failed to list ezBookkeeping tags");
+  }
+  const apTagIds = new Set(listRes.result.filter((t) => t.name.startsWith("ap:")).map((t) => t.id));
+  return tagIds.some((tagId) => apTagIds.has(tagId));
+}
+
+/** POST /api/v1/transactions/add.json. `email` is the verified Access
+ * identity — appendAttribution appends it server-side (§5); the client
+ * never sends or renders the token. Returns the new transaction's id.
+ *
+ * ASSUMPTION (flagged for verification against a live engine): the
+ * response `result` carries the created transaction's id directly under an
+ * `id` field, mirroring the get/list shapes above — the exact add.json
+ * success response shape was not independently re-verified from source. */
+export async function createExpenseTransaction(input: ExpenseInput, email: string): Promise<string> {
+  const [categoryEngineId, sourceAccountEngineId] = await Promise.all([
+    categoryCodeToEngineId(input.categoryCode),
+    paymentMethodToEngineId(input.paymentMethod),
+  ]);
+  const payload = buildEngineTransactionPayload({
+    amountSatang: input.amountSatang,
+    categoryEngineId,
+    sourceAccountEngineId,
+    comment: appendAttribution(input.comment, email),
+    dateIso: input.date,
+  });
+  const res = await engineFetch<{ id?: number | string }>("/transactions/add.json", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (!res.success) throw new Error(res.errorMessage || "failed to create transaction");
+  const id = res.result?.id;
+  if (id === undefined || id === null) throw new Error("ezBookkeeping did not return a transaction id");
+  return String(id);
+}
+
+/** POST /api/v1/transactions/modify.json — a FULL overwrite (verified from
+ * source, see transactionBuilder.ts): fetches the existing row first so
+ * fields this call doesn't touch (pictureIds, tagIds — H2 fix) are resent
+ * unchanged, per rule 6 re-appends attribution with the CURRENT editor
+ * regardless of who wrote it before. */
+export async function modifyExpenseTransaction(id: string, input: ExpenseInput, email: string): Promise<void> {
+  const [existing, categoryEngineId, sourceAccountEngineId] = await Promise.all([
+    getEngineTransaction(id),
+    categoryCodeToEngineId(input.categoryCode),
+    paymentMethodToEngineId(input.paymentMethod),
+  ]);
+  const payload = buildEngineTransactionPayload({
+    amountSatang: input.amountSatang,
+    categoryEngineId,
+    sourceAccountEngineId,
+    comment: appendAttribution(input.comment, email),
+    dateIso: input.date,
+    pictureIds: extractPictureIds(existing),
+    tagIds: extractTagIds(existing),
+  });
+  const res = await engineFetch(`/transactions/modify.json`, {
+    method: "POST",
+    body: JSON.stringify({ id, ...payload }),
+  });
+  if (!res.success) throw new Error(res.errorMessage || "failed to modify transaction");
+}
+
+export async function deleteExpenseTransaction(id: string): Promise<void> {
+  const res = await engineFetch("/transactions/delete.json", {
+    method: "POST",
+    body: JSON.stringify({ id }),
+  });
+  // H2b / L4 fix: success:false here (not-found, already deleted) throws the
+  // same discriminated error as getEngineTransaction above — see its doc
+  // comment. Every caller except the AP payment-undo route still treats this
+  // as a plain failure via its existing generic catch.
+  if (!res.success) throw new EngineTransactionNotFoundError(res.errorMessage || "failed to delete transaction");
+}
+
+/**
+ * Attaches an uploaded photo to an existing transaction. Ordering per
+ * frontend spec §2.6: the transaction already exists (created first); this
+ * uploads the picture, then re-sends the transaction (full overwrite, as
+ * above) with the new picture id appended. The clerk's comment/attribution
+ * is left exactly as it was — attaching a photo is not treated as an edit
+ * of the clerk's text, so `by` does not change on a pure photo attach.
+ */
+export async function attachExpensePhoto(
+  id: string,
+  file: Blob,
+  filename: string,
+): Promise<{ id: string; url: string }> {
+  const uploaded = await uploadTransactionPicture(file, filename);
+  const existing = await getEngineTransaction(id);
+  const pictureIds = Array.from(new Set([...extractPictureIds(existing), uploaded.pictureId]));
+  const payload = buildEngineTransactionPayload({
+    amountSatang: existing.sourceAmount,
+    categoryEngineId: String(existing.categoryId),
+    sourceAccountEngineId: String(existing.sourceAccountId),
+    comment: existing.comment,
+    dateIso: deriveDateFromEngineTime(existing.time),
+    pictureIds,
+    tagIds: extractTagIds(existing),
+  });
+  const res = await engineFetch("/transactions/modify.json", {
+    method: "POST",
+    body: JSON.stringify({ id, ...payload }),
+  });
+  if (!res.success) throw new Error(res.errorMessage || "failed to attach photo");
+  return { id: uploaded.pictureId, url: uploaded.originalUrl };
+}
+
+/** Removes one photo from a transaction (full overwrite, same as above);
+ * the comment/attribution is left untouched, same reasoning as attach. */
+export async function detachExpensePhoto(id: string, photoId: string): Promise<void> {
+  const existing = await getEngineTransaction(id);
+  const pictureIds = extractPictureIds(existing).filter((pid) => pid !== photoId);
+  const payload = buildEngineTransactionPayload({
+    amountSatang: existing.sourceAmount,
+    categoryEngineId: String(existing.categoryId),
+    sourceAccountEngineId: String(existing.sourceAccountId),
+    comment: existing.comment,
+    dateIso: deriveDateFromEngineTime(existing.time),
+    pictureIds,
+    tagIds: extractTagIds(existing),
+  });
+  const res = await engineFetch("/transactions/modify.json", {
+    method: "POST",
+    body: JSON.stringify({ id, ...payload }),
+  });
+  if (!res.success) throw new Error(res.errorMessage || "failed to remove photo");
+}
+
+// ── AP register: per-row tag + payment posting (orchestrator ruling #3) ────
+// Every payment recorded against an AP register row posts as an ordinary
+// expense transaction (same add.json call as createExpenseTransaction above)
+// PLUS a tag `ap:<rowId>` (see src/shared/apTypes.ts's apTagName), created on
+// demand the first time that row's first payment posts — mirrors
+// scripts/import-workbook.ts's `import:<YYYY-MM>` idempotency-tag pattern
+// (list first, create only on a miss, never assume a tag name is already
+// registered).
+
+interface EngineTag {
+  id: string;
+  name: string;
+}
+
+/** rowId -> engine tag id, in-process only (a fresh process re-resolves via
+ * the list call below — no different than the category/account caches). */
+let apTagCache = new Map<string, string>();
+
+/** Lists tags and returns the id of the one named `tagName`, or null. Split
+ * out of getOrCreateApTag (M4 fix) so it can be called a second time as a
+ * duplicate-name recovery step, without duplicating the list/find logic. */
+async function findApTagByName(tagName: string): Promise<string | null> {
+  const listRes = await engineFetch<EngineTag[]>("/transaction/tags/list.json");
+  if (!listRes.success || !listRes.result) {
+    throw new Error(listRes.errorMessage || "failed to list ezBookkeeping tags");
+  }
+  const existing = listRes.result.find((t) => t.name === tagName);
+  return existing ? existing.id : null;
+}
+
+async function getOrCreateApTag(rowId: string): Promise<string> {
+  const tagName = apTagName(rowId);
+  const cached = apTagCache.get(rowId);
+  if (cached) return cached;
+
+  const existing = await findApTagByName(tagName);
+  if (existing) {
+    apTagCache.set(rowId, existing);
+    return existing;
+  }
+
+  const addRes = await engineFetch<EngineTag>("/transaction/tags/add.json", {
+    method: "POST",
+    body: JSON.stringify({ name: tagName }),
+  });
+  if (addRes.success && addRes.result) {
+    apTagCache.set(rowId, addRes.result.id);
+    return addRes.result.id;
+  }
+
+  // M4 fix: this process's own AP writes are serialized by
+  // src/server/server.ts's withApWriteLock, but that mutex is per-process —
+  // a brief old/new container overlap during a rolling deploy (or, in
+  // principle, a second process) could still create the SAME tag name
+  // between our list call above and this add call. ezBookkeeping rejects a
+  // duplicate tag name; treat that specific rejection as success by
+  // re-listing and using whatever tag is there now, rather than failing a
+  // payment that could otherwise post cleanly. If the tag still isn't there,
+  // this genuinely wasn't a duplicate-name race (e.g. the engine is down) —
+  // throw the original error. No tag GC: the failed add created nothing to
+  // clean up, so there is nothing to skip except a cleanup step that was
+  // never needed in the first place.
+  const retryFound = await findApTagByName(tagName);
+  if (retryFound) {
+    apTagCache.set(rowId, retryFound);
+    return retryFound;
+  }
+  throw new Error(addRes.errorMessage || "failed to create ezBookkeeping tag");
+}
+
+export interface CreateApPaymentTransactionInput {
+  date: string;
+  amountSatang: number;
+  categoryCode: ExpenseCategoryCode;
+  paymentMethod: PaymentMethod;
+  /** Display text (already truncated to the attribution budget by the
+   * caller) — attribution is appended here, exactly like
+   * createExpenseTransaction, so this never happens twice. */
+  comment: string;
+  email: string;
+  apRowId: string;
+}
+
+/** Posts one AP payment as an ordinary expense transaction, tagged
+ * `ap:<rowId>` so every payment for a row can be found/audited from the
+ * engine's own UI, and undone exactly: the caller
+ * (src/server/server.ts) stores the returned id on the payment record, and
+ * DELETE .../payments/:pid deletes precisely that transaction via the
+ * existing deleteExpenseTransaction — never a re-derived one. Mirrors
+ * createExpenseTransaction exactly except for the extra tag. */
+export async function createApPaymentTransaction(input: CreateApPaymentTransactionInput): Promise<string> {
+  const [categoryEngineId, sourceAccountEngineId, tagId] = await Promise.all([
+    categoryCodeToEngineId(input.categoryCode),
+    paymentMethodToEngineId(input.paymentMethod),
+    getOrCreateApTag(input.apRowId),
+  ]);
+  const payload = buildEngineTransactionPayload({
+    amountSatang: input.amountSatang,
+    categoryEngineId,
+    sourceAccountEngineId,
+    comment: appendAttribution(input.comment, input.email),
+    dateIso: input.date,
+    tagIds: [tagId],
+  });
+  const res = await engineFetch<{ id?: number | string }>("/transactions/add.json", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (!res.success) throw new Error(res.errorMessage || "failed to create AP payment transaction");
+  const id = res.result?.id;
+  if (id === undefined || id === null) throw new Error("ezBookkeeping did not return a transaction id");
+  return String(id);
+}
+
+/** Test-only seam: lets server.test.ts reset the in-process category/account
+ * caches between test files without reaching into module internals. */
+export const _internal = {
+  resetCaches(): void {
+    categoryCache = null;
+    accountCache = null;
+    apTagCache = new Map();
+  },
+};

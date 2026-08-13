@@ -65,7 +65,8 @@ services:
 
   engine:
     # Pinned by digest to our own GHCR mirror of upstream v1.6.1 (see
-    # .github/workflows/mirror-engine.yml — `crane copy` preserves the
+    # the repo root's .github/workflows/expense-engine-mirror.yml —
+    # `crane copy` preserves the
     # digest, so this is byte-identical to docker.io/mayswind/ezbookkeeping
     # at that tag). thehfhotel/ezbookkeeping (the source fork with
     # Dependabot alerts) is insurance only — we consume the image, never

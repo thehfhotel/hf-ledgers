@@ -101,7 +101,8 @@ cannot reach prod (`.github/workflows/ci.yml` on every push/PR,
   whole estate. Public hostname and container names are fine to state.
 - **No emojis anywhere** — UI text, code, comments, commit messages.
 - **The engine image is pinned by digest, never a moving tag.** Bumping it
-  is a deliberate action via `.github/workflows/mirror-engine.yml` — see
+  is a deliberate action via the repo root's
+  `.github/workflows/expense-engine-mirror.yml` — see
   README.md "Upgrade procedure". Don't hand-edit the digest without running
   that workflow first (a digest that was never actually mirrored to our GHCR
   will fail to pull).

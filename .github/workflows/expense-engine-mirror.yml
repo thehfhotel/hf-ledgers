@@ -1,10 +1,18 @@
-name: Mirror engine image
+name: Mirror expense engine image
 
+# Moved here verbatim from expense-ledger's own .github/workflows/
+# mirror-engine.yml when that repo was absorbed as the expense-ledger/
+# subtree (M3, 2026-08-13). GitHub only runs workflows from the repository
+# root's .github/workflows, so a subtree's workflows are dead files; renamed
+# with an `expense-` prefix because this repo now hosts two apps and a bare
+# "mirror-engine" would not say whose engine.
+#
 # Copies a tag of the upstream ezBookkeeping image (docker.io/mayswind/
 # ezbookkeeping) to our own GHCR mirror (ghcr.io/thehfhotel/ezbookkeeping),
 # byte-for-byte — `crane copy` preserves the manifest digest, so the mirrored
-# tag resolves to the exact same sha256 as upstream. docker-compose.yml pins
-# the engine service to that digest, never to a moving tag.
+# tag resolves to the exact same sha256 as upstream. expense-ledger/
+# docker-compose.yml pins the engine service to that digest, never to a
+# moving tag.
 #
 # github.com/thehfhotel/ezbookkeeping (a fork of mayswind/ezbookkeeping with
 # Dependabot alerts enabled) is source insurance only — this workflow never
@@ -12,8 +20,12 @@ name: Mirror engine image
 # own deploy never depends on Docker Hub's continued existence, not because
 # we don't trust upstream's build.
 #
-# Manual dispatch only — a new engine version is a deliberate upgrade (see
-# README "Upgrade procedure"), never an automatic push-triggered rebuild.
+# MANUAL DISPATCH ONLY, AND IT MUST STAY THAT WAY. A new engine version is a
+# deliberate upgrade (see expense-ledger/README.md "Upgrade procedure"),
+# never an automatic push-triggered rebuild. Do not add `push`, `schedule`,
+# `pull_request`, or any other trigger to the `on:` block below: an
+# automatically mirrored tag would move the digest that production is pinned
+# to out from under a running deploy.
 
 on:
   workflow_dispatch:

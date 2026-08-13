@@ -183,7 +183,7 @@ fork.
 2. Run the mirror workflow for the new tag (Docker Hub tag naming has no
    leading `v`, e.g. `1.7.0`):
    ```sh
-   gh workflow run mirror-engine.yml -f tag=1.7.0
+   gh workflow run expense-engine-mirror.yml -f tag=1.7.0
    ```
 3. Once it succeeds, read the digest it printed to the job summary and bump
    the `engine.image` line in `docker-compose.yml` to

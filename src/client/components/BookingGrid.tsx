@@ -1,7 +1,7 @@
 import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { computeBookingTotals, lineArithmeticMismatch } from "../../shared/bookings.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
-import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
+import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "@shared/textAmount.ts";
 import { shouldLeaveCell, stepColumn, stepRow } from "../../shared/gridNav.ts";
 import {
   BOOKING_NO_MAX_LEN,

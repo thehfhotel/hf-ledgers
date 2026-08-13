@@ -15,8 +15,9 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": false,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@shared/*": ["./packages/shared/src/*"]
     }
   },
-  "include": ["src/**/*", "public/**/*"]
+  "include": ["src/**/*", "public/**/*", "packages/shared/src/**/*"]
 }

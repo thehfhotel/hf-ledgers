@@ -3,7 +3,7 @@ import { isAccrualDay } from "../../shared/accrual.ts";
 import { RECONCILE_TOLERANCE_SATANG, deriveIncomeFromBookings } from "../../shared/bookings.ts";
 import { shiftDays } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
-import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
+import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "@shared/textAmount.ts";
 import { computeDayTotals } from "../../shared/totals.ts";
 import {
   DEPOSIT_TENDER_LABELS_TH,
@@ -97,7 +97,7 @@ type SimpleSaveState = "idle" | "saving" | "saved" | "error";
 /**
  * The amount-in-text tripwire's inline hint. Advisory only — nothing is
  * blocked and the text saves as typed. The wording itself lives in
- * src/shared/textAmount.ts so every field that shows it (day note, expense
+ * packages/shared/src/textAmount.ts so every field that shows it (day note, expense
  * notes here, รายการอื่นๆ descriptions and booking หมายเหตุ elsewhere) reads
  * identically.
  */

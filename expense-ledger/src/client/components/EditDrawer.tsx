@@ -4,7 +4,7 @@ import { EngineUnreachableError, SessionExpiredError } from "../api.ts";
 import { isBillingMonthCategory, type ExpenseCategoryCode } from "../../shared/categories.ts";
 import { currentMonthBangkok, isoToThaiLong, todayBangkok } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
-import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
+import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "@shared/textAmount.ts";
 import type { ExpensePhoto, ExpenseTransaction, PaymentMethod } from "../../shared/types.ts";
 import {
   AMOUNT_ARIA_LABEL,

@@ -14,8 +14,9 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@shared/*": ["../packages/shared/src/*"]
     }
   },
-  "include": ["src/**/*", "scripts/**/*", "build.ts"]
+  "include": ["src/**/*", "scripts/**/*", "build.ts", "../packages/shared/src/**/*"]
 }

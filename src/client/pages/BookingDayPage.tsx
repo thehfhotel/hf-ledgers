@@ -8,7 +8,7 @@ import {
   deriveCashBlock,
   deriveIncomeFromBookings,
 } from "../../shared/bookings.ts";
-import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "../../shared/textAmount.ts";
+import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "@shared/textAmount.ts";
 import {
   BOOKING_NO_MAX_LEN,
   DEPOSIT_TENDERS,
@@ -76,7 +76,7 @@ const DERIVABLE_CATEGORY_KEYS: CategoryKey[] = [...new Set(Object.values(TENDER_
 /**
  * The amount-in-text tripwire's inline hint — the same one DaySheetPage shows
  * on the day note and expense notes. Advisory only: nothing is blocked and
- * the text saves as typed. The wording lives in src/shared/textAmount.ts so
+ * the text saves as typed. The wording lives in packages/shared/src/textAmount.ts so
  * every field reads identically.
  */
 function AmountInTextHint({ text, className = "" }: { text: string; className?: string }) {

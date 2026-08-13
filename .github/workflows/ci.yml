@@ -1,15 +1,24 @@
 name: CI
 
-# Test + build gate for pull requests (deploy.yml only runs on main, so
-# without this a PR would carry no checks). Kept deliberately light: the
-# same commands a developer runs locally.
+# Test + build gate. The deploy pipeline is parked for the duration of the
+# monorepo merge (.github/workflows/deploy.yml.pre-hf-ledgers), so right now
+# this is the ONLY check on any branch.
+#
+# Two apps live here — the income ledger at the repo root, the expense ledger
+# under expense-ledger/ — with separate package.json files and separate
+# lockfiles, so each needs its own install, typecheck and build. Tests are the
+# exception: a bare `bun test` at the root walks the whole tree, both apps and
+# packages/shared included, and that single run is the one that matters. It is
+# deliberately NOT path-filtered: both apps import packages/shared, so a change
+# to either app or to shared has to prove both still pass. Path filters return
+# with the per-app deploy workflows in the CI restructure step.
 
 on:
   push:
   pull_request:
 
 jobs:
-  typecheck-and-build:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
@@ -18,7 +27,35 @@ jobs:
         with:
           bun-version: "1.3"
 
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun test
-      - run: bun run build
+      # packages/shared is imported by both apps but belongs to neither
+      # lockfile. A third-party import in there resolves in whichever app
+      # happens to have the package and crash-loops the other in production,
+      # not in CI — unless CI looks. No bun install needed for this one.
+      - name: packages/shared stays dependency-free
+        run: ./scripts/check-shared-dependency-free.sh
+
+      - name: Install (income, repo root)
+        run: bun install --frozen-lockfile
+
+      - name: Install (expense-ledger)
+        working-directory: expense-ledger
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck (income)
+        run: bun run typecheck
+
+      - name: Typecheck (expense-ledger)
+        working-directory: expense-ledger
+        run: bun run typecheck
+
+      # One run, whole monorepo: income's suite, expense-ledger's suite, and
+      # packages/shared's unioned suite.
+      - name: Test (whole monorepo)
+        run: bun test
+
+      - name: Build (income)
+        run: bun run build
+
+      - name: Build (expense-ledger)
+        working-directory: expense-ledger
+        run: bun run build

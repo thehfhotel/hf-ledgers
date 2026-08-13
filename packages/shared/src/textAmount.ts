@@ -1,7 +1,8 @@
-// Amount-in-text tripwire.
+// Amount-in-text tripwire. Shared by both ledgers.
 //
-// In the four Excel workbooks this app replaced, roughly 45 lines wrote the
-// money INSIDE the Thai description instead of in the amount column — e.g.
+// In the four Excel workbooks the income ledger replaced, roughly 45 lines
+// wrote the money INSIDE the Thai description instead of in the amount
+// column — e.g.
 // "ค่าจัดงานวันเกิดลค.ห้อง506(โอนเงิน350)" or "ค่าเช่าจอดรถ ก8375 (โอนเงิน300)".
 // Verified on one day: that money lands in no cell anywhere, so the office
 // simply lost it, and the import faithfully reproduced the loss.
@@ -66,7 +67,8 @@ export function looksLikeAmountInText(text: string): boolean {
 }
 
 /**
- * The one wording every caller shows, so the hint reads identically on the
- * booking grid, the other-income list and anywhere else it is wired up.
+ * The one wording every caller shows, so the hint reads identically
+ * everywhere it is wired up — the income ledger's booking grid and
+ * other-income list, the expense ledger's entry form and edit drawer.
  */
 export const AMOUNT_IN_TEXT_WARNING_TH = "จำนวนเงินอยู่ในข้อความ — กรอกในช่องจำนวนหรือไม่?";

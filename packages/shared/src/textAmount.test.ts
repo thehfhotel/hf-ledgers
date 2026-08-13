@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "./textAmount.ts";
 
+// Both ledgers carried this suite. Their CASES were byte-identical — the
+// only difference was that expense-ledger's copy had the explanatory
+// comments stripped — so the union is just income-ledger's fuller version.
+//
 // Every string below is either verbatim from the imported workbooks or the
 // same shape as a row in them. Both directions matter equally: a tripwire
 // that cries wolf on "ค่าอาหารเช้า ห้อง 418" gets ignored, and an ignored

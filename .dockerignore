@@ -12,3 +12,16 @@ dist
 !.env.example
 README.md
 .DS_Store
+
+# This file now governs BOTH images, because expense-ledger/Dockerfile also
+# builds from the repo root (it has to reach packages/shared). Docker matches
+# these patterns against the full path from the context root, so the bare
+# entries above only cover the root level — the nested equivalents have to be
+# spelled out or expense-ledger/node_modules ships into the build context.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/.DS_Store

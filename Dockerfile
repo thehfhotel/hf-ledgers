@@ -13,6 +13,12 @@ RUN bun install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src ./src
 COPY scripts ./scripts
+# packages/shared holds the modules BOTH ledgers import (date/money/
+# textAmount/access), resolved through tsconfig.json's `@shared/*` path
+# alias. It is outside src/, so — per the rule in CLAUDE.md — it needs its
+# own COPY, in this stage and in the runtime stage below. Miss one and the
+# container builds green and crash-loops at start.
+COPY packages ./packages
 
 RUN bun run build
 
@@ -36,9 +42,11 @@ COPY tsconfig.json ./
 # new import path OUTSIDE src/ (or scripts/) does. See CLAUDE.md. This is
 # ALSO how ส่งสลิป (src/slips/, Wave 2, docs/plan-audit-hub-slips.md) ships:
 # same image, same COPY, a different CMD (see docker-compose.yml's hf-slips
-# service) — verified this needed no Dockerfile change here.
+# service) — verified this needed no Dockerfile change here. packages/ IS
+# such an outside-src/ path and is copied explicitly on the next line.
 COPY src ./src
 COPY scripts ./scripts
+COPY packages ./packages
 COPY --from=build /app/dist ./dist
 
 # SQLite lives on a mounted volume. /app/slips-data is ส่งสลิป's OWN volume

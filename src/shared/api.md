@@ -1547,7 +1547,11 @@ never runtime), `isAccrualDay()`, `visibleTendersForDate()` (the 8 tender
 columns to render for a date — `deposit` pre-cutover, `deposit_applied`
 on/after, same printed slot).
 
-`money.ts` (`formatSatang`, `parseAmountToSatang`, `shouldCommitAmount`), `totals.ts`
+`packages/shared/src/money.ts` (`formatSatang`, `parseAmountToSatang`,
+`shouldCommitAmount`) — MOVED out of `src/shared/` in the hf-ledgers merge,
+along with `date.ts`, `textAmount.ts` and the CF Access verifier; both
+ledgers import them through the `@shared/*` path alias and neither app owns
+them any more. `totals.ts`
 (`computeDayTotals`), `bookings.ts` (`computeBookingTotals`,
 `deriveIncomeFromBookings`, `deriveCashBlock` (now takes a `depositEvents`
 param, defaulted `[]`), `depositCashTotals` (Wave C), `lineArithmeticMismatch`,
@@ -1557,9 +1561,12 @@ as `totals.ts`: the server computes with these and the client imports the
 SAME functions, so UI and API can never disagree. `rollup.ts`'s
 `computeIncomeLedgerRollup` gains a `depositEvents` param and the payload
 gains optional `depositReceivedSatang`/`depositRefundedSatang` (OUTSIDE
-`amounts` — see the hf-analytics section below). `date.ts` (`todayBangkok`,
-`isoToThaiLong`, `isoToBuddhist`, month helpers, plus Wave D's `daysBetween()`
-for the aging list's "days outstanding" column).
+`amounts` — see the hf-analytics section below). `packages/shared/src/date.ts`
+(`todayBangkok`, `isoToThaiLong`, `isoToBuddhist`, month helpers, Wave D's
+`daysBetween()` for the aging list's "days outstanding" column, and
+`isValidIso`, which since the hf-ledgers merge rejects impossible calendar
+dates rather than only checking the yyyy-mm-dd shape — every date-guarded
+endpoint below 400s on a date like `2026-06-99`).
 
 ## hf-analytics ingest (Wave C addition)
 

@@ -1,4 +1,32 @@
-# Claude Code Instructions — Expense Ledger (`expense-ledger`)
+# Claude Code Instructions — Expense Ledger (`hf-ledgers/expense-ledger`)
+
+**This app lives in a monorepo.** It was its own repo until 2026-08-13, when
+it was absorbed into `hf-ledgers` as a git subtree (full history preserved).
+Every path in this file is relative to `expense-ledger/` unless it says
+otherwise. Read the repo root's `CLAUDE.md` too — it carries the monorepo
+map, the rules for `packages/shared`, and the current state of CI and
+deploys, all of which apply here.
+
+What that means in practice:
+
+- **This app has its own `package.json`, lockfile, `tsconfig.json` and
+  `node_modules`.** `bun install` at the repo root does NOT cover it — run
+  `bun install`, `bun run typecheck` and `bun run build` from
+  `expense-ledger/`. The root `bun test` does walk this app's tests.
+- **`@shared/*` is `../packages/shared/src`** — `date.ts`, `money.ts`,
+  `textAmount.ts` and `access.ts` (the CF Access verifier) are ONE copy,
+  shared with the income ledger. `src/shared/` still exists here for
+  genuinely app-local types (`apTypes.ts`, `categories.ts`, `types.ts`).
+  Changing anything under `packages/shared/` is a contract change for the
+  income ledger too; run its suite, not just this one.
+- **Workflows must live in the repo root's `.github/workflows/`.** GitHub
+  does not load workflows from a subdirectory. This app's engine mirror
+  workflow is there as `expense-engine-mirror.yml`; its old `ci.yml` and
+  `deploy.yml` were dropped in the merge, and the deploy pipeline is rebuilt
+  per-app by the CI restructure step (tracked in `hf-tasks`).
+- **The Dockerfile builds from the MONOREPO ROOT**, not from this directory,
+  because it has to reach `packages/`. See its header for the exact
+  invocation.
 
 ## What this is
 
@@ -18,7 +46,7 @@ hard rule below before touching it or assuming the "engine-only" rule is
 absolute elsewhere.
 
 Stack: Bun runtime, 2-stage `oven/bun` Dockerfile, forced-command SSH deploy
-to evergreen (same pattern as `income-ledger` / `hf-erp-portal` /
+to evergreen (same pattern as the income ledger / `hf-erp-portal` /
 `room-daily-reporter`).
 
 ## Identity table
@@ -39,18 +67,21 @@ See README.md for the full first-boot / upgrade / backup procedures.
 
 ## Commands
 
+All of these run from `expense-ledger/`, not the repo root:
+
 ```sh
-bun install
+bun install            # this app's own lockfile — the root install does not cover it
 bun run dev          # Bun --hot on http://localhost:3000
-bun run build         # scripts/build.ts -> dist/client
+bun run build         # build.ts -> dist/client
 bun run start          # NODE_ENV=production bun src/server/server.ts
-bun run typecheck      # tsc --noEmit
-bun test
+bun run typecheck      # tsc --noEmit (resolves @shared/* via ../packages/shared/src)
+bun test               # this app only; the root `bun test` covers it plus the rest
 ```
 
-CI runs typecheck, `bun test`, then build, in that order, so broken code
-cannot reach prod (`.github/workflows/ci.yml` on every push/PR,
-`.github/workflows/deploy.yml`'s build job on `main`).
+CI is the repo root's single `.github/workflows/ci.yml`: dependency-free
+guard, both apps' installs, both typechecks, one whole-monorepo `bun test`,
+then both builds — in that order, so broken code cannot reach prod. There is
+no deploy workflow at the moment; see the root `CLAUDE.md`.
 
 ## Hard rules
 
@@ -75,8 +106,9 @@ cannot reach prod (`.github/workflows/ci.yml` on every push/PR,
   the rule above. Do not add a second database-of-its-own for anything else
   without amending this rule first. Backed up nightly alongside `expense_ap`
   — see README.md's "Backup" section.
-- **UI language is Thai only**, matching income-ledger's convention for this
-  estate's front-of-house tools. No `name_en` field, no English-first copy.
+- **UI language is Thai only**, matching the income ledger's convention for
+  this estate's front-of-house tools. No `name_en` field, no English-first
+  copy.
 - **No CSP header.** The estate shell script (`hf-bar.js`, served from
   `erp.thehfhotel.org/shell/*`) must load unrestricted, same rule as every
   other estate app under the erp shell.
@@ -93,12 +125,18 @@ cannot reach prod (`.github/workflows/ci.yml` on every push/PR,
 - **Never commit secrets.** `.env` is gitignored; `.env.example` carries
   empty placeholders only. Runtime env (`ENGINE_API_TOKEN`, `ACCESS_AUD`,
   `ACCESS_TEAM_DOMAIN`, `EBK_SECURITY_SECRET_KEY`) is materialized into the
-  container's `.env` by `.github/workflows/deploy.yml` from GitHub secrets —
-  reference locations, never values, in this repo.
-- **This repo is public.** Keep LAN IPs, internal network topology, and
-  `hostnames.json`-level Cloudflare details out of it — that context lives
-  in the (private) `HF-erp` repo, which owns Cloudflare-as-code for the
-  whole estate. Public hostname and container names are fine to state.
+  container's `.env` by the deploy workflow from GitHub secrets — reference
+  locations, never values, in this repo. **`ACCESS_AUD` must be non-empty in
+  production**: `packages/shared/src/access.ts` fails CLOSED without it, so
+  an empty value 401s every request rather than accepting any token from the
+  team domain. That is deliberate — on the LAN path this container's
+  `0.0.0.0:4050` mapping is reachable without going through Cloudflare at
+  all, and the JWT check is the only gate there is.
+- **This repo is public** (`hf-ledgers`, and it was public before the merge
+  too). Keep LAN IPs, internal network topology, and `hostnames.json`-level
+  Cloudflare details out of it — that context lives in the (private)
+  `hf-erp` repo, which owns Cloudflare-as-code for the whole estate. Public
+  hostname and container names are fine to state.
 - **No emojis anywhere** — UI text, code, comments, commit messages.
 - **The engine image is pinned by digest, never a moving tag.** Bumping it
   is a deliberate action via the repo root's

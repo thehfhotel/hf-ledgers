@@ -1,6 +1,45 @@
-# Claude Code Instructions — Income Ledger (`income-ledger`)
+# Claude Code Instructions — HF Ledgers (`hf-ledgers`)
 
-## What this is
+This repo is a two-app monorepo. **This file is the income ledger's** — it is
+the host app, at the repo root — and it also carries the map below. The
+expense ledger has its own `expense-ledger/CLAUDE.md`; read that one before
+touching anything under `expense-ledger/`.
+
+## Monorepo map
+
+| Path | What | Notes |
+|---|---|---|
+| `src/`, `scripts/`, `docs/` | **income ledger** (สรุปรายรับ-รายจ่าย) + ส่งสลิป | The host app. Everything in the rest of THIS file is about it. |
+| `expense-ledger/` | **expense ledger** + its ezBookkeeping engine | Absorbed 2026-08-13 as a git subtree, full history preserved. Own `package.json`, own lockfile, own `tsconfig.json`, own `CLAUDE.md`. |
+| `packages/shared/` | the modules BOTH apps import | `date.ts`, `money.ts`, `textAmount.ts`, `access.ts` (CF Access verifier) + their tests. Imported as `@shared/*`. See `packages/shared/README.md`. |
+| `.github/workflows/` | CI for the whole repo | GitHub only runs workflows from HERE — a workflow under `expense-ledger/` is a dead file. |
+
+Why one repo: these two apps are one bookkeeping surface for one office — the
+same people, the same Bangkok calendar day, the same satang-integer money
+rules. Four source files had already been copy-pasted between the two repos
+with a "must never drift" comment, and had drifted in both directions within
+the hour. See hf-erp `docs/adr/0006-repos-group-by-change-not-audience.md`.
+
+**Estate task board: `hf-tasks`.** Cross-repo work (consolidation waves,
+CI restructure, follow-ups this merge deliberately deferred) is tracked in
+`tasks/consolidation.md` there, not here. Check it before starting anything
+that touches deploys, workflows or repo layout, and update it in the same
+session if you close or unblock something.
+
+## Working across the two apps
+
+- `packages/shared` is dependency-free by rule — nothing but `node:`/`bun:`
+  builtins and its own relative imports. `scripts/check-shared-dependency-free.sh`
+  enforces it in CI. A third-party import there would resolve in whichever
+  app happens to have the package and crash-loop the other in production.
+- **Changing anything in `packages/shared` is a contract change for BOTH
+  apps.** Run `bun test` at the root (it walks the whole tree — both apps
+  and shared) plus `bun run typecheck` in each app. Never assume the app you
+  weren't working in is fine.
+- The two apps do NOT share a lockfile or `node_modules`. `bun install` at
+  the root covers the income ledger; `expense-ledger/` needs its own.
+
+## What this is (the income ledger)
 
 สรุปรายรับ-รายจ่าย — a daily income + expense ledger for HF Hotel front
 desk. Digitizes the paper daily income summary (income by tender category:
@@ -42,8 +81,11 @@ as `hf-erp-portal` / `room-daily-reporter`).
 
 **The contract of record is `src/shared/api.md`** — every endpoint, its
 body shape, auth level, bounds, and error shape. `src/shared/types.ts`,
-`money.ts`, `totals.ts`, `date.ts` are the locked shared types/helpers.
-Changing any of these is a contract change, not a routine edit.
+`totals.ts` and `bookings.ts` are this app's locked shared types/helpers;
+`money.ts`, `date.ts`, `textAmount.ts` and the CF Access verifier now live in
+`packages/shared/` and are locked for BOTH apps. Changing any of these is a
+contract change, not a routine edit — and for the `packages/shared` ones it
+is a contract change the expense ledger also has to survive.
 
 ## Identity table
 
@@ -53,7 +95,7 @@ Changing any of these is a contract change, not a routine edit.
 | Host port | `4040` |
 | Container | `income-ledger` (internal `:3000`) |
 | Volume | `ledger_data:/app/data`, DB `/app/data/ledger.db` |
-| Image | `ghcr.io/thehfhotel/income-ledger` (+`:buildcache`) |
+| Image | `ghcr.io/thehfhotel/income-ledger` (+`:buildcache`) — image and container names deliberately keep the old app name after the repo rename to `hf-ledgers`; they are decoupled from the repo slug and renaming them would mean a prod cutover for no benefit |
 | Portal module | `finance`, tool id `income-ledger` |
 
 ## Commands
@@ -64,12 +106,26 @@ bun run dev          # Bun --hot on http://localhost:3000
 bun run build         # scripts/build.ts -> dist/client
 bun run start          # NODE_ENV=production bun src/server/server.ts
 bun run typecheck      # tsc --noEmit
-bun test               # 271 tests across 14 files
+bun test               # walks the WHOLE monorepo: this app, packages/shared,
+                       # and expense-ledger/ — currently 1280 across 55 files
+./scripts/check-shared-dependency-free.sh   # packages/shared has no deps
 ```
 
-CI runs typecheck, `bun test`, then build — in that order, so broken code cannot
-reach prod. Shared pure logic (`totals.ts`, `bookings.ts`, `textAmount.ts`) is
-unit-tested; `src/server/server.test.ts` drives `api.handle()` against
+`bun test` at the root is deliberately not scoped to `src/` — both apps
+import `packages/shared`, so the run that matters is the one that proves both.
+`expense-ledger/` still needs its own `bun install` and its own
+`bun run typecheck`/`bun run build` (separate lockfile, separate tsconfig).
+
+CI (`.github/workflows/ci.yml`) runs the dependency-free guard, both installs,
+both typechecks, one whole-monorepo `bun test`, then both builds — in that
+order, so broken code cannot reach prod. **The deploy workflow is currently
+PARKED** (`.github/workflows/deploy.yml.pre-hf-ledgers` — inert because
+GitHub only loads `.yml`/`.yaml`), because the merge invalidated its
+single-app assumptions. Nothing auto-deploys from this repo until the CI
+restructure step rebuilds it per-app; see `hf-tasks`.
+
+Shared pure logic (`src/shared/totals.ts`, `bookings.ts`, and everything in
+`packages/shared/`) is unit-tested; `src/server/server.test.ts` drives `api.handle()` against
 `DB_PATH=:memory:` with the dev auth bypass (env must be set BEFORE importing the
 server module, since `db.ts` opens the DB and migrates at import time);
 `scripts/import-xls/*.test.ts` covers the one-time Excel backfill.
@@ -84,19 +140,24 @@ run bypasses any outbox: re-run the analytics backfill after importing.
 - **UI language is Thai only, on every screen including admin.** There is
   no `name_en` field anywhere in the data model or the UI. Don't add one.
 - **Money = integer satang end to end** (`amount_satang INTEGER` in SQLite).
-  Convert to/from baht ONLY at the UI edge, via `src/shared/money.ts`
-  (`formatSatang`, `parseAmountToSatang`). Never do float baht arithmetic
-  server-side or in totals.
+  Convert to/from baht ONLY at the UI edge, via `@shared/money.ts`
+  (`packages/shared/src/money.ts` — `formatSatang`, `parseAmountToSatang`).
+  Never do float baht arithmetic server-side or in totals.
 - **Business dates are Bangkok calendar strings `YYYY-MM-DD`**
-  (`todayBangkok()` in `src/shared/date.ts`), displayed in Buddhist Era.
-  Never use the server's or browser's own local date for "today".
+  (`todayBangkok()` in `@shared/date.ts`), displayed in Buddhist Era. Never
+  use the server's or browser's own local date for "today". `isValidIso()`
+  rejects impossible calendar dates (`2026-06-99`, `2026-02-31`), not just
+  the wrong shape — this app keys storage by the literal date string, so a
+  rolled-over date would persist a day sheet that aggregates under one month
+  and displays as another.
 - **No emojis anywhere** — UI text, code, comments, commit messages.
 - **A new top-level directory under `src/` needs no Dockerfile change** —
   the Dockerfile's `COPY src ./src` already copies everything. A new
-  import path OUTSIDE `src/` or `scripts/` DOES need a Dockerfile `COPY`
-  added, in both the build and runtime stages (a missed one crash-loops
-  prod at container start, not at build time — verified working before
-  every deploy).
+  import path OUTSIDE `src/`, `scripts/` or `packages/` DOES need a
+  Dockerfile `COPY` added, in both the build and runtime stages (a missed
+  one crash-loops prod at container start, not at build time — verify
+  working before every deploy). `packages/` is copied explicitly for exactly
+  this reason: `@shared/*` resolves outside `src/`.
 - **No service worker / no PWA in v1.** Don't add `sw.js`, a
   `manifest.webmanifest`, or `serviceWorker.register()`. This was a
   deliberate call — RDR's service worker caused a CDN-cache firefight this
@@ -107,13 +168,21 @@ run bypasses any outbox: re-run the analytics backfill after importing.
   and must respond even if the DB is briefly unavailable — the deploy shim
   only retries 15 times at 2s intervals.
 - **Never commit secrets.** `.env` is gitignored. Runtime env
-  (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) is materialized into the container's
-  `.env` by `.github/workflows/deploy.yml` from GitHub secrets — reference
-  locations, never values, in this repo. `PORTAL_DIRECTORY_URL`,
+  (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and `ACCESS_AUD_SLIPS`, which
+  `docker-compose.yml` maps onto the slips container's own `ACCESS_AUD`) is
+  materialized into the container's `.env` by the deploy workflow from
+  GitHub secrets — reference locations, never values, in this repo. That
+  workflow is parked during the merge (see the CI note above), so the
+  materialization list moves with it when it is rebuilt. **`ACCESS_AUD` and
+  `ACCESS_AUD_SLIPS` must be non-empty in production**: the verifier fails
+  CLOSED without them, by design — an empty one 401s every request rather
+  than accepting any token from the team domain. `PORTAL_DIRECTORY_URL`,
   `PORTAL_DIRECTORY_TOKEN`, and `PROTECTED_MANAGER` (with
   `src/server/directory-client.ts`) are retired — the app no longer
   depends on the HF portal being reachable at runtime; `ACCESS_TEAM_DOMAIN`
   and `ACCESS_AUD` remain, still required for JWT verification.
-- **This repo is public.** Keep LAN IPs and internal network topology out
-  of it; that context lives in the (private) `HF-erp` repo, which owns
-  Cloudflare-as-code for the whole estate.
+- **This repo is public**, and now holds both ledgers, so the rule covers
+  everything under `expense-ledger/` too. Keep LAN IPs and internal network
+  topology out of it; that context lives in the (private) `hf-erp` repo,
+  which owns Cloudflare-as-code for the whole estate. Public hostnames and
+  container names are fine to state.

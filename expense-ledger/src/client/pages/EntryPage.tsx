@@ -3,7 +3,7 @@ import { EngineUnreachableError, SessionExpiredError, createExpense, getMonthExp
 import { EditDrawer } from "../components/EditDrawer.tsx";
 import { categoryByCode, isBillingMonthCategory, type ExpenseCategoryCode } from "../../shared/categories.ts";
 import { CategoryPicker } from "../components/CategoryPicker.tsx";
-import { currentMonthBangkok, isoToThaiLong, todayBangkok } from "../../shared/date.ts";
+import { currentMonthBangkok, isoToThaiLong, todayBangkok } from "@shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "@shared/money.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "@shared/textAmount.ts";
 import type { ExpenseInput, ExpenseTransaction, PaymentMethod } from "../../shared/types.ts";

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
-import { currentMonthBangkok, isValidMonth } from "../shared/date.ts";
+import { currentMonthBangkok, isValidMonth } from "@shared/date.ts";
 import type { ApListFilter } from "../shared/apTypes.ts";
 import { setSessionExpiredHandler } from "./api.ts";
 import { SessionExpiredOverlay } from "./components/SessionExpiredOverlay.tsx";

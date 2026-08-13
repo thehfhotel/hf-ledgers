@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isoToBuddhist, shiftDays, timeBangkok } from "../../shared/date.ts";
+import { isoToBuddhist, shiftDays, timeBangkok } from "@shared/date.ts";
 import { formatSatang } from "@shared/money.ts";
 import { DEPOSIT_TENDER_LABELS_TH, type DepositTender, type Property } from "../../shared/types.ts";
 import {

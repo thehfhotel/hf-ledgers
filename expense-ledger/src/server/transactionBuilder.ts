@@ -56,7 +56,7 @@ export const ACCOUNT_CATEGORY_CASH = 1;
 export const ACCOUNT_CATEGORY_CHECKING = 2;
 
 /** Bangkok carries a fixed UTC+7 offset year-round (no DST) — see
- * src/shared/date.ts's todayBangkok(). Expressed in minutes to match the
+ * packages/shared/src/date.ts's todayBangkok(). Expressed in minutes to match the
  * engine's `utcOffset` field. */
 export const BANGKOK_UTC_OFFSET_MINUTES = 420;
 

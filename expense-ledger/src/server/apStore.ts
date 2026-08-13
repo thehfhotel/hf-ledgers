@@ -24,7 +24,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ExpenseCategoryCode } from "../shared/categories.ts";
-import { todayBangkok } from "../shared/date.ts";
+import { todayBangkok } from "@shared/date.ts";
 import {
   apPhotoExtForFilename,
   apPhotoUrl,

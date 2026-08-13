@@ -12,7 +12,7 @@ import * as apStore from "./apStore.ts";
 import { _internal as engineInternal } from "./engine.ts";
 import { buildTransactionUnixTimeSeconds } from "./transactionBuilder.ts";
 import { buildMonthResponse, fetchHandler } from "./server.ts";
-import { todayBangkok } from "../shared/date.ts";
+import { todayBangkok } from "@shared/date.ts";
 import type { ExpenseTransaction } from "../shared/types.ts";
 
 function resetAuthEnv() {

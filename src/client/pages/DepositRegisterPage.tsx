@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { daysBetween, isoToBuddhist, isValidIso, monthToThaiLong, shiftDays, todayBangkok } from "../../shared/date.ts";
+import { daysBetween, isoToBuddhist, isValidIso, monthToThaiLong, shiftDays, todayBangkok } from "@shared/date.ts";
 import { formatSatang } from "@shared/money.ts";
 import {
   DEPOSIT_TENDER_LABELS_TH,
@@ -1209,7 +1209,7 @@ function exceptionRowClass(resolvedAt: string | null): string {
  * unresolved row (renders nothing). `resolvedAt` is SQLite's
  * `datetime('now')` TEXT column ("YYYY-MM-DD HH:MM:SS" — `db.ts`'s
  * `upsertDepositNote`), NOT a JS `Date#toISOString()` string — `isoToBuddhist`
- * only parses a bare "YYYY-MM-DD" (`parseIso`, shared/date.ts), hence the
+ * only parses a bare "YYYY-MM-DD" (`parseIso`, packages/shared/src/date.ts), hence the
  * `.slice(0, 10)` before handing it off rather than passing the raw value. */
 function ResolvedByLine({ resolvedAt, resolvedBy }: { resolvedAt: string | null; resolvedBy: string | null }) {
   if (resolvedAt === null) return null;

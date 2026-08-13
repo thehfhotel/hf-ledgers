@@ -9,7 +9,7 @@
 // inside the drawer").
 
 import type { ExpenseCategoryCode } from "./categories.ts";
-import { shiftDays } from "./date.ts";
+import { shiftDays } from "@shared/date.ts";
 import type { ExpensePhoto, PaymentMethod } from "./types.ts";
 
 export type ApPaymentKind = "deposit" | "installment" | "full";
@@ -201,7 +201,7 @@ export function statusRank(status: ApStatus): number {
 }
 
 /**
- * `today` and `dueDate` are Bangkok calendar ISO dates (src/shared/date.ts).
+ * `today` and `dueDate` are Bangkok calendar ISO dates (packages/shared/src/date.ts).
  * Order matters: settled beats every date rule (a row can be both overdue by
  * date AND fully paid — settled wins), then overdue, then the 7-day
  * ใกล้ครบกำหนด window (inclusive both ends), else ค้างจ่าย — including a

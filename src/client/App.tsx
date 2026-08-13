@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { todayBangkok } from "../shared/date.ts";
+import { todayBangkok } from "@shared/date.ts";
 import { PROPERTIES, PROPERTY_LABELS, isProperty, type Property } from "../shared/types.ts";
 import { PROPERTY_BADGE_LABELS } from "./labels.ts";
 import { DaySheetPage } from "./pages/DaySheetPage.tsx";

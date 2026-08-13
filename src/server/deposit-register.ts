@@ -188,7 +188,7 @@ function paymentKey(row: RawDepositLedgerRow): string {
 /**
  * Normalizes `ledger_pay_date` to a Bangkok calendar date string, the same
  * `Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", ... })`
- * formatter `todayBangkok()` (shared/date.ts) uses, applied to an arbitrary
+ * formatter `todayBangkok()` (packages/shared/src/date.ts) uses, applied to an arbitrary
  * instant rather than "now". Accepts either a JS `Date` (the likely shape
  * for a Postgres TIMESTAMP column) or a string (defensive — same driver-
  * uncertainty reasoning as `RawDepositLedgerRow`'s field typing). `null` for

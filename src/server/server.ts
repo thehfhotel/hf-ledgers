@@ -66,7 +66,7 @@ import type { DayAuditRow } from "./day-audit.ts";
 import { computeDayTotals } from "../shared/totals.ts";
 import { computeBookingTotals, deriveCashBlock, deriveIncomeFromBookings, depositCashTotals } from "../shared/bookings.ts";
 import { isAccrualDay } from "../shared/accrual.ts";
-import { isValidIso, isValidMonth } from "../shared/date.ts";
+import { isValidIso, isValidMonth } from "@shared/date.ts";
 import {
   AMOUNT_SATANG_MAX,
   AMOUNT_SATANG_MIN,

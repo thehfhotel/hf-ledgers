@@ -11,7 +11,7 @@
 // `date` is the office REPORT day, not a calendar day: the office runs
 // three cashier rounds per day and the last spans 22:00-07:00, counted as
 // the same report day it started on. income-ledger already keys
-// income_amounts/sheet_days this way (see src/shared/date.ts,
+// income_amounts/sheet_days this way (see packages/shared/src/date.ts,
 // src/shared/api.md), so this payload inherits that key unchanged — the
 // PMS-ledger income series in hf-mcp groups by calendar time instead, so
 // the two will legitimately disagree by one night at every month boundary.

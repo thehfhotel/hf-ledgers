@@ -35,7 +35,7 @@ import {
   listCreditorHints,
   updateApRow,
 } from "./apStore.ts";
-import { todayBangkok } from "../shared/date.ts";
+import { todayBangkok } from "@shared/date.ts";
 import type { ApRowInput } from "../shared/apTypes.ts";
 
 let tmpDir: string;

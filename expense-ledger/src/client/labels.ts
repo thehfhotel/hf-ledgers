@@ -1,7 +1,7 @@
 // Every repeated Thai string in the app lives here (frontend spec §8), so
 // two screens can never drift into two different words for the same thing.
 // Category labels come from src/shared/categories.ts; month/date words come
-// from the ported src/shared/date.ts — neither is re-declared here.
+// from packages/shared/src/date.ts — neither is re-declared here.
 
 export const APP_TITLE = "บันทึกค่าใช้จ่าย";
 

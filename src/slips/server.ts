@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { identify } from "../server/auth.ts";
 import { pmsConfigured } from "../server/pms-prefill.ts";
-import { isValidIso } from "../shared/date.ts";
+import { isValidIso } from "@shared/date.ts";
 import { BOOKING_NO_MAX_LEN, isProperty } from "../shared/types.ts";
 import type { Property } from "../shared/types.ts";
 import { markCash, unmarkCash } from "./cash-marks.ts";

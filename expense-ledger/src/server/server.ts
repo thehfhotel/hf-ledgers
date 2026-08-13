@@ -16,7 +16,7 @@ import {
 } from "./engine.ts";
 import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution.ts";
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
-import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "../shared/date.ts";
+import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "@shared/date.ts";
 import {
   apPhotoUrl,
   computeGross,

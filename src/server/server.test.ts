@@ -99,6 +99,34 @@ beforeAll(async () => {
   );
 });
 
+// The hardened isValidIso (packages/shared/src/date.ts, adopted in the
+// hf-ledgers merge from expense-ledger, which had the fix and income did
+// not) is a real behavior change at this repo's 23 date-guarded API
+// boundaries: requests that used to 200 now 400. This describe is the
+// boundary-level proof, since the unit tests in packages/shared only prove
+// the predicate.
+//
+// It matters most here rather than in expense-ledger because THIS app keys
+// storage by the literal date string. "2026-06-99" passed the old regex and
+// was persisted verbatim as the row key, where it aggregated under June
+// (the rollups match `date LIKE 'YYYY-MM%'`), rendered as 7 กันยายน 2569
+// (every display helper goes through parseIso, which rolls it over), and
+// could never be reached again from the date stepper — shiftDays from any
+// real June date cannot produce it. Money in a day sheet nobody can
+// navigate to.
+describe("impossible calendar dates are rejected at the API boundary", () => {
+  test("GET day sheet: 2026-06-99 is 400, not a phantom day sheet", async () => {
+    const res = await call<{ error: string }>("GET", `/${PROPERTY}/day/2026-06-99`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid date");
+  });
+
+  test("GET day sheet: a real date on either side still resolves", async () => {
+    expect((await call("GET", `/${PROPERTY}/day/2026-06-30`)).status).toBe(200);
+    expect((await call("GET", `/${PROPERTY}/day/2024-02-29`)).status).toBe(200);
+  });
+});
+
 describe("category seed and category_key", () => {
   test("seeds fifteen income categories, including the split รายการอื่นๆ, โอน/เครดิต pairs, and the Wave C deposit_applied category", () => {
     const income = categories.filter((c) => c.kind === "income");

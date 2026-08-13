@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { EngineUnreachableError, SessionExpiredError, listApRows } from "../api.ts";
 import { navigate } from "../App.tsx";
-import { currentMonthBangkok, isoToBuddhist, monthToThaiLong, shiftMonths, todayBangkok } from "../../shared/date.ts";
+import { currentMonthBangkok, isoToBuddhist, monthToThaiLong, shiftMonths, todayBangkok } from "@shared/date.ts";
 import { formatSatang } from "@shared/money.ts";
 import { categoryByCode } from "../../shared/categories.ts";
 import {

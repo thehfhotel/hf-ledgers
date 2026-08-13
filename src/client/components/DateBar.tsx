@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { isoToThaiLong, todayBangkok } from "../../shared/date.ts";
+import { isoToThaiLong, todayBangkok } from "@shared/date.ts";
 
 interface Props {
   date: string;

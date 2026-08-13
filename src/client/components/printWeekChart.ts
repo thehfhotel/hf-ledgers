@@ -1,4 +1,4 @@
-import { parseIso, shiftDays } from "../../shared/date.ts";
+import { parseIso, shiftDays } from "@shared/date.ts";
 
 // Pure week-window + zero-fill + scaling logic for the day-summary print's
 // weekly income bar chart (PrintableDaySummary.tsx's "รายรับรายวัน

@@ -32,16 +32,13 @@ bun test               # server.test.ts drives fetchHandler directly; the AP reg
                        # temp files (AP_DB_PATH), never the real /app/data/ap.db path
 ```
 
-CI (`.github/workflows/ci.yml`) runs typecheck, `bun test`, then build, on every
-push and PR. `.github/workflows/deploy.yml` runs the same gate before pushing
-the frontend image and deploying — a red test suite cannot reach production.
-
-**Repo status**: the deploy job will fail on GitHub Actions until the
-one-time host setup below is done (SSH key + forced-command shim on
-evergreen) and the `EVERGREEN_EXPENSE_LEDGER_DEPLOY_SSH_KEY` /
-`EVERGREEN_HOST_KEY` secrets exist on this repo. That is expected for a
-freshly-created repo — CI (typecheck/test/build) still passes and gates PRs
-either way.
+Both workflows live in the MONOREPO ROOT's `.github/workflows/` (GitHub does
+not load workflows from a subdirectory). `ci.yml` runs typecheck, `bun test`
+and build for this app on every push and PR; `deploy.yml` runs the same gate
+before pushing the frontend image and deploying — a red test suite cannot
+reach production. The deploy is path-filtered: it fires on a push to `main`
+touching `expense-ledger/**`, `packages/**`, the root `.dockerignore`, or the
+workflow itself.
 
 ## One-time host setup (evergreen)
 
@@ -71,11 +68,13 @@ sudo tee -a /home/deploy/.ssh/authorized_keys > /dev/null <<'EOF'
 command="/srv/run-deploy-expense-ledger.sh",restrict ssh-ed25519 PUBKEY_FROM_STEP_1 gh-actions@thehfhotel-expense-ledger
 EOF
 
-# 4. Add GitHub secrets on this repo:
+# 4. Add GitHub secrets on the hf-ledgers repo. App-specific ones are
+#    EXPENSE_-prefixed because the repo hosts two apps:
 #    EVERGREEN_EXPENSE_LEDGER_DEPLOY_SSH_KEY  - private half of the key from step 1
-#    EVERGREEN_HOST_KEY                        - already exists org-wide, reuse it
-#    ENGINE_API_TOKEN, ACCESS_AUD, ACCESS_TEAM_DOMAIN (optional, has a default),
-#    EBK_SECURITY_SECRET_KEY                   - see "First-boot procedure" below
+#    EVERGREEN_HOST_KEY                        - already exists, shared with income
+#    ACCESS_TEAM_DOMAIN                        - shared with income (same CF team)
+#    EXPENSE_ACCESS_AUD, EXPENSE_ENGINE_API_TOKEN,
+#    EXPENSE_EBK_SECURITY_SECRET_KEY           - see "First-boot procedure" below
 ```
 
 `GITHUB_TOKEN` is provided automatically (GHCR push/pull).
@@ -109,8 +108,9 @@ The single ledger account's username and password live on evergreen at
    **non-expiring** (`expiresInSeconds=0` — pick "never expires" if the UI
    offers an expiry choice; an expiring token silently breaks the frontend's
    engine client the moment it lapses, surfacing as `engine_unreachable`).
-   That value is `ENGINE_API_TOKEN` — set it as a GitHub secret and redeploy
-   so the frontend's `src/server/engine.ts` client can use it.
+   That value becomes the container's `ENGINE_API_TOKEN` — set it as the
+   `EXPENSE_ENGINE_API_TOKEN` GitHub secret on `hf-ledgers` and redeploy so
+   the frontend's `src/server/engine.ts` client can use it.
 4. Set `EBK_USER_ENABLE_REGISTER` back to `false` (the compose default) and
    redeploy, so the registration page can never create a second account.
 
@@ -124,7 +124,7 @@ they talk to the engine directly over its loopback host-port mapping
 procedure" above (from evergreen itself, or an SSH tunnel from your laptop).
 They read `EBK_URL` (defaults to `http://127.0.0.1:4051`) and `EBK_TOKEN` —
 `EBK_TOKEN` can be the exact same API token minted in first-boot step 3
-(the one set as the `ENGINE_API_TOKEN` GitHub secret); it's just exported
+(the one set as the `EXPENSE_ENGINE_API_TOKEN` GitHub secret); it's just exported
 under a different env var name here because these scripts run from an
 operator's shell, not inside the frontend container. Both scripts default to
 a dry-run that only reads from the engine and prints a plan — pass `--apply`

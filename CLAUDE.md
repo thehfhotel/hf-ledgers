@@ -116,13 +116,19 @@ import `packages/shared`, so the run that matters is the one that proves both.
 `expense-ledger/` still needs its own `bun install` and its own
 `bun run typecheck`/`bun run build` (separate lockfile, separate tsconfig).
 
-CI (`.github/workflows/ci.yml`) runs the dependency-free guard, both installs,
-both typechecks, one whole-monorepo `bun test`, then both builds — in that
-order, so broken code cannot reach prod. **The deploy workflow is currently
-PARKED** (`.github/workflows/deploy.yml.pre-hf-ledgers` — inert because
-GitHub only loads `.yml`/`.yaml`), because the merge invalidated its
-single-app assumptions. Nothing auto-deploys from this repo until the CI
-restructure step rebuilds it per-app; see `hf-tasks`.
+CI (`.github/workflows/ci.yml`) runs the dependency-free guard plus one
+`estate-ci` bun-ci call per app — install, typecheck, test, build in each —
+on every push and pull request, never path-filtered, because a
+`packages/shared` change has to prove both apps.
+
+`.github/workflows/deploy.yml` deploys on push to `main`, path-filtered per
+app (root paths -> income, `expense-ledger/**` -> expense, `packages/**` ->
+both), each deploy gated on that app's own bun-ci run and on the shared
+guard. Both call `thehfhotel/estate-ci`'s reusable workflows at a pinned SHA;
+the app-specific secrets are prefixed `INCOME_*` / `EXPENSE_*` because
+GitHub Environments cannot be used from a reusable-workflow caller (the
+reasoning is in the workflow header). `expense-engine-mirror.yml` stays
+manual-dispatch only and must never gain an automatic trigger.
 
 Shared pure logic (`src/shared/totals.ts`, `bookings.ts`, and everything in
 `packages/shared/`) is unit-tested; `src/server/server.test.ts` drives `api.handle()` against
@@ -171,9 +177,10 @@ run bypasses any outbox: re-run the analytics backfill after importing.
   (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and `ACCESS_AUD_SLIPS`, which
   `docker-compose.yml` maps onto the slips container's own `ACCESS_AUD`) is
   materialized into the container's `.env` by the deploy workflow from
-  GitHub secrets — reference locations, never values, in this repo. That
-  workflow is parked during the merge (see the CI note above), so the
-  materialization list moves with it when it is rebuilt. **`ACCESS_AUD` and
+  GitHub secrets (`INCOME_ACCESS_AUD`, `INCOME_ACCESS_AUD_SLIPS`, and the
+  shared `ACCESS_TEAM_DOMAIN` — the workflow renders them into the
+  `env_payload` block) — reference locations, never values, in this repo.
+  **`ACCESS_AUD` and
   `ACCESS_AUD_SLIPS` must be non-empty in production**: the verifier fails
   CLOSED without them, by design — an empty one 401s every request rather
   than accepting any token from the team domain. `PORTAL_DIRECTORY_URL`,

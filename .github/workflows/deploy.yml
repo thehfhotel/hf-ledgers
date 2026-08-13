@@ -1,0 +1,273 @@
+name: Build & Deploy
+
+# Two apps in one repo, two independent pipelines. A push to main deploys only
+# the apps whose paths changed; the route job below is what decides, and every
+# deploy is gated on that app's own bun-ci run plus the shared-module guard.
+#
+# Replaces the two separate `deploy.yml` files the merged repos carried
+# (this repo's own, parked as .github/workflows/deploy.yml.pre-hf-ledgers, and
+# thehfhotel/expense-ledger's). Behaviour is preserved deliberately, including
+# the per-app concurrency group names (deploy-evergreen-income-ledger,
+# deploy-evergreen-expense-ledger), the image names, the shim each SSH key is
+# forced-command pinned to, and the exact container .env each stack ends up
+# with — verified line for line against evergreen's live .env files. What
+# changed: the build/push/SSH plumbing now comes from the estate's shared
+# reusable workflow instead of two drifting copies, and the deploys are
+# path-filtered.
+#
+# NOT IN HERE, on purpose: the ezBookkeeping engine image. It is digest-pinned
+# in expense-ledger/docker-compose.yml and mirrored to GHCR only by
+# expense-engine-mirror.yml, which is manual-dispatch only and must stay that
+# way. Nothing in this file builds, tags or moves that image.
+#
+# One image, two containers: the income build feeds both the `income-ledger`
+# app and the `hf-slips` service in docker-compose.yml (same image, different
+# command, separate volumes). There is no second build and no second deploy —
+# one `docker compose up` recreates both.
+#
+# ── Why repo-level secrets and not GitHub Environments ────────────────────
+# The plan for this step called for `income` and `expense` Environments
+# holding each app's deploy key and payload secrets. GitHub cannot do it: a
+# job that calls a reusable workflow may only carry `name`, `uses`, `with`,
+# `secrets`, `needs`, `if` and `permissions` — `environment` is rejected
+# outright (actionlint syntax-check, and the docs' own note that
+# "environment secrets cannot be passed from the caller workflow as
+# `on.workflow_call` does not support the `environment` keyword"). The
+# env_payload below is rendered in the CALLING job, so an Environment on the
+# called workflow could not scope it either. Isolation is done with app
+# prefixes on the secret names instead: INCOME_* and EXPENSE_* are read by
+# exactly one job each, and only ACCESS_TEAM_DOMAIN and EVERGREEN_HOST_KEY
+# stay unprefixed — the two values both apps genuinely share (one Cloudflare
+# Access team domain, one deploy host).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Which app to deploy (path filtering does not apply to a manual run)."
+        type: choice
+        options: [all, income, expense]
+        default: all
+        required: false
+
+jobs:
+  # ── Which apps changed? ────────────────────────────────────────────────────
+  route:
+    name: Route changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      income: ${{ steps.decide.outputs.income }}
+      expense: ${{ steps.decide.outputs.expense }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+        with:
+          persist-credentials: false
+
+      - id: filter
+        if: github.event_name == 'push'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            # The income ledger is rooted at the repo root, so its filter is a
+            # list of root paths rather than one directory. docs/**, CLAUDE.md,
+            # CONTEXT.md and expense-ledger/** are deliberately absent: a
+            # docs-only commit must not restart production.
+            income:
+              - 'src/**'
+              - 'scripts/**'
+              - 'packages/**'
+              - 'Dockerfile'
+              - 'docker-compose.yml'
+              - 'package.json'
+              - 'bun.lock'
+              - 'bunfig.toml'
+              - 'tsconfig.json'
+              - '.dockerignore'
+              - '.github/workflows/deploy.yml'
+            # packages/** is in BOTH lists on purpose — a shared-module change
+            # is a contract change for both apps and both images embed a copy,
+            # so both have to be rebuilt. The root .dockerignore is likewise in
+            # both: it governs both build contexts (see the file's own note).
+            #
+            # expense-ledger/** is flat, which means editing
+            # expense-ledger/CLAUDE.md or README.md does redeploy the expense
+            # stack. Left flat on purpose: dorny/paths-filter ORs its patterns
+            # and does not subtract, so a `!expense-ledger/README.md` entry
+            # would match every path OUTSIDE that file and deploy expense on
+            # every commit — the opposite of the intent.
+            expense:
+              - 'expense-ledger/**'
+              - 'packages/**'
+              - '.dockerignore'
+              - '.github/workflows/deploy.yml'
+
+      # paths-filter needs a base to diff against and has none on a manual run,
+      # so a dispatch selects its target explicitly instead. Defaulting a
+      # dispatch to "nothing changed" would make the manual escape hatch
+      # silently deploy nothing — the failure mode estate-ci's own comments
+      # keep scars about.
+      - id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PICK: ${{ inputs.app }}
+          F_INCOME: ${{ steps.filter.outputs.income }}
+          F_EXPENSE: ${{ steps.filter.outputs.expense }}
+        run: |
+          set -euo pipefail
+          for app in income expense; do
+            upper=$(printf '%s' "$app" | tr '[:lower:]' '[:upper:]')
+            if [ "$EVENT_NAME" = "push" ]; then
+              eval "value=\${F_${upper}:-false}"
+            elif [ "${PICK:-all}" = "all" ] || [ "${PICK:-}" = "$app" ]; then
+              value=true
+            else
+              value=false
+            fi
+            echo "${app}=${value}" >> "$GITHUB_OUTPUT"
+            echo "${app}: ${value}"
+          done
+
+  # ── Shared-module guard (gates both deploys) ───────────────────────────────
+  # A third-party import in packages/shared resolves in whichever app happens
+  # to have the package installed and crash-loops the other at container start
+  # — not at build time. Cheap, pure grep, and it runs whenever either app is
+  # about to ship, because both images embed a copy of that directory.
+  guard:
+    name: packages/shared stays dependency-free
+    needs: [route]
+    if: needs.route.outputs.income == 'true' || needs.route.outputs.expense == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+        with:
+          persist-credentials: false
+      - run: ./scripts/check-shared-dependency-free.sh
+
+  # ── income ledger + ส่งสลิป (repo root) ─────────────────────────────────────
+  ci-income:
+    name: CI (income)
+    needs: [route]
+    if: needs.route.outputs.income == 'true'
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    with:
+      working-directory: "."
+      # The client bundle is built inside the Dockerfile; running it here too
+      # would widen what can block a production deploy without checking
+      # anything the image build does not already check. ci.yml runs it on
+      # every PR and push.
+      run_build: false
+
+  deploy-income:
+    # LOAD-BEARING. deploy-evergreen.yml does not run this repo's tests — it
+    # cannot know what they are. Without this `needs:` a red suite would not
+    # stop a push to main from reaching production; that has happened here
+    # before (four commits shipped on a red suite), which is why the parked
+    # workflow this replaces carried the same scar comment.
+    needs: [route, guard, ci-income]
+    if: needs.route.outputs.income == 'true'
+    uses: thehfhotel/estate-ci/.github/workflows/deploy-evergreen.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    # A called workflow's GITHUB_TOKEN scopes come from the calling job; the
+    # build job cannot push to GHCR without packages:write.
+    permissions:
+      contents: read
+      packages: write
+    with:
+      # app_name is BOTH the concurrency group (deploy-evergreen-income-ledger,
+      # the group this repo used before the merge) and the
+      # /srv/run-deploy-income-ledger.sh shim the SSH key is forced-command
+      # pinned to. The app, its image and its container keep the income-ledger
+      # name after the repo rename to hf-ledgers — renaming them would mean a
+      # prod cutover for no benefit.
+      app_name: income-ledger
+      image: ghcr.io/thehfhotel/income-ledger
+      host_port: "4040" # docker-compose.yml's ${HOST_PORT:-4040}
+      # context/dockerfile/compose_path are the defaults (repo root) — the
+      # income ledger IS the root app. The context has to include packages/,
+      # which it does.
+    secrets:
+      ssh_key: ${{ secrets.EVERGREEN_INCOME_LEDGER_DEPLOY_SSH_KEY }}
+      host_key: ${{ secrets.EVERGREEN_HOST_KEY }}
+      # Byte-for-byte the .env the parked workflow wrote, in the same order
+      # (IMAGE_TAG and HOST_PORT are prepended by the reusable workflow).
+      # ANALYTICS_URL and SLIPS_STATUS_URL are fixed internal container-name
+      # URLs, not secrets, so they stay literals here exactly as before.
+      #
+      # ONE .env feeds BOTH containers: `app` reads ACCESS_AUD, `hf-slips`
+      # reads ACCESS_AUD_SLIPS as its own ACCESS_AUD (a separate Cloudflare
+      # Access application), and both read the same SLIPS_INGRESS_TOKEN and
+      # PMS URLs. Do not split them.
+      #
+      # Empty is a valid value throughout: docker-compose.yml's `${VAR:-...}`
+      # forms treat unset and empty identically, so ACCESS_TEAM_DOMAIN falls
+      # back to the compose default and the optional features go dark rather
+      # than leaving a stale value behind in the container.
+      env_payload: |
+        ACCESS_TEAM_DOMAIN=${{ secrets.ACCESS_TEAM_DOMAIN }}
+        ACCESS_AUD=${{ secrets.INCOME_ACCESS_AUD }}
+        ANALYTICS_URL=http://hf-analytics:3000
+        ANALYTICS_TOKEN=${{ secrets.INCOME_ANALYTICS_TOKEN }}
+        PMS_DB_URL_HF=${{ secrets.INCOME_PMS_DB_URL_HF }}
+        PMS_DB_URL_HFVILLE=${{ secrets.INCOME_PMS_DB_URL_HFVILLE }}
+        SLIPS_STATUS_URL=http://hf-slips:4060
+        ACCESS_AUD_SLIPS=${{ secrets.INCOME_ACCESS_AUD_SLIPS }}
+        SLIPS_INGRESS_TOKEN=${{ secrets.INCOME_SLIPS_INGRESS_TOKEN }}
+
+  # ── expense ledger (expense-ledger/) ───────────────────────────────────────
+  ci-expense:
+    name: CI (expense)
+    needs: [route]
+    if: needs.route.outputs.expense == 'true'
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    with:
+      working-directory: expense-ledger
+      run_build: false
+
+  deploy-expense:
+    needs: [route, guard, ci-expense]
+    if: needs.route.outputs.expense == 'true'
+    uses: thehfhotel/estate-ci/.github/workflows/deploy-evergreen.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    permissions:
+      contents: read
+      packages: write
+    with:
+      app_name: expense-ledger # -> deploy-evergreen-expense-ledger, /srv/run-deploy-expense-ledger.sh
+      image: ghcr.io/thehfhotel/expense-ledger
+      # THE BUILD CONTEXT IS THE MONOREPO ROOT, NOT expense-ledger/. This app
+      # imports packages/shared through `@shared/*`, and a context of
+      # expense-ledger/ cannot see that directory — the image would build
+      # green and the container would crash-loop at start. See the header of
+      # expense-ledger/Dockerfile.
+      context: "."
+      dockerfile: expense-ledger/Dockerfile
+      compose_path: expense-ledger/docker-compose.yml # renamed to docker-compose.yml in the tarball
+      host_port: "4050" # expense-ledger/docker-compose.yml's ${HOST_PORT:-4050}
+    secrets:
+      ssh_key: ${{ secrets.EVERGREEN_EXPENSE_LEDGER_DEPLOY_SSH_KEY }}
+      host_key: ${{ secrets.EVERGREEN_HOST_KEY }}
+      # Byte-for-byte the .env the absorbed repo's workflow wrote, same order.
+      # ENGINE_URL is deliberately absent: it was never written to the .env and
+      # the compose file defaults it to http://expense-ledger-engine:8080.
+      #
+      # ACCESS_AUD is NOT the income ledger's — expense.thehfhotel.org is its
+      # own Cloudflare Access application. For a LAN-path request (a device on
+      # the LAN hitting host:4050 directly, never touching Cloudflare) the
+      # app's own Cf-Access-Jwt-Assertion check is the ONLY gate, so this must
+      # be non-empty in production.
+      #
+      # The two EBK_* flags are literals, not secrets: API-token auth must be
+      # on for the frontend's tokens to be accepted at all, and registration
+      # stays off except during the hand-driven first-boot window. See
+      # expense-ledger/README.md "First-boot procedure".
+      env_payload: |
+        ACCESS_TEAM_DOMAIN=${{ secrets.ACCESS_TEAM_DOMAIN }}
+        ACCESS_AUD=${{ secrets.EXPENSE_ACCESS_AUD }}
+        ENGINE_API_TOKEN=${{ secrets.EXPENSE_ENGINE_API_TOKEN }}
+        EBK_SECURITY_SECRET_KEY=${{ secrets.EXPENSE_EBK_SECURITY_SECRET_KEY }}
+        EBK_SECURITY_ENABLE_API_TOKEN=true
+        EBK_USER_ENABLE_REGISTER=false

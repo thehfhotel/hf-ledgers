@@ -1,61 +1,61 @@
 name: CI
 
-# Test + build gate. The deploy pipeline is parked for the duration of the
-# monorepo merge (.github/workflows/deploy.yml.pre-hf-ledgers), so right now
-# this is the ONLY check on any branch.
+# Test + build gate for pull requests and every branch push. Two apps live
+# here — the income ledger at the repo root, the expense ledger under
+# expense-ledger/ — with separate package.json files and separate lockfiles,
+# so each gets its own bun-ci call with its own working-directory.
 #
-# Two apps live here — the income ledger at the repo root, the expense ledger
-# under expense-ledger/ — with separate package.json files and separate
-# lockfiles, so each needs its own install, typecheck and build. Tests are the
-# exception: a bare `bun test` at the root walks the whole tree, both apps and
-# packages/shared included, and that single run is the one that matters. It is
-# deliberately NOT path-filtered: both apps import packages/shared, so a change
-# to either app or to shared has to prove both still pass. Path filters return
-# with the per-app deploy workflows in the CI restructure step.
+# Deliberately NOT path-filtered. Both apps import packages/shared, so a
+# change to either app or to shared has to prove both still pass. Path filters
+# belong in deploy.yml, where the cost of a needless run is a production
+# restart rather than two minutes of runner time.
+#
+# deploy.yml carries its OWN copy of these calls as its deploy gate. That is
+# not duplication to tidy away: the gate has to live in the workflow that
+# deploys, or a red suite cannot stop a push to main from reaching production
+# (estate-ci's deploy-evergreen.yml does not and cannot run your tests). This
+# file is what gives a PR — which never triggers deploy.yml — the same checks.
 
 on:
   push:
   pull_request:
 
 jobs:
-  ci:
+  # packages/shared is imported by both apps but belongs to neither lockfile.
+  # A third-party import in there resolves in whichever app happens to have
+  # the package and crash-loops the other in production, not in CI — unless CI
+  # looks. Pure grep, so it runs before (and independently of) any install,
+  # which is also why it cannot live inside a bun-ci call.
+  shared-guard:
+    name: packages/shared stays dependency-free
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.3"
+          persist-credentials: false
+      - run: ./scripts/check-shared-dependency-free.sh
 
-      # packages/shared is imported by both apps but belongs to neither
-      # lockfile. A third-party import in there resolves in whichever app
-      # happens to have the package and crash-loops the other in production,
-      # not in CI — unless CI looks. No bun install needed for this one.
-      - name: packages/shared stays dependency-free
-        run: ./scripts/check-shared-dependency-free.sh
+  # Root = the income ledger (+ ส่งสลิป, same package). Its `test` script is a
+  # bare `bun test` from the repo root, which walks the WHOLE monorepo —
+  # income's suite, packages/shared's, and expense-ledger's — so this one job
+  # is the run that proves a shared change did not break the other app.
+  # expense-ledger's dependency set is a subset of the root package's, so
+  # those tests resolve against the root install and need no second one here.
+  income:
+    name: income ledger (root)
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    with:
+      working-directory: "."
 
-      - name: Install (income, repo root)
-        run: bun install --frozen-lockfile
-
-      - name: Install (expense-ledger)
-        working-directory: expense-ledger
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck (income)
-        run: bun run typecheck
-
-      - name: Typecheck (expense-ledger)
-        working-directory: expense-ledger
-        run: bun run typecheck
-
-      # One run, whole monorepo: income's suite, expense-ledger's suite, and
-      # packages/shared's unioned suite.
-      - name: Test (whole monorepo)
-        run: bun test
-
-      - name: Build (income)
-        run: bun run build
-
-      - name: Build (expense-ledger)
-        working-directory: expense-ledger
-        run: bun run build
+  # Its own install, typecheck and client build — separate lockfile, separate
+  # tsconfig. `bun run test` here re-runs expense's own suite scoped to this
+  # directory; the value is not the tests (income's job already ran them) but
+  # proving they still pass against expense-ledger's OWN --frozen-lockfile
+  # install, which is what the container actually ships with.
+  expense:
+    name: expense ledger
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    with:
+      working-directory: expense-ledger

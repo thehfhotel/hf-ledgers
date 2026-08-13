@@ -22,8 +22,9 @@ What that means in practice:
 - **Workflows must live in the repo root's `.github/workflows/`.** GitHub
   does not load workflows from a subdirectory. This app's engine mirror
   workflow is there as `expense-engine-mirror.yml`; its old `ci.yml` and
-  `deploy.yml` were dropped in the merge, and the deploy pipeline is rebuilt
-  per-app by the CI restructure step (tracked in `hf-tasks`).
+  `deploy.yml` were dropped in the merge and replaced by the root's per-app
+  `ci.yml` / `deploy.yml`, which path-filter `expense-ledger/**` (and
+  `packages/**`) to this app's jobs.
 - **The Dockerfile builds from the MONOREPO ROOT**, not from this directory,
   because it has to reach `packages/`. See its header for the exact
   invocation.
@@ -78,10 +79,14 @@ bun run typecheck      # tsc --noEmit (resolves @shared/* via ../packages/shared
 bun test               # this app only; the root `bun test` covers it plus the rest
 ```
 
-CI is the repo root's single `.github/workflows/ci.yml`: dependency-free
-guard, both apps' installs, both typechecks, one whole-monorepo `bun test`,
-then both builds — in that order, so broken code cannot reach prod. There is
-no deploy workflow at the moment; see the root `CLAUDE.md`.
+CI is the repo root's `.github/workflows/ci.yml`: the dependency-free guard
+plus one bun-ci call per app (install, typecheck, test, build), on every push
+and PR, never path-filtered. The root's `deploy.yml` deploys this app on a
+push to `main` that touches `expense-ledger/**`, `packages/**`, the root
+`.dockerignore`, or the workflow itself — gated on this app's own bun-ci run.
+Its image builds from the MONOREPO ROOT context with
+`-f expense-ledger/Dockerfile`, and it ships
+`expense-ledger/docker-compose.yml`. See the root `CLAUDE.md`.
 
 ## Hard rules
 
@@ -125,7 +130,11 @@ no deploy workflow at the moment; see the root `CLAUDE.md`.
 - **Never commit secrets.** `.env` is gitignored; `.env.example` carries
   empty placeholders only. Runtime env (`ENGINE_API_TOKEN`, `ACCESS_AUD`,
   `ACCESS_TEAM_DOMAIN`, `EBK_SECURITY_SECRET_KEY`) is materialized into the
-  container's `.env` by the deploy workflow from GitHub secrets — reference
+  container's `.env` by the deploy workflow from GitHub secrets — which are
+  app-prefixed on this shared repo (`EXPENSE_ACCESS_AUD`,
+  `EXPENSE_ENGINE_API_TOKEN`, `EXPENSE_EBK_SECURITY_SECRET_KEY`; only
+  `ACCESS_TEAM_DOMAIN` is shared with the income ledger, because it is
+  genuinely the same Cloudflare Access team domain). Reference
   locations, never values, in this repo. **`ACCESS_AUD` must be non-empty in
   production**: `packages/shared/src/access.ts` fails CLOSED without it, so
   an empty value 401s every request rather than accepting any token from the

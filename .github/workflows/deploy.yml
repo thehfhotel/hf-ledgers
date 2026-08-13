@@ -155,7 +155,7 @@ jobs:
     name: CI (income)
     needs: [route]
     if: needs.route.outputs.income == 'true'
-    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@571d115d63ecef9c30cd73f73a38e68395ab259f # fix: image_tag output is the pushed sha, no longer always "latest"
     with:
       working-directory: "."
       # The client bundle is built inside the Dockerfile; running it here too
@@ -172,7 +172,7 @@ jobs:
     # workflow this replaces carried the same scar comment.
     needs: [route, guard, ci-income]
     if: needs.route.outputs.income == 'true'
-    uses: thehfhotel/estate-ci/.github/workflows/deploy-evergreen.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    uses: thehfhotel/estate-ci/.github/workflows/deploy-evergreen.yml@571d115d63ecef9c30cd73f73a38e68395ab259f # fix: image_tag output is the pushed sha, no longer always "latest"
     # A called workflow's GITHUB_TOKEN scopes come from the calling job; the
     # build job cannot push to GHCR without packages:write.
     permissions:
@@ -224,7 +224,7 @@ jobs:
     name: CI (expense)
     needs: [route]
     if: needs.route.outputs.expense == 'true'
-    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@571d115d63ecef9c30cd73f73a38e68395ab259f # fix: image_tag output is the pushed sha, no longer always "latest"
     with:
       working-directory: expense-ledger
       run_build: false
@@ -232,7 +232,7 @@ jobs:
   deploy-expense:
     needs: [route, guard, ci-expense]
     if: needs.route.outputs.expense == 'true'
-    uses: thehfhotel/estate-ci/.github/workflows/deploy-evergreen.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    uses: thehfhotel/estate-ci/.github/workflows/deploy-evergreen.yml@571d115d63ecef9c30cd73f73a38e68395ab259f # fix: image_tag output is the pushed sha, no longer always "latest"
     permissions:
       contents: read
       packages: write

@@ -45,7 +45,7 @@ jobs:
   # those tests resolve against the root install and need no second one here.
   income:
     name: income ledger (root)
-    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@571d115d63ecef9c30cd73f73a38e68395ab259f # fix: image_tag output is the pushed sha, no longer always "latest"
     with:
       working-directory: "."
 
@@ -56,6 +56,6 @@ jobs:
   # install, which is what the container actually ships with.
   expense:
     name: expense ledger
-    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@1938c3f3760f65843bc583cc99d0c643ec5a9c7e # fix: harden deploy gates found in adversarial review
+    uses: thehfhotel/estate-ci/.github/workflows/bun-ci.yml@571d115d63ecef9c30cd73f73a38e68395ab259f # fix: image_tag output is the pushed sha, no longer always "latest"
     with:
       working-directory: expense-ledger

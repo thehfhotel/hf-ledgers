@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { identify } from "@shared/access.ts";
+import { shellHtmlResponse } from "@shared/shell.ts";
 import * as apStore from "./apStore.ts";
 import {
   attachExpensePhoto,
@@ -992,6 +993,15 @@ async function serveStatic(req: Request): Promise<Response> {
   // Prevent path traversal: the resolved file must stay inside distDir.
   if (!filePath.startsWith(distDir)) return new Response("nope", { status: 400 });
 
+  // The SPA shell is RENDERED per request, never handed over as a file: it
+  // carries the estate band's data-property hint for the one identity that
+  // names a place (@shared/shell.ts), so its bytes differ per caller and must
+  // not be shared between them — hence this branch sits ABOVE the file branch
+  // below, and the response is `private, no-store`. Every other asset is
+  // identity-blind and keeps the plain file path.
+  const spaShell = async (): Promise<Response> => shellHtmlResponse(req, await Bun.file(indexPath).text());
+  if (filePath === indexPath) return spaShell();
+
   const f = Bun.file(filePath);
   if (await f.exists()) return new Response(f);
 
@@ -1000,10 +1010,8 @@ async function serveStatic(req: Request): Promise<Response> {
   }
 
   // SPA fallback for any other (extensionless) navigation — /entry,
-  // /month/2026-07, etc.
-  return new Response(Bun.file(indexPath), {
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
-  });
+  // /month/2026-07, etc. — the same rendered shell, for the same reason.
+  return spaShell();
 }
 
 /** The full request dispatcher, exported so tests can drive it directly
@@ -1035,6 +1043,12 @@ if (import.meta.main) {
     // (bunfig.toml registers the Tailwind plugin for this dev-serve path;
     // the production build registers it directly in build.ts's Bun.build
     // call instead).
+    //
+    // The shell therefore comes straight from the bundler here, WITHOUT the
+    // per-identity data-property hint (@shared/shell.ts) — the bundler owns
+    // that response and a handler cannot return an HTMLBundle. Dev shows the
+    // full switcher, which is exactly the fail-open default; there is no
+    // Cloudflare Access identity on localhost to scope it by anyway.
     const indexHtml = (await import("../client/index.html")).default;
     const server = Bun.serve({
       port,

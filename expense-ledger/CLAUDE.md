@@ -14,7 +14,8 @@ What that means in practice:
   `bun install`, `bun run typecheck` and `bun run build` from
   `expense-ledger/`. The root `bun test` does walk this app's tests.
 - **`@shared/*` is `../packages/shared/src`** — `date.ts`, `money.ts`,
-  `textAmount.ts` and `access.ts` (the CF Access verifier) are ONE copy,
+  `textAmount.ts`, `access.ts` (the CF Access verifier) and `shell.ts` (the
+  estate band's per-identity `data-property` hint) are ONE copy,
   shared with the income ledger. `src/shared/` still exists here for
   genuinely app-local types (`apTypes.ts`, `categories.ts`, `types.ts`).
   Changing anything under `packages/shared/` is a contract change for the

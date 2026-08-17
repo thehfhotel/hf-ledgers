@@ -13,6 +13,9 @@
   <body class="bg-shell text-ink antialiased">
     <div id="root"></div>
     <script type="module" src="./main.tsx"></script>
+    <!-- The server adds data-property="hfville" to the band for the HF Ville
+         reception kiosk only (src/server/server.ts via @shared/shell.ts). Do
+         not write it here: hard-coded, it would scope every desk to one hotel. -->
     <script defer src="https://erp.thehfhotel.org/shell/hf-bar.js" data-app="Income Ledger" data-module="finance"></script>
   </body>
 </html>

@@ -29,8 +29,9 @@ contradicts. One copy makes that class of drift structurally impossible.
   `scripts/check-shared-dependency-free.sh` enforces this in CI — run it
   locally before pushing.
 - **Pure and platform-neutral.** No DOM, no `bun:sqlite`, no `process.env`
-  reads outside `access.ts` (which is server-only by nature). These modules
-  are imported by React client code that gets bundled for the browser.
+  reads outside `access.ts` (which is server-only by nature, as is `shell.ts`,
+  which builds on it). These modules are imported by React client code that
+  gets bundled for the browser — never import a server-only one from there.
 - **Changing a signature here is a contract change for BOTH apps.** Run both
   suites — `bun test` at the root and `bun test` in `expense-ledger/` — not
   just the one you were working in.

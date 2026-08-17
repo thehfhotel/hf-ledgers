@@ -2,6 +2,7 @@ import { Elysia, t } from "elysia";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { identify } from "@shared/access.ts";
+import { shellHtmlResponse } from "@shared/shell.ts";
 import {
   applyPmsCandidateToBookingLine,
   categoriesForDay,
@@ -1881,6 +1882,16 @@ if (isProd) {
       // Prevent path traversal: ensure resolved file is inside distDir
       if (!filePath.startsWith(distDir)) return new Response("nope", { status: 400 });
 
+      // The SPA shell is RENDERED per request, never handed over as a file: it
+      // carries the estate band's data-property hint for the one identity that
+      // names a place (@shared/shell.ts), so its bytes differ per caller and
+      // must not be shared between them. That also rules out the precompressed
+      // index.html.gz the build leaves beside it, whose bytes are the un-hinted
+      // ones — hence this branch sits ABOVE the file/gzip branch below. Every
+      // other asset is identity-blind and keeps that fast path.
+      const spaShell = async (): Promise<Response> => shellHtmlResponse(req, await Bun.file(indexPath).text());
+      if (filePath === indexPath) return spaShell();
+
       const f = Bun.file(filePath);
       if (await f.exists()) {
         // Chunk names are content-hashed, so a chunk's bytes can never change
@@ -1912,10 +1923,9 @@ if (isProd) {
         return new Response("not found", { status: 404 });
       }
 
-      // SPA fallback for /:property/day/:date, /:property/history, etc.
-      return new Response(Bun.file(indexPath), {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
-      });
+      // SPA fallback for /:property/day/:date, /:property/history, etc. —
+      // the same rendered shell, for the same reason.
+      return spaShell();
     },
   });
   console.log(`▶︎ http://localhost:${server.port} (prod)`);
@@ -1924,6 +1934,12 @@ if (isProd) {
   // Dev: HTML import lets Bun bundle the React client on the fly with HMR.
   // The Tailwind plugin is registered through bunfig.toml's
   // [serve.static.plugins] (it cannot be globally preloaded).
+  //
+  // The shell therefore comes straight from the bundler here, WITHOUT the
+  // per-identity data-property hint (@shared/shell.ts) — the bundler owns that
+  // response and a handler cannot return an HTMLBundle. Dev consequently shows
+  // the full switcher, which is exactly the fail-open default; there is no
+  // Cloudflare Access identity on localhost to scope it by anyway.
   // ────────────────────────────────────────────────────────────────────
   const indexHtml = (await import("../client/index.html")).default;
   const server = Bun.serve({

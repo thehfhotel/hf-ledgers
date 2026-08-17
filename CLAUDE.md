@@ -11,7 +11,7 @@ touching anything under `expense-ledger/`.
 |---|---|---|
 | `src/`, `scripts/`, `docs/` | **income ledger** (สรุปรายรับ-รายจ่าย) + ส่งสลิป | The host app. Everything in the rest of THIS file is about it. |
 | `expense-ledger/` | **expense ledger** + its ezBookkeeping engine | Absorbed 2026-08-13 as a git subtree, full history preserved. Own `package.json`, own lockfile, own `tsconfig.json`, own `CLAUDE.md`. |
-| `packages/shared/` | the modules BOTH apps import | `date.ts`, `money.ts`, `textAmount.ts`, `access.ts` (CF Access verifier) + their tests. Imported as `@shared/*`. See `packages/shared/README.md`. |
+| `packages/shared/` | the modules BOTH apps import | `date.ts`, `money.ts`, `textAmount.ts`, `access.ts` (CF Access verifier), `shell.ts` (the estate band's per-identity `data-property` hint) + their tests. Imported as `@shared/*`. See `packages/shared/README.md`. |
 | `.github/workflows/` | CI for the whole repo | GitHub only runs workflows from HERE — a workflow under `expense-ledger/` is a dead file. |
 
 Why one repo: these two apps are one bookkeeping surface for one office — the
@@ -107,7 +107,7 @@ bun run build         # scripts/build.ts -> dist/client
 bun run start          # NODE_ENV=production bun src/server/server.ts
 bun run typecheck      # tsc --noEmit
 bun test               # walks the WHOLE monorepo: this app, packages/shared,
-                       # and expense-ledger/ — currently 1280 across 55 files
+                       # and expense-ledger/ — currently 1318 across 56 files
 ./scripts/check-shared-dependency-free.sh   # packages/shared has no deps
 ```
 

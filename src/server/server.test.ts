@@ -127,6 +127,45 @@ describe("impossible calendar dates are rejected at the API boundary", () => {
   });
 });
 
+// isValidMonth's follow-up to the above (packages/shared/src/date.ts): the
+// same regex-only bug at this app's three month-guarded boundaries. The one
+// that bites is month close — setMonthClosed persists the literal string as
+// the closed_months key, so a "2026-13" close used to write a lock row that
+// no real date's slice(0, 7) can match and no month stepper can navigate to,
+// leaving it un-reopenable from the UI.
+describe("impossible months are rejected at the API boundary", () => {
+  const impossible = ["2026-13", "2026-00"];
+
+  for (const month of impossible) {
+    test(`GET days?month=${month} is 400 invalid month`, async () => {
+      const res = await call<{ error: string }>("GET", `/${PROPERTY}/days?month=${month}`);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid month");
+    });
+
+    test(`GET months/${month}/close is 400 invalid month`, async () => {
+      const res = await call<{ error: string }>("GET", `/${PROPERTY}/months/${month}/close`);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid month");
+    });
+
+    test(`PUT months/${month}/close is 400, never a phantom lock row`, async () => {
+      const res = await call<{ error: string }>("PUT", `/${PROPERTY}/months/${month}/close`, { closed: true });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid month");
+    });
+  }
+
+  test("the real months on either side still resolve", async () => {
+    for (const month of ["2026-01", "2026-12"]) {
+      expect((await call("GET", `/${PROPERTY}/days?month=${month}`)).status).toBe(200);
+      const close = await call<{ month: string; closed: boolean }>("GET", `/${PROPERTY}/months/${month}/close`);
+      expect(close.status).toBe(200);
+      expect(close.body).toEqual({ month, closed: false });
+    }
+  });
+});
+
 describe("category seed and category_key", () => {
   test("seeds fifteen income categories, including the split รายการอื่นๆ, โอน/เครดิต pairs, and the Wave C deposit_applied category", () => {
     const income = categories.filter((c) => c.kind === "income");

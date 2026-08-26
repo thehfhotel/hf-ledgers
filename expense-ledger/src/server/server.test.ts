@@ -108,11 +108,37 @@ describe("GET /api/expenses", () => {
     expect(res.status).toBe(400);
   });
 
+  // isValidMonth follow-up (packages/shared/src/date.ts): the regex-only
+  // check let these through, and this route forwarded year=2026&month=13
+  // verbatim to the engine's by_month endpoint.
+  for (const month of ["2026-13", "2026-00"]) {
+    test(`400s on the impossible month ${month} before ever reaching the engine`, async () => {
+      const res = await fetchHandler(devRequest(`/api/expenses?month=${month}`));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid month" });
+    });
+  }
+
   test("502s engine_unreachable when ENGINE_API_TOKEN is unset (dormant engine client)", async () => {
     const res = await fetchHandler(devRequest("/api/expenses?month=2026-07"));
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ error: "engine_unreachable" });
   });
+});
+
+// The other expense-side isValidMonth boundary: the AP register's `?m=`
+// month filter. The guard runs before withApStore opens anything, so a
+// rejected month never touches the AP database.
+describe("GET /api/ap/rows?m= rejects impossible months at the boundary", () => {
+  afterEach(resetAuthEnv);
+
+  for (const month of ["2026-13", "2026-00"]) {
+    test(`400s on ?m=${month}`, async () => {
+      const res = await fetchHandler(devRequest(`/api/ap/rows?m=${month}`));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid month" });
+    });
+  }
 });
 
 describe("POST /api/expenses validation", () => {

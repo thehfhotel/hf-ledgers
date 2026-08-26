@@ -130,8 +130,26 @@ export function isValidIso(s: string): boolean {
   );
 }
 
+/** The same bug as isValidIso's, one level up, and the same fix: a regex-only
+ * shape check let "2026-13" and "2026-00" through at every month boundary in
+ * both apps. Downstream nothing re-validates — the income ledger's month
+ * close persists the literal string as the closed_months key, so "2026-13"
+ * becomes a lock row that no real date's `slice(0, 7)` can ever match and no
+ * month stepper can ever reach; the expense ledger forwards year=2026&month=13
+ * verbatim to the engine and its client accepts /month/2026-13 as a route,
+ * where monthToThaiLong then indexes THAI_MONTHS[12]. Round-tripping the
+ * first of the month through Date.UTC catches an out-of-range month exactly
+ * the way isValidIso catches an out-of-range day, and it shares that check's
+ * year bounds (years 0000-0099 hit Date.UTC's two-digit-year special case and
+ * fail the round-trip), so the two predicates never disagree about whether a
+ * month exists. */
 export function isValidMonth(s: string): boolean {
-  return /^\d{4}-\d{2}$/.test(s);
+  const match = /^(\d{4})-(\d{2})$/.exec(s);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const roundTripped = new Date(Date.UTC(year, month - 1, 1));
+  return roundTripped.getUTCFullYear() === year && roundTripped.getUTCMonth() === month - 1;
 }
 
 /** This month as a Bangkok "YYYY-MM" string. */

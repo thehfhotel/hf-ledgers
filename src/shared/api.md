@@ -1566,7 +1566,10 @@ gains optional `depositReceivedSatang`/`depositRefundedSatang` (OUTSIDE
 `daysBetween()` for the aging list's "days outstanding" column, and
 `isValidIso`, which since the hf-ledgers merge rejects impossible calendar
 dates rather than only checking the yyyy-mm-dd shape — every date-guarded
-endpoint below 400s on a date like `2026-06-99`).
+endpoint below 400s on a date like `2026-06-99` — and `isValidMonth`, which
+does the same for `YYYY-MM`: `2026-13` and `2026-00` are 400
+`{ error: "invalid month" }` at endpoints 6, 23 and 24, not a phantom
+`closed_months` row).
 
 ## hf-analytics ingest (Wave C addition)
 

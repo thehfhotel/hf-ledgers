@@ -128,6 +128,10 @@ Its image builds from the MONOREPO ROOT context with
   source request and settles only after verified bank success. All imported
   payroll and reimbursement rows share the AP write lock and cannot be edited
   or paid manually through the ledger. Both workers must stay single-process.
+  A historical payroll backfill pins an explicit approved aggregate manifest in
+  `_payroll_meta` and keeps the automatic cutoff unchanged. Every later snapshot
+  checks the union of new submissions and those exact bank-confirmed historical
+  runs; never widen the cutoff or run an out-of-process import to bypass this.
   Synced financial rows use the existing AP CRUD; settlement posts through
   `engine.ts`. The worker starts after the listener and is disabled unless
   all three `REIMBURSEMENT_*` settings are present. Never run multiple workers

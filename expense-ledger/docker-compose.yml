@@ -29,6 +29,7 @@ services:
       - PAYROLL_FEED_URL=${PAYROLL_FEED_URL:-}
       - PAYROLL_FEED_TOKEN=${PAYROLL_FEED_TOKEN:-}
       - PAYROLL_SYNC_SINCE=${PAYROLL_SYNC_SINCE:-}
+      - PAYROLL_BACKFILL_MANIFEST=${PAYROLL_BACKFILL_MANIFEST:-}
     volumes:
       - expense_ap:/app/data
     depends_on:

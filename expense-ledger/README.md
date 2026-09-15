@@ -77,6 +77,36 @@ in hf-finance. No token means the integration is disabled. Polling is every
 The cutoff excludes historical payroll submissions. Never change it without
 explicit reconciliation of any existing manual salary entries.
 
+### Selected historical payroll
+
+Keep the automatic cutoff unchanged. A reviewed historical backfill uses the
+optional `EXPENSE_PAYROLL_BACKFILL_MANIFEST` GitHub secret, mapped to
+`PAYROLL_BACKFILL_MANIFEST` in the single running expense worker. Its value is a
+compact JSON array of exact aggregate source runs: `id`, `period`, `submittedAt`,
+`effectiveDate`, `amountSatang`, `employeeCount`, `status: "PAID"`, and `paidDate`.
+Never put real payroll values in this public repository.
+
+Before activation, compare the selected bank-confirmed batches against existing
+salary expenses and AP bills, resolve manual overlap, and take the normal ledger
+backup. A bank upload or an old worksheet alone is insufficient payment proof.
+Rejected requests, failed retries, and other historical runs are excluded.
+
+The worker fetches a complete snapshot from the earliest selected submission,
+validates the approved historical values before writing, and reconciles only
+new submissions plus those selected runs. The manifest is pinned in the existing
+AP operational metadata. Keep that same manifest configured on every later
+deployment; removing or changing it fails closed and needs explicit reconciliation.
+Historical runs continue to be checked on every poll. Do not run a separate
+import process against the live AP volume or rewrite its fixed cutoff.
+
+Each imported batch keeps its original Bangkok submission date for filing and
+actual bank payment date for settlement. The payroll period remains visible in
+the description. It posts a bookkeeping bank expense with the same deterministic
+AP tag and durable recovery journal used by new payroll; it does not initiate a
+bank transfer. The source total is net pay and may exclude salaries paid outside
+the payroll app. Check the selected rows, corresponding payments, affected month
+totals, and a second successful poll after activation to verify no duplicates.
+
 ## Identity table
 
 | Item | Value |

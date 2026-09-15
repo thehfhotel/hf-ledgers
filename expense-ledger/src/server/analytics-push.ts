@@ -13,24 +13,34 @@
 // environment that hasn't wired analytics (dev, CI, a fresh deploy before
 // secrets land) runs with a completely inert outbox table.
 //
+// IMPORTING THIS FILE HAS NO SIDE EFFECTS: no DB open, no enqueue, no timer.
+// server.ts calls the exported startAnalyticsPush() explicitly, from its
+// boot path AFTER the listener is up, never at module load — see
+// startAnalyticsPush()'s own doc comment. `GET /healthz` and the rest of
+// server boot (everything before the listener comes up) never touch this
+// file's DB handle either way.
+//
 // STORAGE: this app has exactly ONE documented database-of-its-own — the AP
 // register's bun:sqlite store (src/server/apStore.ts, `AP_DB_PATH`) — see
 // CLAUDE.md's "AP register storage exception". This module's outbox table
 // (`_analytics_pending_pushes`) lives in that SAME sqlite file (via
 // apStore.ts's `getApDbForAnalytics()`), not a new database, per that
 // exception's amendment. Unlike apStore.ts's own tables, this table is
-// created here at first actual use, deliberately NOT inside apStore.ts's
-// own DDL — this is a sibling concern (operational outbox state, not AP
-// register data), matching the income ledger's analytics-push.ts owning
-// its own table rather than folding it into db.ts's migrate(). Because
-// enqueueAnalyticsPush() is called from EVERY mutating route (not just
-// /api/ap/*), the AP register's sqlite file is now lazily opened on the
-// first mutation of ANY kind once analytics push is enabled — never at
-// server boot, and never when analytics push is disabled.
+// created here at first actual use (the first enqueue or flush — including
+// startAnalyticsPush()'s own boot-month enqueue), deliberately NOT inside
+// apStore.ts's own DDL — this is a sibling concern (operational outbox
+// state, not AP register data), matching the income ledger's
+// analytics-push.ts owning its own table rather than folding it into
+// db.ts's migrate(). Because enqueueAnalyticsPush() is called from EVERY
+// mutating route (not just /api/ap/*) as well as from startAnalyticsPush(),
+// the AP register's sqlite file is lazily opened on the first such call
+// once analytics push is enabled — never merely by importing this module,
+// and never when analytics push is disabled.
 
 import { getApDbForAnalytics, listApRows } from "./apStore.ts";
 import { getMonthExpenseTransactionsWithApManaged } from "./engine.ts";
 import { computeExpenseLedgerRollup, type ExpenseLedgerRollup } from "../shared/rollup.ts";
+import { currentMonthBangkok, shiftMonths } from "@shared/date.ts";
 
 // Read LAZILY (call-time), never at module load — see the income ledger's
 // analytics-push.ts for why: bun test runs every file in one process, so
@@ -175,25 +185,42 @@ async function flush(): Promise<void> {
 let bootTimer: ReturnType<typeof setTimeout> | null = null;
 let intervalTimer: ReturnType<typeof setInterval> | null = null;
 
-export function startAnalyticsPushWorker(): void {
+/**
+ * Explicit start, called by server.ts from its boot path AFTER the listener
+ * is up — NEVER at module import. Importing this file (or server.ts) must
+ * have zero side effects: no DB open, no enqueue, no timer — see the file
+ * header and expense-ledger/CLAUDE.md's "AP register storage exception".
+ *
+ * A no-op when analytics push is disabled (dormant means dormant — this
+ * returns before touching the outbox DB at all, so a plain `enabled()`
+ * check is the only thing that runs when ANALYTICS_URL / ANALYTICS_TOKEN
+ * are unset). When enabled, enqueues the current month and the two before
+ * it (so a redeploy, or a period with analytics newly enabled, always
+ * re-syncs recent data even when no mutation happens to touch it in the
+ * meantime) and starts the flush interval. Tests call this explicitly
+ * after setting up their own env / AP_DB_PATH.
+ */
+export function startAnalyticsPush(): void {
   if (!enabled()) {
     console.log("[analytics-push] disabled (ANALYTICS_URL / ANALYTICS_TOKEN not set)");
     return;
   }
   console.log(`[analytics-push] enabled -> ${urlBase()}`);
+  enqueueAnalyticsPush(currentMonthBangkok());
+  enqueueAnalyticsPush(shiftMonths(currentMonthBangkok(), -1));
+  enqueueAnalyticsPush(shiftMonths(currentMonthBangkok(), -2));
   // First flush ~5s after boot so the server is fully up.
   bootTimer = setTimeout(flush, 5_000);
   intervalTimer = setInterval(flush, 30_000);
 }
 
 /**
- * Disarms the worker's timers. Tests that import server.ts (which arms the
- * worker at module load) MUST call this immediately after import, or a
- * flush firing mid-suite mutates the outbox under the assertions — exactly
- * the race the income ledger's analytics-push.ts documents. Never called
- * in production.
+ * Disarms the worker's timers. Tests that call startAnalyticsPush() MUST
+ * call this immediately after, or a flush firing mid-suite mutates the
+ * outbox under the assertions — exactly the race the income ledger's
+ * analytics-push.ts documents. Never called in production.
  */
-export function stopAnalyticsPushWorker(): void {
+export function stopAnalyticsPush(): void {
   if (bootTimer !== null) clearTimeout(bootTimer);
   if (intervalTimer !== null) clearInterval(intervalTimer);
   bootTimer = null;

@@ -1,20 +1,49 @@
-// Asserts (1) every mutating route in server.ts enqueues the month it
-// touched into the hf-analytics outbox (analytics-push.ts), (2) boot itself
-// enqueues the current month and the two before it, and (3) flush()'s
-// error handling: a 4xx DROPS the month (permanent rejection — see
-// analytics-push.ts's flush() comment and hf-data/CLAUDE.md's ingest rule),
-// while a 5xx or a network failure KEEPS it queued and stops the batch.
+// Asserts (1) importing analytics-push.ts (directly, or transitively via
+// server.ts) has NO side effects — no DB open, no enqueue, no timer — even
+// with no ANALYTICS_*/AP_DB_PATH env set and a non-existent AP_DB_PATH;
+// (2) startAnalyticsPush() enqueues the current month and the two before
+// it, but ONLY once called, and only when enabled; (3) every mutating route
+// in server.ts enqueues the month it touched into the hf-analytics outbox;
+// and (4) flush()'s error handling: a 4xx DROPS the month (permanent
+// rejection — see analytics-push.ts's flush() comment and hf-data/CLAUDE.md's
+// ingest rule), while a 5xx or a network failure KEEPS it queued and stops
+// the batch.
 //
 // Same import-order rule as server.test.ts / the income ledger's
-// analytics-push.test.ts: env vars (including AP_DB_PATH, so the module-
-// level boot enqueue below lands in this test's own tmp file rather than
-// the real default path) must be set BEFORE importing server.ts, since
-// apStore.ts's db is lazily opened the first time anything (including the
-// boot enqueue) touches it.
+// analytics-push.test.ts: env vars (including AP_DB_PATH, so
+// startAnalyticsPush()'s boot enqueue below lands in this test's own tmp
+// file rather than the real default path) must be set BEFORE importing
+// server.ts, since apStore.ts's db is lazily opened the first time anything
+// touches it.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// ── Import-time side-effect check ───────────────────────────────────────
+// Runs FIRST, before any env var below is set and before server.ts (which
+// re-exports/imports analytics-push.ts) is ever imported: proves that
+// merely loading the module does not open (or create) any sqlite file, even
+// pointed at a path whose directory does not exist.
+const noEnvTmpDir = mkdtempSync(join(tmpdir(), "analytics-push-noenv-test-"));
+const noEnvDbPath = join(noEnvTmpDir, "does-not-exist", "ap.db");
+{
+  const savedApDbPath = process.env.AP_DB_PATH;
+  const savedAnalyticsUrl = process.env.ANALYTICS_URL;
+  const savedAnalyticsToken = process.env.ANALYTICS_TOKEN;
+  delete process.env.ANALYTICS_URL;
+  delete process.env.ANALYTICS_TOKEN;
+  process.env.AP_DB_PATH = noEnvDbPath;
+  await import("./analytics-push.ts");
+  if (savedApDbPath === undefined) delete process.env.AP_DB_PATH;
+  else process.env.AP_DB_PATH = savedApDbPath;
+  if (savedAnalyticsUrl === undefined) delete process.env.ANALYTICS_URL;
+  else process.env.ANALYTICS_URL = savedAnalyticsUrl;
+  if (savedAnalyticsToken === undefined) delete process.env.ANALYTICS_TOKEN;
+  else process.env.ANALYTICS_TOKEN = savedAnalyticsToken;
+}
+const importWithNoEnvCreatedNoFile = !existsSync(noEnvDbPath);
+rmSync(noEnvTmpDir, { recursive: true, force: true });
 
 const tmpDir = mkdtempSync(join(tmpdir(), "analytics-push-test-"));
 process.env.AP_DB_PATH = join(tmpDir, "ap.db");
@@ -34,29 +63,40 @@ import { currentMonthBangkok, shiftMonths, todayBangkok } from "@shared/date.ts"
 import { deriveDateFromEngineTime, type EngineTransactionPayload } from "./transactionBuilder.ts";
 
 const { fetchHandler } = await import("./server.ts");
-const { _internal, stopAnalyticsPushWorker } = await import("./analytics-push.ts");
+const { _internal, startAnalyticsPush, stopAnalyticsPush } = await import("./analytics-push.ts");
 const apStore = await import("./apStore.ts");
 const { _internal: engineInternal } = await import("./engine.ts");
 
-// server.ts armed the worker AND enqueued the boot months at import (both
-// env vars are set above). Capture that boot state for the dedicated test
-// below, then disarm the worker's timers immediately — on a slow runner the
-// 5s boot flush would otherwise fire mid-suite and mutate the outbox under
-// later assertions (the exact race the income ledger's own
-// analytics-push.test.ts documents).
+// Importing server.ts (above) must NOT have enqueued or armed anything on
+// its own — it only re-exports analytics-push.ts's functions. Calling
+// startAnalyticsPush() here is what a real boot does, from server.ts's
+// listener-up path; the test calls it directly to exercise the same
+// contract, against this test's own tmp AP_DB_PATH. Disarm the worker's
+// timers immediately after — on a slow runner the 5s boot flush would
+// otherwise fire mid-suite and mutate the outbox under later assertions
+// (the exact race the income ledger's own analytics-push.test.ts
+// documents).
+_internal.clearPending();
+startAnalyticsPush();
 const bootPendingMonths = {
   current: _internal.isPending(currentMonthBangkok()),
   minus1: _internal.isPending(shiftMonths(currentMonthBangkok(), -1)),
   minus2: _internal.isPending(shiftMonths(currentMonthBangkok(), -2)),
 };
-stopAnalyticsPushWorker();
+stopAnalyticsPush();
 
 afterAll(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("boot enqueues the current month and the two before it", () => {
-  test("all three are pending immediately after import", () => {
+describe("importing analytics-push.ts has no side effects", () => {
+  test("no env set and a non-existent AP_DB_PATH: import does not throw and creates no file", () => {
+    expect(importWithNoEnvCreatedNoFile).toBe(true);
+  });
+});
+
+describe("startAnalyticsPush() enqueues the current month and the two before it", () => {
+  test("all three are pending once called (enabled)", () => {
     expect(bootPendingMonths.current).toBe(true);
     expect(bootPendingMonths.minus1).toBe(true);
     expect(bootPendingMonths.minus2).toBe(true);

@@ -15,10 +15,10 @@ import {
   isApManagedTransaction,
   modifyExpenseTransaction,
 } from "./engine.ts";
-import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
+import { enqueueAnalyticsPush, startAnalyticsPush } from "./analytics-push.ts";
 import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution.ts";
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
-import { currentMonthBangkok, isValidIso, isValidMonth, shiftMonths, todayBangkok } from "@shared/date.ts";
+import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "@shared/date.ts";
 import {
   apPhotoUrl,
   computeGross,
@@ -43,18 +43,6 @@ import { AMOUNT_SATANG_MAX, AMOUNT_SATANG_MIN, COMMENT_MAX_LEN } from "../shared
 
 const isProd = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT ?? 3000);
-
-// hf-analytics outbox: dormant unless ANALYTICS_URL/ANALYTICS_TOKEN are set
-// (see src/server/analytics-push.ts). Started unconditionally at module
-// init, same as the income ledger's server.ts (hf-ledgers root).
-startAnalyticsPushWorker();
-// Boot enqueue: the current month and the two before it, so a redeploy (or
-// a period with analytics newly enabled) always re-syncs recent data even
-// when no mutation happens to touch it in the meantime. No-ops when
-// analytics push is disabled (enqueueAnalyticsPush's own dormant check).
-enqueueAnalyticsPush(currentMonthBangkok());
-enqueueAnalyticsPush(shiftMonths(currentMonthBangkok(), -1));
-enqueueAnalyticsPush(shiftMonths(currentMonthBangkok(), -2));
 
 const distDir = join(process.cwd(), "dist", "client");
 const indexPath = join(distDir, "index.html");
@@ -1084,6 +1072,12 @@ if (import.meta.main) {
     // plus normal multipart/JSON overhead.
     const server = Bun.serve({ port, fetch: fetchHandler, maxRequestBodySize: 32 * 1024 * 1024 });
     console.log(`▶︎ http://localhost:${server.port} (prod)`);
+    // hf-analytics outbox: dormant unless ANALYTICS_URL/ANALYTICS_TOKEN are
+    // set (see src/server/analytics-push.ts). Started AFTER the listener is
+    // up, never at module import — importing analytics-push.ts must have no
+    // side effects (no DB open) so a bare `bun test` / `GET /healthz` never
+    // touches the AP register sqlite file.
+    startAnalyticsPush();
   } else {
     // Dev: HTML import lets Bun bundle the React client on the fly with HMR
     // (bunfig.toml registers the Tailwind plugin for this dev-serve path;
@@ -1111,5 +1105,8 @@ if (import.meta.main) {
       },
     });
     console.log(`▶︎ http://localhost:${server.port} (dev)`);
+    // See the prod branch above: started after the listener is up, never at
+    // module import.
+    startAnalyticsPush();
   }
 }

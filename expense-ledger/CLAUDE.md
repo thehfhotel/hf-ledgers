@@ -119,7 +119,15 @@ Its image builds from the MONOREPO ROOT context with
   `server.ts` calls explicitly from its boot path only AFTER the listener is
   up, never merely by importing `analytics-push.ts` or `server.ts`, so
   `bun test` and a plain module import stay database-free. With neither env
-  var set the outbox stays fully inert and this exception is unchanged. Do
+  var set the outbox stays fully inert. Receipt syncing also uses this same
+  AP database for `_reimbursement_receipts` (source identity and payment
+  attempt journal) and `_reimbursement_meta` (fixed activation time, status).
+  `getApDbForReimbursement()` exposes it only to `reimbursement-sync.ts`.
+  Synced financial rows use the existing AP CRUD; settlement posts through
+  `engine.ts`. The worker starts after the listener and is disabled unless
+  all three `REIMBURSEMENT_*` settings are present. Never run multiple workers
+  against this volume: receipt syncing and manual AP writes share one process
+  lock. See README's receipt-sync section for recovery and activation. Do
   not add a second database-of-its-own for anything else without amending
   this rule first. Backed up nightly alongside `expense_ap` — see
   README.md's "Backup" section.

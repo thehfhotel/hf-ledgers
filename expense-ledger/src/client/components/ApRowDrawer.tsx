@@ -102,9 +102,10 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
   const [whtText, setWhtText] = useState(row?.whtSatang != null ? (row.whtSatang / 100).toFixed(2) : "");
   const [discountText, setDiscountText] = useState(row && row.discountSatang > 0 ? (row.discountSatang / 100).toFixed(2) : "");
   const [dueDate, setDueDate] = useState(row?.dueDate ?? "");
-  const [entity, setEntity] = useState(row?.entity ?? "");
+  const [entity, setEntity] = useState(row?.entity ?? creditors[0]?.entity ?? "HF");
   const [categoryCode, setCategoryCode] = useState<ExpenseCategoryCode | null>(row?.categoryCode ?? null);
   const [note, setNote] = useState(row?.note ?? "");
+  const [detailsOpen, setDetailsOpen] = useState(!!(row?.vatSatang || row?.whtSatang || row?.discountSatang || row?.dueDate || row?.note));
 
   const [errors, setErrors] = useState<FieldErrors>({});
   const [saving, setSaving] = useState(false);
@@ -256,6 +257,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     const validationErrors = validate();
     if (validationErrors) {
       setErrors(validationErrors);
+      setDetailsOpen(true);
       if (validationErrors.creditor) creditorInputRef.current?.focus();
       else if (validationErrors.amount) amountInputRef.current?.focus();
       return;
@@ -500,7 +502,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
           <div className="flex flex-col gap-3">
             <div>
               <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-creditor">
-                {AP_FIELDS.creditor}
+                ร้านค้า / ผู้รับเงิน
               </label>
               <input
                 ref={creditorInputRef}
@@ -510,19 +512,20 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                 value={creditor}
                 onChange={(e) => handleCreditorChange(e.target.value)}
                 maxLength={200}
-                className="w-full rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                className="min-h-12 w-full rounded-lg border border-line-strong bg-panel px-3 py-2 text-base text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
               />
               <datalist id="ap-creditor-list">
                 {creditors.map((c) => (
                   <option key={c.creditor} value={c.creditor} />
                 ))}
               </datalist>
+              {row === null && creditors.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{creditors.slice(0,3).map(hint => <button key={hint.creditor} type="button" onClick={() => handleCreditorChange(hint.creditor)} className="min-h-10 rounded-full border border-line-strong px-3 text-xs text-ink">{hint.creditor}</button>)}</div>}
               {errors.creditor && <p className="mt-1 text-xs text-bad">{errors.creditor}</p>}
             </div>
 
             <div>
               <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-item">
-                {AP_FIELDS.item}
+                ซื้ออะไร / ค่าอะไร
               </label>
               <input
                 id="ap-item"
@@ -530,14 +533,14 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                 value={item}
                 onChange={(e) => setItem(e.target.value)}
                 maxLength={200}
-                className="w-full rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                className="min-h-12 w-full rounded-lg border border-line-strong bg-panel px-3 py-2 text-base text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
               />
               {errors.item && <p className="mt-1 text-xs text-bad">{errors.item}</p>}
             </div>
 
             <div>
               <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-amount">
-                {AP_FIELDS.amount}
+                ยอดตามบิล (บาท)
               </label>
               <div className="relative">
                 <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">฿</span>
@@ -554,55 +557,17 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
               {errors.amount && <p className="mt-1 text-xs text-bad">{errors.amount}</p>}
             </div>
 
-            <div>
-              <div className="mb-1.5 flex items-center justify-between">
-                <label className="block text-xs font-semibold text-ink-muted" htmlFor="ap-vat">
-                  {AP_FIELDS.vat}
-                </label>
-                <button type="button" onClick={applyVat} className="text-xs font-medium text-brand-500 hover:underline">
-                  {AP_PAY.vatAuto}
-                </button>
-              </div>
-              <div className="relative">
-                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">฿</span>
-                <input
-                  id="ap-vat"
-                  type="text"
-                  inputMode="decimal"
-                  value={vatText}
-                  onChange={(e) => setVatText(e.target.value)}
-                  className="h-10 w-full rounded-md border border-line-strong bg-panel pl-7 pr-3 text-right text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-                />
-              </div>
-              {errors.vat && <p className="mt-1 text-xs text-bad">{errors.vat}</p>}
-            </div>
 
-            <div>
-              <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-wht">
-                {AP_FIELDS.wht}
-              </label>
-              <div className="relative">
-                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">฿</span>
-                <input
-                  id="ap-wht"
-                  type="text"
-                  inputMode="decimal"
-                  value={whtText}
-                  onChange={(e) => setWhtText(e.target.value)}
-                  className="h-10 w-full rounded-md border border-line-strong bg-panel pl-7 pr-3 text-right text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-                />
-              </div>
-              {errors.wht && <p className="mt-1 text-xs text-bad">{errors.wht}</p>}
-            </div>
 
-            <div>
+
+            <div hidden={!detailsOpen}>
               <span className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.gross}</span>
               <div className="rounded-md border border-line bg-tint px-3 py-2 text-right text-sm font-semibold tabular-nums text-ink">
                 ฿{formatSatang(grossLive)}
               </div>
             </div>
 
-            <div>
+            <div hidden={row === null}>
               <span className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_PAY.history}</span>
               {row === null || row.payments.length === 0 ? (
                 <p className="rounded-md border border-line bg-tint px-3 py-2 text-sm text-ink-muted">
@@ -646,7 +611,103 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
               )}
             </div>
 
+
+            <div hidden={row === null && !detailsOpen}>
+              <span className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.outstanding}</span>
+              <div className="rounded-md border border-line-strong bg-tint px-3 py-2 text-right text-base font-bold tabular-nums text-ink">
+                ฿{formatSatang(outstandingLive)}
+              </div>
+              {errors.outstanding && <p className="mt-1 text-xs text-bad">{errors.outstanding}</p>}
+            </div>
+
+
             <div>
+              <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-entity">
+                บิลของที่ไหน
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {['HF', 'HF Ville', ''].map(value => <button key={value} type="button" onClick={() => setEntity(value)}
+                  aria-pressed={value ? entity === value : !['HF', 'HF Ville'].includes(entity)}
+                  className={'min-h-12 rounded-lg border px-3 text-sm font-medium ' + ((value ? entity === value : !['HF', 'HF Ville'].includes(entity)) ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-line-strong text-ink')}>
+                  {value === 'HF' ? 'HF Hotel' : value || 'ชื่ออื่น'}
+                </button>)}
+              </div>
+              {!['HF', 'HF Ville'].includes(entity) && <input id="ap-entity" aria-label="ชื่อในบิล" value={entity} onChange={e => setEntity(e.target.value)} maxLength={200} placeholder="ระบุชื่อในบิล"
+                className="mt-2 h-12 w-full rounded-lg border border-line-strong px-3 text-base text-ink" />}
+              <p className="mt-2 text-xs text-ink-muted">{row ? 'ตามข้อมูลที่บันทึกไว้ เปลี่ยนได้' : creditors.length ? 'เลือกจากบิลล่าสุดให้แล้ว เปลี่ยนได้ตามบิลนี้' : 'เลือกโรงแรมที่ใช้บิลนี้'}</p>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.category}</label>
+              {/* RULING 1: category is optional on the row — "ไม่ระบุหมวด"
+                  is an explicit, selectable state (not just leaving the
+                  picker untouched), so it renders as its own pill alongside
+                  the 21-leaf grid rather than inside CategoryPicker itself
+                  (that component stays required-only, unchanged, for the
+                  entry/edit screens that still mandate a real category). */}
+              <button
+                type="button"
+                aria-pressed={categoryCode === null}
+                onClick={() => setCategoryCode(null)}
+                className={
+                  "mb-2 rounded-full border px-2.5 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/40 " +
+                  (categoryCode === null
+                    ? "border-brand-500 bg-brand-50 text-brand-700"
+                    : "border-line-strong bg-panel text-ink-muted hover:bg-tint")
+                }
+              >
+                {AP_FIELDS.categoryUnset}
+              </button>
+              <CategoryPicker value={categoryCode} onChange={setCategoryCode} recentCodes={recentCodes} />
+              <p className="mt-2 rounded-md bg-tint px-3 py-2 text-xs text-ink-muted">{AP_PAY.autoPostNotice}</p>
+            </div>
+
+
+            <button type="button" aria-expanded={detailsOpen} onClick={() => setDetailsOpen(!detailsOpen)}
+              className="min-h-11 w-full rounded-md border border-line-strong px-3 py-2 text-left text-sm font-medium text-brand-700">
+              {detailsOpen ? 'ซ่อนรายละเอียดเพิ่มเติม' : 'เพิ่มเติม: ภาษี ส่วนลด วันครบกำหนด หมายเหตุ'}
+            </button>
+            <p className="text-xs text-ink-muted">บิลทั่วไปกรอกยอดตามใบเสร็จได้เลย ช่องเพิ่มเติมใช้เมื่อมีรายการแยกในบิล</p>
+            <div hidden={!detailsOpen}>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className="block text-xs font-semibold text-ink-muted" htmlFor="ap-vat">
+                  {AP_FIELDS.vat}
+                </label>
+                <button type="button" onClick={applyVat} className="text-xs font-medium text-brand-500 hover:underline">
+                  {AP_PAY.vatAuto}
+                </button>
+              </div>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">฿</span>
+                <input
+                  id="ap-vat"
+                  type="text"
+                  inputMode="decimal"
+                  value={vatText}
+                  onChange={(e) => setVatText(e.target.value)}
+                  className="h-12 w-full rounded-lg border border-line-strong bg-panel pl-7 pr-3 text-right text-base tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                />
+              </div>
+              {errors.vat && <p className="mt-1 text-xs text-bad">{errors.vat}</p>}
+            </div>
+            <div hidden={!detailsOpen}>
+              <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-wht">
+                {AP_FIELDS.wht}
+              </label>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">฿</span>
+                <input
+                  id="ap-wht"
+                  type="text"
+                  inputMode="decimal"
+                  value={whtText}
+                  onChange={(e) => setWhtText(e.target.value)}
+                  className="h-12 w-full rounded-lg border border-line-strong bg-panel pl-7 pr-3 text-right text-base tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                />
+              </div>
+              {errors.wht && <p className="mt-1 text-xs text-bad">{errors.wht}</p>}
+            </div>
+            <div hidden={!detailsOpen}>
               <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-discount">
                 {AP_FIELDS.discount}
               </label>
@@ -658,21 +719,12 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                   inputMode="decimal"
                   value={discountText}
                   onChange={(e) => setDiscountText(e.target.value)}
-                  className="h-10 w-full rounded-md border border-line-strong bg-panel pl-7 pr-3 text-right text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                  className="h-12 w-full rounded-lg border border-line-strong bg-panel pl-7 pr-3 text-right text-base tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
                 />
               </div>
               {errors.discount && <p className="mt-1 text-xs text-bad">{errors.discount}</p>}
             </div>
-
-            <div>
-              <span className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.outstanding}</span>
-              <div className="rounded-md border border-line-strong bg-tint px-3 py-2 text-right text-base font-bold tabular-nums text-ink">
-                ฿{formatSatang(outstandingLive)}
-              </div>
-              {errors.outstanding && <p className="mt-1 text-xs text-bad">{errors.outstanding}</p>}
-            </div>
-
-            <div>
+            <div hidden={!detailsOpen}>
               <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-due-date">
                 {AP_FIELDS.dueDate}
               </label>
@@ -690,54 +742,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                 {dueDate && <span className="text-sm font-semibold text-ink">{isoToThaiLong(dueDate)}</span>}
               </div>
             </div>
-
-            <div>
-              <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-entity">
-                {AP_FIELDS.entity}
-              </label>
-              <input
-                id="ap-entity"
-                type="text"
-                list="ap-entity-list"
-                value={entity}
-                onChange={(e) => setEntity(e.target.value)}
-                maxLength={200}
-                className="w-full rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-              />
-              <datalist id="ap-entity-list">
-                {AP_ENTITIES.map((e) => (
-                  <option key={e} value={e} />
-                ))}
-              </datalist>
-            </div>
-
-            <div>
-              <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.category}</label>
-              {/* RULING 1: category is optional on the row — "ไม่ระบุหมวด"
-                  is an explicit, selectable state (not just leaving the
-                  picker untouched), so it renders as its own pill alongside
-                  the 21-leaf grid rather than inside CategoryPicker itself
-                  (that component stays required-only, unchanged, for the
-                  entry/edit screens that still mandate a real category). */}
-              <button
-                type="button"
-                role="radio"
-                aria-checked={categoryCode === null}
-                onClick={() => setCategoryCode(null)}
-                className={
-                  "mb-2 rounded-full border px-2.5 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/40 " +
-                  (categoryCode === null
-                    ? "border-brand-500 bg-brand-50 text-brand-700"
-                    : "border-line-strong bg-panel text-ink-muted hover:bg-tint")
-                }
-              >
-                {AP_FIELDS.categoryUnset}
-              </button>
-              <CategoryPicker value={categoryCode} onChange={setCategoryCode} recentCodes={recentCodes} />
-              <p className="mt-2 rounded-md bg-tint px-3 py-2 text-xs text-ink-muted">{AP_PAY.autoPostNotice}</p>
-            </div>
-
-            <div>
+            <div hidden={!detailsOpen}>
               <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-note">
                 {AP_FIELDS.note}
               </label>
@@ -748,7 +753,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                 onChange={(e) => setNote(e.target.value)}
                 maxLength={200}
                 placeholder="เช่น โทรตามยอด 25/3/69"
-                className="w-full rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                className="min-h-12 w-full rounded-lg border border-line-strong bg-panel px-3 py-2 text-base text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
               />
             </div>
 

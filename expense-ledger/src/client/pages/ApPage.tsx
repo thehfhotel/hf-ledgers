@@ -15,6 +15,8 @@ import {
 } from "../../shared/apTypes.ts";
 import { ApPaymentForm } from "../components/ApPaymentForm.tsx";
 import { ApRowDrawer } from "../components/ApRowDrawer.tsx";
+import { ReimbursementRowDrawer } from "../components/ReimbursementRowDrawer.tsx";
+import { RowOrigin } from "../components/RowOrigin.tsx";
 import {
   AP,
   AP_EMPTY,
@@ -87,7 +89,7 @@ function sortRows(rows: ApRow[], today: string): ApRow[] {
 export function ApPage({ filter }: Props) {
   const [data, setData] = useState<ApRowsResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [drawerMode, setDrawerMode] = useState<{ kind: "add" } | { kind: "edit"; rowId: string } | null>(null);
+  const [drawerMode, setDrawerMode] = useState<{ kind: "add" } | { kind: "edit"; rowId: string } | null>(() => new URLSearchParams(window.location.search).has("new") ? { kind: "add" } : null);
   const [payingRowId, setPayingRowId] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
 
@@ -115,6 +117,8 @@ export function ApPage({ filter }: Props) {
     setData(null);
     setLoadError(null);
     void fetchRows();
+    const interval = setInterval(() => { if (document.visibilityState === 'visible') void fetchRows(); }, 30_000);
+    return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter.mode, filter.month]);
 
@@ -156,6 +160,12 @@ export function ApPage({ filter }: Props) {
 
   return (
     <div className="flex flex-col gap-4">
+      <div className="rounded-lg bg-tint px-4 py-3 text-sm text-ink">
+        <p><strong>จากระบบเบิกจ่าย</strong> — รายการเข้าเอง และเปลี่ยนเป็นจ่ายแล้วเมื่อจ่ายคืนพนักงาน ไม่ต้องบันทึกซ้ำ</p>
+        <p className="mt-1"><strong>กรอกเอง</strong> — บิลที่คุณเพิ่มในหน้านี้ แก้ไขและบันทึกการจ่ายได้ตามปกติ</p>
+        {data?.reimbursementSync?.enabled && (data.reimbursementSync.error || !data.reimbursementSync.lastSuccess) &&
+          <p className="mt-2 font-medium text-bad">ข้อมูลเบิกจ่ายกำลังรออัปเดตหรือมีรายการต้องตรวจสอบ กรุณาดูสถานะที่ระบบเบิกจ่ายก่อน</p>}
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-panel px-3 py-2">
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex gap-1.5 rounded-md bg-tint p-1">
@@ -320,6 +330,7 @@ export function ApPage({ filter }: Props) {
                     <span className="min-w-0 break-words text-ink">{row.creditor}</span>
                     <span className="min-w-0 text-ink">
                       <span className="block break-words">{row.item}</span>
+                      <RowOrigin synced={!!row.reimbursement} issue={row.reimbursement?.error} />
                       <span className="mt-0.5 flex flex-wrap items-center gap-1">
                         <span className="inline-block truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
                           {categoryChipLabel(row)}
@@ -358,7 +369,7 @@ export function ApPage({ filter }: Props) {
                       )}
                     </span>
                     <span>
-                      {!isSettled && (
+                      {!isSettled && !row.reimbursement && (
                         <button
                           type="button"
                           onClick={(e) => {
@@ -411,6 +422,7 @@ export function ApPage({ filter }: Props) {
                     </span>
                   </div>
                   <span className="break-words text-xs text-ink-muted">{row.item}</span>
+                  <div><RowOrigin synced={!!row.reimbursement} issue={row.reimbursement?.error} /></div>
                   <div className="flex flex-wrap items-center gap-1">
                     <span className="inline-block w-fit truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
                       {categoryChipLabel(row)}
@@ -438,7 +450,7 @@ export function ApPage({ filter }: Props) {
                       </span>
                     )}
                   </div>
-                  {!isSettled && (
+                  {!isSettled && !row.reimbursement && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -457,7 +469,8 @@ export function ApPage({ filter }: Props) {
         </section>
       )}
 
-      {drawerMode && (
+      {drawerMode && editingRow?.reimbursement && <ReimbursementRowDrawer row={editingRow} onClose={closeDrawer} />}
+      {drawerMode && !editingRow?.reimbursement && (
         <ApRowDrawer
           row={editingRow}
           creditors={data?.creditors ?? []}

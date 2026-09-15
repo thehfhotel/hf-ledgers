@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EngineUnreachableError, SessionExpiredError, createExpense, getMonthExpenses, uploadExpensePhoto } from "../api.ts";
 import { EditDrawer } from "../components/EditDrawer.tsx";
+import { RowOrigin } from "../components/RowOrigin.tsx";
+import { navigate } from "../App.tsx";
 import { categoryByCode, isBillingMonthCategory, type ExpenseCategoryCode } from "../../shared/categories.ts";
 import { CategoryPicker } from "../components/CategoryPicker.tsx";
 import { currentMonthBangkok, isoToThaiLong, todayBangkok } from "@shared/date.ts";
@@ -66,6 +68,8 @@ export function EntryPage({ initialCategoryCode }: Props) {
   const [saving, setSaving] = useState(false);
   const [engineError, setEngineError] = useState(false);
 
+  const [monthEntries, setMonthEntries] = useState<ExpenseTransaction[]>([]);
+  const [dateOpen, setDateOpen] = useState(false);
   const [dayEntries, setDayEntries] = useState<ExpenseTransaction[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -132,6 +136,7 @@ export function EntryPage({ initialCategoryCode }: Props) {
     try {
       const month = forDate.slice(0, 7);
       const res = await getMonthExpenses(month);
+      setMonthEntries(res.items);
       setDayEntries(res.items.filter((item) => item.date === forDate));
       setLoadError(null);
     } catch (err) {
@@ -253,187 +258,95 @@ export function EntryPage({ initialCategoryCode }: Props) {
   const itemPlaceholder =
     categoryCode && isBillingMonthCategory(categoryCode) ? ITEM_PLACEHOLDER_BILLING_MONTH : ITEM_PLACEHOLDER_DEFAULT;
 
+  const lastSimilar = monthEntries.find(r => r.categoryCode === categoryCode && !r.reimbursementRowId);
+
   return (
-    <div className="flex flex-col gap-4">
-      <div
-        className="flex flex-col gap-4 lg:grid"
-        style={{
-          gridTemplateColumns: "380px 1fr",
-          gridTemplateAreas: '"date cat" "amount cat" "pay cat" "item cat" "photo cat" "save cat"',
-        }}
-      >
-        {/* วันที่ */}
-        <div style={{ gridArea: "date" }} className="rounded-lg border border-line bg-panel p-4">
-          <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="entry-date">
-            {FIELD_LABELS.date}
-          </label>
-          <div className="flex items-center gap-2">
-            <input
-              ref={dateInputRef}
-              id="entry-date"
-              key={date}
-              type="date"
-              defaultValue={date}
-              min={`${currentMonthBangkok()}-01`}
-              max={todayBangkok()}
-              className="rounded-md border border-line-strong px-2 py-1.5 text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-            />
-            <span className="text-sm font-semibold text-ink">{isoToThaiLong(date)}</span>
+    <div className="mx-auto flex max-w-5xl flex-col gap-6">
+      <header>
+        <p className="text-sm font-semibold text-brand-700">เพิ่มบิลของโรงแรม</p>
+        <h1 className="mt-1 text-2xl font-bold text-ink">บิลนี้จ่ายเงินแล้วหรือยัง?</h1>
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <div className="rounded-xl border-2 border-brand-500 bg-brand-50 p-4">
+            <strong className="block text-base text-brand-700">จ่ายแล้ว</strong>
+            <span className="mt-1 block text-sm text-ink-muted">บันทึกเงินที่จ่ายออกไป</span>
           </div>
-          {errors.date && <p className="mt-1 text-xs text-bad">{errors.date}</p>}
-        </div>
-
-        {/* จำนวนเงิน */}
-        <div style={{ gridArea: "amount" }} className="rounded-lg border border-line bg-panel p-4">
-          <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="entry-amount">
-            {FIELD_LABELS.amount}
-          </label>
-          <div className="relative">
-            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">฿</span>
-            <input
-              ref={amountInputRef}
-              id="entry-amount"
-              type="text"
-              inputMode="decimal"
-              value={amountText}
-              onChange={(e) => setAmountText(e.target.value)}
-              placeholder={AMOUNT_PLACEHOLDER}
-              aria-label={AMOUNT_ARIA_LABEL}
-              autoFocus
-              className="h-12 w-full rounded-md border border-line-strong bg-panel pl-7 pr-3 text-right text-xl font-semibold tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-            />
-          </div>
-          {errors.amount && <p className="mt-1 text-xs text-bad">{errors.amount}</p>}
-        </div>
-
-        {/* หมวดค่าใช้จ่าย — spans the full right column across every row above */}
-        <div style={{ gridArea: "cat" }}>
-          <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{FIELD_LABELS.category}</label>
-          <CategoryPicker value={categoryCode} onChange={setCategoryCode} recentCodes={recentCodes} />
-          {errors.category && <p className="mt-1 text-xs text-bad">{errors.category}</p>}
-        </div>
-
-        {/* จ่ายด้วย */}
-        <div style={{ gridArea: "pay" }} className="rounded-lg border border-line bg-panel p-4">
-          <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{FIELD_LABELS.paymentMethod}</label>
-          <div role="radiogroup" aria-label={FIELD_LABELS.paymentMethod} className="flex gap-0.5 rounded-md bg-tint p-1">
-            {(["cash", "bank"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                role="radio"
-                aria-checked={paymentMethod === m}
-                onClick={() => {
-                  setPaymentMethod(m);
-                  savePaymentMethod(m);
-                }}
-                className={
-                  "h-12 flex-1 rounded-md text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-brand-500/40 " +
-                  (paymentMethod === m ? "bg-panel text-brand-700 shadow-sm" : "text-ink-muted hover:text-ink")
-                }
-              >
-                {PAYMENT_METHOD_LABELS[m]}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* รายการ / หมายเหตุ */}
-        <div style={{ gridArea: "item" }} className="rounded-lg border border-line bg-panel p-4">
-          <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="entry-comment">
-            {FIELD_LABELS.item}
-          </label>
-          <input
-            id="entry-comment"
-            type="text"
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            maxLength={200}
-            placeholder={itemPlaceholder}
-            className="w-full rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-          />
-          {looksLikeAmountInText(comment) && <p className="mt-1 text-xs text-warn">{AMOUNT_IN_TEXT_WARNING_TH}</p>}
-        </div>
-
-        {/* รูปบิล */}
-        <div
-          style={{ gridArea: "photo" }}
-          className="rounded-lg border border-line bg-panel p-4"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            addFiles(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/")));
-          }}
-        >
-          <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{FIELD_LABELS.photo}</label>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              addFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
-          {stagedPhotos.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-2">
-              {stagedPhotos.map((file, index) => (
-                <div key={`${file.name}-${index}`} className="flex flex-col items-center gap-1">
-                  <img
-                    src={URL.createObjectURL(file)}
-                    alt=""
-                    className="h-16 w-16 rounded-md border border-line object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setStagedPhotos((prev) => prev.filter((_, i) => i !== index))}
-                    className="text-xs text-bad hover:underline"
-                  >
-                    {PHOTO.remove}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="h-12 rounded-md border border-line-strong bg-panel px-4 text-sm font-medium text-ink hover:bg-tint focus:outline-none focus:ring-2 focus:ring-brand-500/40"
-          >
-            {PHOTO.choose}
+          <button type="button" onClick={() => navigate('/ap?new=1')} className="rounded-xl border border-line-strong bg-panel p-4 text-left hover:bg-tint">
+            <strong className="block text-base text-ink">ยังไม่จ่าย</strong>
+            <span className="mt-1 block text-sm text-ink-muted">เก็บบิลไว้ในรายการค้างจ่าย</span>
           </button>
         </div>
+        <p className="mt-3 text-sm text-ink-muted">ใบเสร็จจากระบบเบิกจ่ายเข้ามาเอง ไม่ต้องกรอกซ้ำ</p>
+      </header>
 
-        {/* บันทึก */}
-        <div
-          style={{ gridArea: "save" }}
-          className="sticky bottom-0 z-10 -mx-4 border-t border-line bg-panel px-4 py-3 lg:static lg:z-auto lg:mx-0 lg:rounded-lg lg:border lg:border-line lg:p-4"
-        >
-          {engineError && (
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs text-bad">{ENGINE_ERROR.message}</p>
-              <button
-                type="button"
-                onClick={() => void handleSave()}
-                className="rounded-md border border-line-strong px-2.5 py-1 text-xs font-medium text-ink hover:bg-tint"
-              >
-                {ENGINE_ERROR.retry}
-              </button>
+      <section className="overflow-hidden rounded-2xl border border-line bg-panel shadow-sm">
+        <div className="grid gap-6 p-5 sm:p-6 lg:grid-cols-2 lg:gap-8">
+          <div>
+            <label htmlFor="entry-amount" className="mb-2 block text-base font-semibold text-ink">จ่ายไปเท่าไร</label>
+            <div className="relative">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-xl text-ink-muted">฿</span>
+              <input ref={amountInputRef} id="entry-amount" inputMode="decimal" value={amountText}
+                onChange={e => setAmountText(e.target.value)} placeholder="0.00" aria-label={AMOUNT_ARIA_LABEL} autoFocus
+                className="h-20 w-full rounded-xl border border-line-strong bg-tint pl-10 pr-4 text-right text-3xl font-bold tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
             </div>
-          )}
-          <button
-            type="button"
-            onClick={() => void handleSave()}
-            disabled={saving}
-            className="h-13 w-full rounded-md bg-brand-500 text-base font-semibold text-white hover:bg-brand-600 focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:opacity-50"
-          >
-            {saving ? SAVE.saving : SAVE.idle}
-          </button>
+            {errors.amount && <p className="mt-2 text-sm text-bad">{errors.amount}</p>}
+          </div>
+          <div>
+            <label className="mb-2 block text-base font-semibold text-ink">เป็นค่าอะไร</label>
+            <CategoryPicker value={categoryCode} onChange={code => {
+              setCategoryCode(code);
+              const previous = monthEntries.find(r => r.categoryCode === code && !r.reimbursementRowId);
+              if (previous) setPaymentMethod(previous.paymentMethod);
+            }} recentCodes={recentCodes} />
+            {errors.category && <p className="mt-2 text-sm text-bad">{errors.category}</p>}
+            {lastSimilar && <button type="button" onClick={() => {
+              setAmountText((lastSimilar.amountSatang / 100).toFixed(2)); setComment(lastSimilar.comment); setPaymentMethod(lastSimilar.paymentMethod);
+            }} className="mt-3 w-full rounded-lg bg-tint p-3 text-left text-sm text-ink">
+              <span className="block font-medium">ใช้ข้อมูลรายการล่าสุด · ฿{formatSatang(lastSimilar.amountSatang)}</span>
+              <span className="mt-1 block text-xs text-ink-muted">{lastSimilar.comment || 'คัดลอกยอดและวิธีจ่าย แล้วตรวจสอบก่อนบันทึก'}</span>
+            </button>}
+          </div>
+          <div>
+            <label className="mb-2 block text-sm font-semibold text-ink">จ่ายจาก</label>
+            <div role="radiogroup" aria-label={FIELD_LABELS.paymentMethod} className="grid grid-cols-2 gap-2">
+              {(['cash', 'bank'] as const).map(m => <button key={m} type="button" role="radio" aria-checked={paymentMethod === m}
+                onClick={() => { setPaymentMethod(m); savePaymentMethod(m); }}
+                className={'min-h-12 rounded-lg border px-4 text-base font-medium ' + (paymentMethod === m ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-line-strong text-ink hover:bg-tint')}>
+                {m === 'cash' ? 'เงินสด' : 'โอนผ่านธนาคาร'}
+              </button>)}
+            </div>
+            <p className="mt-2 text-xs text-ink-muted">เลือกไว้ให้จากข้อมูลเดิม เปลี่ยนได้ตามบิลนี้</p>
+          </div>
+          <div>
+            <span className="mb-2 block text-sm font-semibold text-ink">วันที่จ่าย</span>
+            <div className="flex min-h-12 flex-wrap items-center justify-between gap-2 rounded-lg bg-tint px-3 py-2">
+              <span className="text-sm text-ink">{date === todayBangkok() ? 'วันนี้ · ' : ''}{isoToThaiLong(date)}</span>
+              <button type="button" aria-expanded={dateOpen} onClick={() => setDateOpen(!dateOpen)} className="min-h-10 px-2 text-sm font-semibold text-brand-700">เปลี่ยนวันที่</button>
+            </div>
+            <div hidden={!dateOpen && !errors.date} className="mt-2">
+              <input ref={dateInputRef} id="entry-date" key={date} type="date" defaultValue={date} aria-label="วันที่จ่าย"
+                min={`${currentMonthBangkok()}-01`} max={todayBangkok()} className="h-12 rounded-lg border border-line-strong px-3 text-base text-ink" />
+            </div>
+            {errors.date && <p className="mt-2 text-sm text-bad">{errors.date}</p>}
+          </div>
+          <div>
+            <label htmlFor="entry-comment" className="mb-2 block text-sm font-semibold text-ink">รายละเอียดสั้น ๆ <span className="font-normal text-ink-muted">(ถ้ามี)</span></label>
+            <input id="entry-comment" value={comment} onChange={e => setComment(e.target.value)} maxLength={200} placeholder={itemPlaceholder}
+              className="h-12 w-full rounded-lg border border-line-strong px-3 text-base text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
+            {looksLikeAmountInText(comment) && <p className="mt-2 text-sm text-warn">{AMOUNT_IN_TEXT_WARNING_TH}</p>}
+          </div>
+          <div onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); addFiles(Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))); }}>
+            <span className="mb-2 block text-sm font-semibold text-ink">รูปใบเสร็จ <span className="font-normal text-ink-muted">(เพิ่มภายหลังได้)</span></span>
+            <input ref={fileInputRef} type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={e => { addFiles(e.target.files); e.target.value=''; }} />
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="min-h-12 w-full rounded-lg border border-dashed border-line-strong px-4 text-sm font-medium text-brand-700">{stagedPhotos.length ? `แนบแล้ว ${stagedPhotos.length} รูป · เพิ่มรูป` : 'ถ่ายรูป หรือเลือกรูปใบเสร็จ'}</button>
+            {stagedPhotos.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{stagedPhotos.map((f,i) => <div key={i} className="rounded border border-line p-2 text-xs"><span>{f.name}</span><button type="button" onClick={() => setStagedPhotos(prev => prev.filter((_,j) => i!==j))} className="ml-2 text-bad">เอาออก</button></div>)}</div>}
+          </div>
         </div>
-      </div>
+        <footer className="sticky bottom-0 flex flex-wrap items-center justify-between gap-4 border-t border-line bg-tint p-5 sm:p-6">
+          <div><span className="block text-sm text-ink-muted">ยอดที่จะบันทึก</span><strong className="text-2xl tabular-nums text-ink">฿{formatSatang(parseAmountToSatang(amountText) ?? 0)}</strong></div>
+          {engineError && <p role="alert" className="text-sm text-bad">{ENGINE_ERROR.message}</p>}
+          <button type="button" onClick={() => void handleSave()} disabled={saving} className="min-h-13 flex-1 rounded-xl bg-brand-500 px-8 py-3 text-base font-semibold text-white hover:bg-brand-600 disabled:opacity-50 sm:flex-none">{saving ? SAVE.saving : 'บันทึกรายจ่าย'}</button>
+        </footer>
+      </section>
 
       {/* Day strip — full width, below both columns */}
       <section className="rounded-lg border border-line bg-panel">
@@ -458,9 +371,10 @@ export function EntryPage({ initialCategoryCode }: Props) {
               >
                 <button
                   type="button"
-                  onClick={() => setEditingItem(item)}
+                  onClick={() => item.reimbursementRowId ? navigate('/ap?f=all') : setEditingItem(item)}
                   className="min-w-0 flex-1 truncate text-left text-ink hover:underline focus:outline-none"
                 >
+                  <span className="mr-2"><RowOrigin synced={!!item.reimbursementRowId} /></span>
                   {categoryByCode(item.categoryCode).label}
                   <span className="text-ink-muted"> · {item.comment || "-"} · {PAYMENT_METHOD_LABELS[item.paymentMethod]}</span>
                 </button>

@@ -16,6 +16,8 @@ import {
   modifyExpenseTransaction,
 } from "./engine.ts";
 import { enqueueAnalyticsPush, startAnalyticsPush } from "./analytics-push.ts";
+import { withApWriteLock } from "./ap-write-lock.ts";
+import { isReimbursementRow, reimbursementExpenseView, reimbursementPhoto, reimbursementRowView, reimbursementSyncStatus, startReimbursementSync } from "./reimbursement-sync.ts";
 import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution.ts";
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
 import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "@shared/date.ts";
@@ -208,7 +210,6 @@ function truncateApPaymentComment(
 // write route (row create/patch/delete, payment create, payment undo) is
 // wrapped, even the ones with no obvious cross-request race today, so there
 // is exactly one queue to reason about rather than a per-route judgment call.
-let apWriteQueue: Promise<void> = Promise.resolve();
 
 /** Runs `fn` only after every previously queued AP write has fully settled,
  * and makes the NEXT queued write wait for `fn` to settle in turn — a strict
@@ -216,14 +217,6 @@ let apWriteQueue: Promise<void> = Promise.resolve();
  * THIS call's caller unchanged; it never poisons the chain for subsequent
  * callers (the queue tail always defuses to a resolved no-op via the trailing
  * `.then(() => undefined, () => undefined)`). */
-function withApWriteLock<T>(fn: () => Promise<T>): Promise<T> {
-  const result = apWriteQueue.then(fn);
-  apWriteQueue = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
 
 // ── Content-type gate (M5 fix) ──────────────────────────────────────────────
 // A write route that expects a JSON body now rejects anything else with 415
@@ -509,6 +502,19 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.slice(4) || "/"; // strip "/api" prefix
   const method = req.method;
 
+  const sourcePhoto = path.match(/^\/reimbursement\/photos\/([A-Za-z0-9_-]+)\/(\d+)$/);
+  if (method === 'GET' && sourcePhoto) {
+    try { return await reimbursementPhoto(sourcePhoto[1]!, sourcePhoto[2]!); }
+    catch { return json(502, { error: 'receipt_photo_unavailable' }); }
+  }
+  if (method === 'GET' && path === '/reimbursement/status') return withApStore(() => json(200, reimbursementSyncStatus()));
+  const managedWrite = path.match(/^\/ap\/rows\/([^/]+)(?:\/|$)/);
+  if (!['GET', 'HEAD'].includes(method) && managedWrite) {
+    try {
+      if (isReimbursementRow(managedWrite[1]!)) return json(409, { error: 'reimbursement_managed' });
+    } catch { return json(500, { error: 'ap_store_error' }); }
+  }
+
   if (method === "GET" && path === "/me") {
     const me: Me = { email: identity.email };
     return json(200, me);
@@ -522,7 +528,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     const month = url.searchParams.get("month");
     if (!month || !isValidMonth(month)) return json(400, { error: "invalid month" });
     return withEngine(async () => {
-      const items = await getMonthExpenseTransactions(month);
+      const items = (await getMonthExpenseTransactions(month)).map(reimbursementExpenseView);
       return json(200, buildMonthResponse(items));
     });
   }
@@ -638,10 +644,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
 
     return withApStore(() => {
       const filter: ApListFilter = m !== null ? { mode: "month", month: m } : { mode: f === "all" ? "all" : "open" };
-      const rows = apStore.listApRows(filter);
+      const rows = apStore.listApRows(filter).map(reimbursementRowView);
       const summary = apStore.computeApSummary(todayBangkok());
       const creditors = apStore.listCreditorHints();
-      return json(200, { rows, summary, creditors });
+      return json(200, { rows, summary, creditors, reimbursementSync: reimbursementSyncStatus() });
     });
   }
 
@@ -1078,6 +1084,7 @@ if (import.meta.main) {
     // side effects (no DB open) so a bare `bun test` / `GET /healthz` never
     // touches the AP register sqlite file.
     startAnalyticsPush();
+    startReimbursementSync();
   } else {
     // Dev: HTML import lets Bun bundle the React client on the fly with HMR
     // (bunfig.toml registers the Tailwind plugin for this dev-serve path;
@@ -1108,5 +1115,6 @@ if (import.meta.main) {
     // See the prod branch above: started after the listener is up, never at
     // module import.
     startAnalyticsPush();
+    startReimbursementSync();
   }
 }

@@ -4,6 +4,52 @@ HF Hotel's company expense ledger: a custom Bun frontend backed by a headless
 [ezBookkeeping](https://ezbookkeeping.mayswind.net/) engine. Public repo — see
 CLAUDE.md's public-repo hygiene rule (no LAN IPs, no internal topology).
 
+## Reimbursement receipts (2026-09-15)
+
+New submissions only, from a fixed activation instant. One submitted request
+can contain multiple receipts: each receipt becomes one unpaid **ค้างจ่าย**
+row, identified by its source receipt ID. Submission means submitting the
+request (`PENDING`), not saving an unsent receipt. Approval and payment-in-progress
+keep the row unpaid; `PAID` settles that same row with one bank expense transaction
+tagged `ap:<rowId>`. The existing analytics rollup excludes AP-tagged payments
+from direct expenses, so payment does not count the cost a second time.
+
+The row's filing date is the Bangkok request-submission date; its purchase date
+is retained in the note, and settlement uses the Bangkok `paidAt` date. Bundle
+payment totals must exactly equal the sum of receipts before automatic settlement.
+Unknown receipt categories remain explicitly uncategorized and block settlement
+until the mapping in `reimbursement-sync.ts` is extended.
+
+The Thai UI labels **จากระบบเบิกจ่าย** / **กรอกเอง** on desktop and mobile.
+Source rows are read-only; edits and payments happen in reimbursement. Images
+are read through authenticated ledger routes from the source, including all
+attachments and the legacy cover image; source downtime can temporarily hide
+images. Withdrawal/rejection removes only the linked unpaid row on the next
+complete snapshot. A disappeared or changed settled receipt is flagged for review.
+
+Configuration is shipped by the existing CI/CD pipeline:
+
+- Reimbursement GitHub secret `LEDGER_FEED_TOKEN` enables its read-only feed.
+- Ledger secrets `EXPENSE_REIMBURSEMENT_FEED_URL` (ending `/api/ledger-feed`) and
+  `EXPENSE_REIMBURSEMENT_FEED_TOKEN` supply the endpoint and the same token.
+- Ledger repository variable `EXPENSE_REIMBURSEMENT_SYNC_SINCE` supplies a fixed
+  UTC ISO instant (`YYYY-MM-DDTHH:mm:ss.sssZ`). Never advance it on redeploy or
+  expand it to history without reconciliation. The journal rejects scope changes.
+- The worker reads every 30 seconds; no source DB connection, engine token
+  exposure, extra engine network, bank transfer, or notification is involved.
+- `GET /api/reimbursement/status` (normal Access identity required) reports
+  activation, last successful snapshot, receipt count, and issues. Failures also
+  appear in the register and container logs; `/healthz` stays dependency-free.
+
+Payment recovery: a durable intent is written before the engine POST. If its
+response is lost, subsequent passes search the AP tag and verify amount/date/
+category/account to recover the existing transaction. They **never post again**
+while an attempt is uncertain. If no transaction exists after investigation,
+stop the worker, confirm the engine has finished processing the request, and
+clear only that receipt's `attempted` flag in `_reimbursement_receipts`, then
+resume. Preserve the AP/engine backup pair and the original source payload;
+never delete a real payment to make the sync appear healthy.
+
 ## Identity table
 
 | Item | Value |

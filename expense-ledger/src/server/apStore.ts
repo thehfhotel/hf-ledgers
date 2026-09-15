@@ -221,12 +221,17 @@ function getDb(): Database {
 /** Exposes the lazily-opened AP register handle to src/server/analytics-push.ts,
  * which keeps its own outbox table (`_analytics_pending_pushes`) in this
  * SAME sqlite file rather than a database of its own — see CLAUDE.md's "AP
- * register storage exception" paragraph. This is the ONE other module
- * allowed to touch this handle directly; every other caller goes through
+ * register storage exception" paragraph. Receipt sync has its own accessor below; all other callers go through
  * this file's row/payment/photo functions. Still fully lazy: calling this
  * opens (and migrates) the database on first call, exactly like every
  * other exported function here. */
 export function getApDbForAnalytics(): Database {
+  return getDb();
+}
+
+/** Receipt sync keeps its identity/payment journal in the same backed-up
+ * operational store. Financial rows still use the AP CRUD functions below. */
+export function getApDbForReimbursement(): Database {
   return getDb();
 }
 
@@ -357,13 +362,13 @@ function mapRow(db: Database, raw: RawRow): ApRow {
 
 // ── row CRUD ────────────────────────────────────────────────────────────
 
-export function createApRow(input: ApRowInput, createdBy: string): string {
-  const id = crypto.randomUUID();
+export function createApRow(input: ApRowInput, createdBy: string, source?: { id: string; filedDate: string }): string {
+  const id = source?.id ?? crypto.randomUUID();
   const createdAt = new Date().toISOString();
   // M1 fix: filed_date is the Bangkok CALENDAR date, computed independently
   // of createdAt's UTC timestamp — see the CREATE TABLE comment above for
   // why these two must not be derived from each other.
-  const filedDate = todayBangkok();
+  const filedDate = source?.filedDate ?? todayBangkok();
   getDb()
     .query(
       `INSERT INTO ap_row

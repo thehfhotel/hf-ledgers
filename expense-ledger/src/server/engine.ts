@@ -84,7 +84,7 @@ export async function engineFetch<T = unknown>(
     headers.set("content-type", "application/json");
   }
 
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000), ...init, headers });
   return (await res.json()) as EngineEnvelope<T>;
 }
 
@@ -662,6 +662,30 @@ export async function createApPaymentTransaction(input: CreateApPaymentTransacti
   const id = res.result?.id;
   if (id === undefined || id === null) throw new Error("ezBookkeeping did not return a transaction id");
   return String(id);
+}
+
+/** Recovery for receipt sync's one full payment per AP row. Uses the durable
+ * AP tag and checks the actual amount/date/category, never fuzzy text matching.
+ * A journaled but unconfirmed POST is only recovered by reading the engine;
+ * the worker must not issue a second POST after a timeout or process crash. */
+export async function findReimbursementPayment(input: CreateApPaymentTransactionInput): Promise<string | null> {
+  const tagId = await findApTagByName(apTagName(input.apRowId));
+  if (!tagId) return null;
+  const [year, month] = input.date.split('-').map(Number);
+  const res = await engineFetch<{ items: EngineTransactionRaw[]; totalCount: number }>(
+    `/transactions/list/by_month.json?year=${year}&month=${month}&type=${TRANSACTION_TYPE_EXPENSE}`,
+  );
+  if (!res.success || !res.result) throw new Error('Cannot reconcile receipt payment');
+  const matches = res.result.items.filter(r => extractTagIds(r).includes(String(tagId)));
+  if (!matches.length) return null;
+  if (matches.length !== 1) throw new Error('Multiple receipt payment transactions');
+  const row = matches[0]!;
+  if (row.sourceAmount !== input.amountSatang || deriveDateFromEngineTime(row.time) !== input.date
+    || String(row.categoryId) !== await categoryCodeToEngineId(input.categoryCode)
+    || String(row.sourceAccountId) !== await paymentMethodToEngineId(input.paymentMethod)) {
+    throw new Error('Receipt payment transaction mismatch');
+  }
+  return String(row.id);
 }
 
 /** Test-only seam: lets server.test.ts reset the in-process category/account

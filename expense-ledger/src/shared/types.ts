@@ -38,6 +38,7 @@ export interface ExpensePhoto {
  * that carries no attribution token.
  */
 export interface ExpenseTransaction {
+  reimbursementRowId?: string;
   id: string;
   date: string;
   amountSatang: number;

@@ -32,6 +32,8 @@ export interface ApPayment {
 }
 
 export interface ApRow {
+  /** Read-only receipt sourced from reimbursement. Payment follows its request. */
+  reimbursement?: { receiptId: string; bundleId: string; status: string; error: boolean };
   id: string;
   creditor: string;
   item: string;
@@ -111,6 +113,7 @@ export interface ApSummary {
 
 /** GET /api/ap/rows response (spec §9). */
 export interface ApRowsResponse {
+  reimbursementSync?: { enabled: boolean; since?: string | null; lastSuccess?: string | null; error?: string | null; receipts?: number; issues?: number };
   rows: ApRow[];
   summary: ApSummary;
   creditors: ApCreditorHint[];

@@ -23,6 +23,9 @@ services:
       # the host .env from env_payload; they only reach the process through this map.
       - ANALYTICS_URL=${ANALYTICS_URL:-}
       - ANALYTICS_TOKEN=${ANALYTICS_TOKEN:-}
+      - REIMBURSEMENT_FEED_URL=${REIMBURSEMENT_FEED_URL:-}
+      - REIMBURSEMENT_FEED_TOKEN=${REIMBURSEMENT_FEED_TOKEN:-}
+      - REIMBURSEMENT_SYNC_SINCE=${REIMBURSEMENT_SYNC_SINCE:-}
     volumes:
       - expense_ap:/app/data
     depends_on:

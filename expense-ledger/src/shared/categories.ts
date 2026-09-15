@@ -101,3 +101,22 @@ export function isBillingMonthCategory(code: ExpenseCategoryCode): boolean {
   const category = categoryByCode(code);
   return category.order >= 9 && category.order <= 16;
 }
+
+/**
+ * Resolves ezBookkeeping's own two-level category names (as returned by its
+ * transaction/category-list endpoints — the SAME (primary.name, secondary.name)
+ * pair src/server/engine.ts's category cache matches on: `primary.name ===
+ * label`, `secondary.name === building ?? label`) back to this app's
+ * ExpenseCategoryCode. Used where a caller only has the engine's raw
+ * category names rather than a resolved code — e.g. the analytics-rollup
+ * test fixtures (src/shared/rollup.fixtures/), which were dumped straight
+ * from the engine's own transaction list rather than through this app's
+ * runtime category-id cache. Returns null for a foreign/unmapped pair
+ * (never throws) so a caller can decide its own fallback, mirroring
+ * engine.ts's own "unmapped falls back to other" policy rather than
+ * dictating it here.
+ */
+export function categoryCodeForEngineNames(parentName: string, name: string): ExpenseCategoryCode | null {
+  const category = EXPENSE_CATEGORIES.find((c) => c.label === parentName && (c.building ?? c.label) === name);
+  return category ? category.code : null;
+}

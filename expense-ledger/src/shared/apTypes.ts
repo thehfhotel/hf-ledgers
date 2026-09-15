@@ -32,6 +32,8 @@ export interface ApPayment {
 }
 
 export interface ApRow {
+  /** Read-only net payroll batch. Paid only after the bank verifies settlement. */
+  payroll?: { runId: string; period: string; effectiveDate: string; employeeCount: number; status: string; error: boolean; paidDate: string | null };
   /** Read-only receipt sourced from reimbursement. Payment follows its request. */
   reimbursement?: { receiptId: string; bundleId: string; requestName: string; purchaseDate: string; note: string; status: string; error: boolean };
   id: string;
@@ -113,6 +115,7 @@ export interface ApSummary {
 
 /** GET /api/ap/rows response (spec §9). */
 export interface ApRowsResponse {
+  payrollSync?: { enabled: boolean; since?: string | null; lastSuccess?: string | null; error?: string | null; runs?: number; issues?: number };
   reimbursementSync?: { enabled: boolean; since?: string | null; lastSuccess?: string | null; error?: string | null; receipts?: number; issues?: number };
   rows: ApRow[];
   summary: ApSummary;

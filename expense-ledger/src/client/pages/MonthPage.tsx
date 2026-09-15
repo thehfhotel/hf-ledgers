@@ -275,9 +275,9 @@ export function MonthPage({ month }: Props) {
                   >
                     <span className="tabular-nums text-ink">{isoToBuddhist(item.date)}</span>
                     <span className="min-w-0 truncate text-ink">{categoryByCode(item.categoryCode).label}</span>
-                    <span className="min-w-0 truncate text-ink" title={item.comment}>
+                    <span className="min-w-0 break-words text-ink" title={item.comment}>
                       {item.comment || EMPTY_VALUE}
-                      <span className="ml-2"><RowOrigin synced={!!item.reimbursementRowId} /></span>
+                      <span className="mt-1 block"><RowOrigin synced={!!item.reimbursementRowId} /></span>
                     </span>
                     <span className="text-ink-muted">{PAYMENT_METHOD_LABELS[item.paymentMethod]}</span>
                     <span className="text-right tabular-nums text-ink">{formatSatang(item.amountSatang)}</span>
@@ -298,7 +298,7 @@ export function MonthPage({ month }: Props) {
                       )}
                     </span>
                     <span className="min-w-0 truncate text-xs text-ink-muted">
-                      {item.by ? item.by.split("@")[0] : EMPTY_VALUE}
+                      {item.reimbursementRowId ? "ระบบเบิกจ่าย" : item.by ? item.by.split("@")[0] : EMPTY_VALUE}
                     </span>
                   </div>
                 ))}

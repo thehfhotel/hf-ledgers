@@ -374,8 +374,8 @@ export function EntryPage({ initialCategoryCode }: Props) {
                   onClick={() => item.reimbursementRowId ? navigate('/ap?f=all') : setEditingItem(item)}
                   className="min-w-0 flex-1 truncate text-left text-ink hover:underline focus:outline-none"
                 >
+                  <span className="mr-2"><RowOrigin synced={!!item.reimbursementRowId} /></span>
                   {categoryByCode(item.categoryCode).label}
-                  <span className="mx-2"><RowOrigin synced={!!item.reimbursementRowId} /></span>
                   <span className="text-ink-muted"> · {item.comment || "-"} · {PAYMENT_METHOD_LABELS[item.paymentMethod]}</span>
                 </button>
                 <span className="shrink-0 tabular-nums font-medium text-ink">฿{formatSatang(item.amountSatang)}</span>

@@ -5,7 +5,7 @@ import { fetchHandler } from './server.ts';
 
 const SINCE = '2026-09-15T00:00:00.000Z';
 const receipt = (id: string, extra: Partial<SourceReceipt> = {}): SourceReceipt => ({
-  id, bundleId: 'request-sample', status: 'PENDING', submittedAt: '2026-09-15T18:00:00.000Z', paidAt: null,
+  id, bundleId: 'request-sample', requestName: 'เบิกค่าอาหารเช้า', status: 'PENDING', submittedAt: '2026-09-15T18:00:00.000Z', paidAt: null,
   paymentMatchesReceipts: true, merchant: 'ร้านทดสอบ', claimant: 'พนักงานทดสอบ', category: 'ต้นทุนอาหารเช้า HF',
   property: 'hf-hotel', amountSatang: 12345, date: '2026-09-10', note: 'ตัวอย่าง', photoCount: 2, ...extra,
 });

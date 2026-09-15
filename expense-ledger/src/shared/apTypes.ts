@@ -33,7 +33,7 @@ export interface ApPayment {
 
 export interface ApRow {
   /** Read-only receipt sourced from reimbursement. Payment follows its request. */
-  reimbursement?: { receiptId: string; bundleId: string; status: string; error: boolean };
+  reimbursement?: { receiptId: string; bundleId: string; requestName: string; purchaseDate: string; note: string; status: string; error: boolean };
   id: string;
   creditor: string;
   item: string;

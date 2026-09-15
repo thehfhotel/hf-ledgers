@@ -10,7 +10,7 @@ import { withApWriteLock } from './ap-write-lock.ts';
 const ACTOR = 'reimbursement@system.thehfhotel.org';
 const STATUSES = ['PENDING', 'APPROVED', 'PAYING', 'PAID'] as const;
 export interface SourceReceipt {
-  id: string; bundleId: string; status: typeof STATUSES[number]; submittedAt: string;
+  id: string; bundleId: string; requestName: string; status: typeof STATUSES[number]; submittedAt: string;
   paidAt: string | null; paymentMatchesReceipts: boolean; merchant: string; claimant: string;
   category: string; property: 'hf-hotel' | 'hf-ville'; amountSatang: number;
   date: string; note: string; photoCount: number;
@@ -38,7 +38,7 @@ export function validateSnapshot(value: unknown, since: string): Snapshot {
       || !isValidIso(r.date) || !Number.isSafeInteger(r.amountSatang) || r.amountSatang < 1 || r.amountSatang > 99_999_999_999
       || !['hf-hotel', 'hf-ville'].includes(r.property) || typeof r.paymentMatchesReceipts !== 'boolean'
       || !Number.isInteger(r.photoCount) || r.photoCount < 0 || r.photoCount > 100
-      || ![r.merchant, r.claimant, r.category, r.note].every(v => typeof v === 'string' && v.length <= 10000)
+      || ![r.merchant, r.claimant, r.category, r.note, r.requestName].every(v => typeof v === 'string' && v.length <= 10000)
       || (r.status === 'PAID' ? !isoInstant(r.paidAt) : r.paidAt !== null)) throw new Error('Invalid receipt in snapshot');
     ids.add(r.id);
   }
@@ -66,7 +66,7 @@ export function reimbursementRowView(row: ApRow): ApRow {
   const link = db().query('SELECT * FROM _reimbursement_receipts WHERE row_id=?').get(row.id) as Link | null;
   if (!link) return row;
   const r = JSON.parse(link.payload) as SourceReceipt;
-  return { ...row, reimbursement: { receiptId: r.id, bundleId: r.bundleId, status: r.status, error: link.error !== null },
+  return { ...row, reimbursement: { receiptId: r.id, bundleId: r.bundleId, requestName: r.requestName, purchaseDate: r.date, note: r.note, status: r.status, error: link.error !== null },
     photos: Array.from({ length: r.photoCount }, (_, i) => ({ id: `reimbursement-${r.id}-${i}`, url: `/api/reimbursement/photos/${r.id}/${i}` })) };
 }
 
@@ -133,7 +133,7 @@ export async function reconcileSnapshot(value: unknown, since: string, deps: Syn
         const payment: CreateApPaymentTransactionInput = {
           apRowId: rowId, date: bangkokDate(r.paidAt!), amountSatang: r.amountSatang,
           categoryCode: input.categoryCode, paymentMethod: 'bank', email: ACTOR,
-          comment: `เบิกจ่าย ${r.bundleId} / ใบเสร็จ ${r.id}`,
+          comment: `${r.merchant.slice(0, 70)} · เบิกจ่าย ${r.requestName.slice(0, 70)}`,
         };
         let transactionId = await deps.find(payment);
         if (!transactionId) {

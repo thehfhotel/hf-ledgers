@@ -57,6 +57,31 @@ export function validatePayrollSnapshot(value: unknown, since: string): Snapshot
       status: run.status, paidDate: run.paidDate })) };
 }
 
+/** A fixed, explicitly reviewed set of historical bank-verified batches.
+ * Sorting and field normalization make harmless JSON key/order differences
+ * equivalent while binding the approval to every financial/source field. */
+export function validatePayrollBackfillManifest(value: unknown, since: string): SourcePayrollRun[] {
+  if (!isoInstant(since)) throw new Error('Invalid payroll sync start');
+  if (value === undefined) return [];
+  const keys = ['id', 'period', 'submittedAt', 'effectiveDate', 'amountSatang', 'employeeCount', 'status', 'paidDate'];
+  if (!Array.isArray(value) || value.length > 100 || value.some(run => !run || typeof run !== 'object'
+    || Array.isArray(run) || Object.keys(run).length !== keys.length || Object.keys(run).some(key => !keys.includes(key)))) {
+    throw new Error('Invalid payroll backfill manifest');
+  }
+  const retrievalSince = value.reduce((earliest, run) =>
+    isoInstant(run.submittedAt) && run.submittedAt < earliest ? run.submittedAt : earliest, since);
+  const items = validatePayrollSnapshot({ version: 1, complete: true, since: retrievalSince,
+    generatedAt: new Date().toISOString(), items: value }, retrievalSince).items;
+  if (items.some(run => run.status !== 'PAID' || run.submittedAt >= since)) {
+    throw new Error('Payroll backfill requires approved historical paid batches');
+  }
+  return items.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export function payrollRetrievalSince(since: string, manifest: readonly SourcePayrollRun[]): string {
+  return manifest.reduce((earliest, run) => run.submittedAt < earliest ? run.submittedAt : earliest, since);
+}
+
 function db() {
   const d = ap.getApDbForPayroll();
   d.exec(`CREATE TABLE IF NOT EXISTS _payroll_runs (
@@ -85,12 +110,19 @@ export function payrollRowView(row: ApRow): ApRow {
     employeeCount: run.employeeCount, status: run.status, error: link.error !== null, paidDate: run.paidDate } };
 }
 export function payrollSyncStatus() {
-  if (!config()) return { enabled: false };
+  try {
+    if (!config()) return { enabled: false };
+  } catch {
+    // A malformed optional secret disables payroll writes, not the AP page
+    // or the other integrations. Never expose its JSON/parser error payload.
+    return { enabled: true, lastSuccess: null, error: 'Payroll sync configuration is invalid' };
+  }
   const values = Object.fromEntries((db().query('SELECT key,value FROM _payroll_meta').all() as { key: string; value: string }[])
     .map(r => [r.key, r.value]));
   const rows = links();
   return { enabled: true, since: values.since ?? null, lastSuccess: values.lastSuccess ?? null,
-    error: values.error || null, runs: rows.length, issues: rows.filter(r => r.error).length };
+    error: values.error || null, runs: rows.length, issues: rows.filter(r => r.error).length,
+    backfillRunCount: values.backfillManifest ? (JSON.parse(values.backfillManifest) as SourcePayrollRun[]).length : 0 };
 }
 export function payrollToAp(run: SourcePayrollRun): ApRowInput {
   const period = new Intl.DateTimeFormat('th-TH', { month: 'long', year: 'numeric', timeZone: 'Asia/Bangkok' })
@@ -108,16 +140,37 @@ interface SyncDeps {
 }
 const defaultDeps: SyncDeps = { post: createApPaymentTransaction, find: findSourceApPayment, enqueue: enqueueAnalyticsPush };
 
-export async function reconcilePayrollSnapshot(value: unknown, since: string, deps: SyncDeps = defaultDeps) {
-  // Validate the entire response before changing a single payable.
-  const snapshot = validatePayrollSnapshot(value, since);
+export async function reconcilePayrollSnapshot(value: unknown, since: string, deps: SyncDeps = defaultDeps,
+  options: { backfillManifest?: unknown } = {}) {
   return withApWriteLock(async () => {
+    // Perform every scope/approval check while holding the same lock as AP
+    // writes. No pin, automatic row or historical payable changes unless the
+    // complete source snapshot matches every approved historical batch.
+    const manifest = validatePayrollBackfillManifest(options.backfillManifest, since);
+    const snapshot = validatePayrollSnapshot(value, payrollRetrievalSince(since, manifest));
+    const sourceById = new Map(snapshot.items.map(run => [run.id, run]));
+    for (const approved of manifest) {
+      const source = sourceById.get(approved.id);
+      if (!source || JSON.stringify(source) !== JSON.stringify(approved)) {
+        throw new Error('Approved payroll backfill batch is missing or changed');
+      }
+    }
+    const approvedIds = new Set(manifest.map(run => run.id));
+    const selected = snapshot.items.filter(run => run.submittedAt >= since || approvedIds.has(run.id));
     const d = db();
     const scope = d.query("SELECT value FROM _payroll_meta WHERE key='since'").get() as { value: string } | null;
     if (scope && scope.value !== since) throw new Error('Payroll sync start changed; explicit reconciliation required');
-    meta('since', since);
+    const pinned = d.query("SELECT value FROM _payroll_meta WHERE key='backfillManifest'").get() as { value: string } | null;
+    const canonicalManifest = JSON.stringify(manifest);
+    if (pinned && pinned.value !== canonicalManifest) {
+      throw new Error('Payroll backfill approval changed or removed; explicit reconciliation required');
+    }
+    d.transaction(() => {
+      meta('since', since);
+      if (!pinned && manifest.length) meta('backfillManifest', canonicalManifest);
+    })();
     let issues = 0;
-    for (const run of snapshot.items) {
+    for (const run of selected) {
       const rowId = `payroll-${run.id}`;
       try {
         const existing = d.query('SELECT * FROM _payroll_runs WHERE run_id=?').get(run.id) as Link | null;
@@ -188,7 +241,7 @@ export async function reconcilePayrollSnapshot(value: unknown, since: string, de
         console.error('[payroll-sync]', run.id, message);
       }
     }
-    const present = new Set(snapshot.items.map(run => run.id));
+    const present = new Set(selected.map(run => run.id));
     for (const link of links()) {
       if (present.has(link.run_id)) continue;
       issues++;
@@ -196,7 +249,7 @@ export async function reconcilePayrollSnapshot(value: unknown, since: string, de
     }
     meta('lastSuccess', new Date().toISOString());
     meta('error', issues ? `${issues} payroll run(s) need review` : '');
-    return { runs: snapshot.items.length, issues };
+    return { runs: selected.length, issues };
   });
 }
 
@@ -204,11 +257,23 @@ function config() {
   const url = process.env.PAYROLL_FEED_URL, token = process.env.PAYROLL_FEED_TOKEN, since = process.env.PAYROLL_SYNC_SINCE;
   if (!url || !token || !since) return null;
   if (!isoInstant(since)) throw new Error('Invalid PAYROLL_SYNC_SINCE');
-  return { url: url.replace(/\/+$/, ''), token, since };
+  let manifest: unknown;
+  try { manifest = process.env.PAYROLL_BACKFILL_MANIFEST ? JSON.parse(process.env.PAYROLL_BACKFILL_MANIFEST) : undefined; }
+  catch { throw new Error('Invalid PAYROLL_BACKFILL_MANIFEST'); }
+  const backfillManifest = validatePayrollBackfillManifest(manifest, since);
+  return { url: url.replace(/\/+$/, ''), token, since, backfillManifest,
+    retrievalSince: payrollRetrievalSince(since, backfillManifest) };
 }
 let started = false;
 export function startPayrollSync() {
-  if (started || !config()) return;
+  if (started) return;
+  try {
+    if (!config()) return;
+  } catch {
+    console.error('[payroll-sync] configuration invalid');
+    try { meta('error', 'Payroll sync configuration is invalid'); } catch { /* keep the ledger available */ }
+    return;
+  }
   started = true;
   let running = false;
   const tick = async () => {
@@ -216,11 +281,11 @@ export function startPayrollSync() {
     running = true;
     try {
       const c = config()!;
-      const response = await fetch(`${c.url}/payroll?since=${encodeURIComponent(c.since)}`, {
+      const response = await fetch(`${c.url}/payroll?since=${encodeURIComponent(c.retrievalSince)}`, {
         headers: { authorization: `Bearer ${c.token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000),
       });
       if (!response.ok) throw new Error(`Payroll feed HTTP ${response.status}`);
-      await reconcilePayrollSnapshot(await response.json(), c.since);
+      await reconcilePayrollSnapshot(await response.json(), c.since, defaultDeps, { backfillManifest: c.backfillManifest });
     } catch (error) {
       console.error('[payroll-sync] snapshot failed', error instanceof Error ? error.message : error);
       try { meta('error', 'Payroll feed unavailable or reconciliation failed'); } catch { /* retry next tick */ }

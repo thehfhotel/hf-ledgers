@@ -1,6 +1,11 @@
 import { beforeEach, afterEach, describe, test, expect } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as ap from './apStore.ts';
-import { reconcilePayrollSnapshot, payrollRowView, payrollExpenseView, payrollSyncStatus, validatePayrollSnapshot, type SourcePayrollRun } from './payroll-sync.ts';
+import { reconcilePayrollSnapshot, payrollRowView, payrollExpenseView, payrollSyncStatus, validatePayrollSnapshot,
+  validatePayrollBackfillManifest, payrollRetrievalSince, type SourcePayrollRun } from './payroll-sync.ts';
+import { startPayrollSync } from './payroll-sync.ts';
 import { reconcileSnapshot, type SourceReceipt } from './reimbursement-sync.ts';
 import { type CreateApPaymentTransactionInput } from './engine.ts';
 import { fetchHandler } from './server.ts';
@@ -19,11 +24,204 @@ const deps = {
   enqueue: (month: string) => { months.push(month); },
 };
 let originalEnv: Record<string, string | undefined>;
-const envKeys = ['AP_DB_PATH', 'NODE_ENV', 'DEV_USER', 'PAYROLL_FEED_URL', 'PAYROLL_FEED_TOKEN', 'PAYROLL_SYNC_SINCE'];
+const envKeys = ['AP_DB_PATH', 'NODE_ENV', 'DEV_USER', 'PAYROLL_FEED_URL', 'PAYROLL_FEED_TOKEN', 'PAYROLL_SYNC_SINCE', 'PAYROLL_BACKFILL_MANIFEST'];
 beforeEach(() => {
   originalEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   ap._resetForTests(); process.env.AP_DB_PATH = ':memory:';
   posts = []; recovered = null; months = [];
+});
+
+// Deliberately synthetic aggregates; production approvals live only in secret
+// configuration, never in this public repository or its fixtures.
+const APPROVED_HISTORY: SourcePayrollRun[] = [
+  { id: 'sample-historical-a', period: '2025-07', submittedAt: '2025-07-30T18:00:00.000Z',
+    effectiveDate: '2025-08-01', amountSatang: 120000, employeeCount: 2, status: 'PAID', paidDate: '2025-08-01' },
+  { id: 'sample-historical-b', period: '2025-08', submittedAt: '2025-08-30T18:00:00.000Z',
+    effectiveDate: '2025-09-01', amountSatang: 230000, employeeCount: 3, status: 'PAID', paidDate: '2025-09-01' },
+];
+const historicalSnapshot = (items: SourcePayrollRun[], manifest = APPROVED_HISTORY) => ({
+  ...snapshot(items), since: payrollRetrievalSince(SINCE, manifest),
+});
+const approval = { backfillManifest: APPROVED_HISTORY };
+function durableState() {
+  const d = ap.getApDbForPayroll();
+  return {
+    rows: ap.listApRows({ mode: 'all' }),
+    links: d.query('SELECT * FROM _payroll_runs ORDER BY run_id').all(),
+    meta: d.query('SELECT * FROM _payroll_meta ORDER BY key').all(),
+  };
+}
+
+describe('approved historical payroll backfill', () => {
+  test('only approved paid batches settle once across replay and database reopen; manual salary remains separate', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'payroll-approved-backfill-'));
+    ap._resetForTests(); process.env.AP_DB_PATH = join(directory, 'ap.db');
+    try {
+      const manualId = ap.createApRow({ creditor: 'เจ้าหนี้ตัวอย่าง', item: 'ค่าบริการตัวอย่าง', amountSatang: 95000,
+        vatSatang: null, whtSatang: null, discountSatang: 0, dueDate: null, entity: 'HF Ville', categoryCode: 'salary', note: '' },
+      'sample@example.com', { id: 'sample-manual-salary', filedDate: '2025-07-12' });
+      const manualBefore = ap.getApRow(manualId);
+      const excluded: SourcePayrollRun[] = ['FAILED', 'REJECTED', 'SCHEDULED', 'PAID'].map((status, index) => ({
+        ...APPROVED_HISTORY[0]!, id: `sample-unselected-retry-${index}`, status: status as SourcePayrollRun['status'],
+        paidDate: status === 'PAID' ? '2025-08-01' : null,
+      }));
+      const source = historicalSnapshot([...APPROVED_HISTORY, ...excluded]);
+      expect(await reconcilePayrollSnapshot(source, SINCE, deps, approval)).toEqual({ runs: 2, issues: 0 });
+      await reconcilePayrollSnapshot(source, SINCE, deps, approval);
+      ap._resetForTests(); // the journal and approval must survive a worker restart
+      await reconcilePayrollSnapshot(source, SINCE, deps, { backfillManifest: [...APPROVED_HISTORY].reverse()
+        .map(item => Object.fromEntries(Object.entries(item).reverse())) });
+      expect(posts).toHaveLength(2); expect(ap.listApRows({ mode: 'all' })).toHaveLength(3);
+      expect(ap.getApRow(manualId)).toEqual(manualBefore);
+      for (const approved of APPROVED_HISTORY) {
+        const row = ap.getApRow(`payroll-${approved.id}`)!;
+        expect(row.payments).toHaveLength(1); expect(row.settledAt).toBe(approved.paidDate);
+        expect(row.outstandingSatang).toBe(0); expect(row.grossSatang).toBe(approved.amountSatang);
+      }
+      for (const skipped of excluded) expect(ap.getApRow(`payroll-${skipped.id}`)).toBeNull();
+      expect((ap.getApDbForPayroll().query("SELECT value FROM _payroll_meta WHERE key='since'").get() as { value: string }).value).toBe(SINCE);
+    } finally {
+      ap._resetForTests(); rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('missing or changed approved source data prevents every historical and automatic write, including first pin', async () => {
+    await reconcilePayrollSnapshot(snapshot([run()]), SINCE, deps);
+    const before = durableState();
+    const changedAuto = run('batch-sample', { amountSatang: 7000000 });
+    const changedSources = [
+      [APPROVED_HISTORY[0]!],
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, amountSatang: item.amountSatang + 1 } : item),
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, employeeCount: 5 } : item),
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, period: '2025-06' } : item),
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, submittedAt: '2025-07-30T19:00:00.000Z' } : item),
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, effectiveDate: '2025-08-02' } : item),
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, paidDate: '2025-08-02' } : item),
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, status: 'FAILED' as const, paidDate: null } : item),
+    ];
+    for (const items of changedSources) {
+      await expect(reconcilePayrollSnapshot(historicalSnapshot([changedAuto, ...items]), SINCE, deps, approval)).rejects.toThrow('missing or changed');
+      expect(durableState()).toEqual(before); expect(posts).toHaveLength(0);
+    }
+    // Full source validation includes even excluded historical records.
+    const invalidUnselected = { ...APPROVED_HISTORY[0]!, id: 'sample-malformed-unselected', amountSatang: 0.001 };
+    await expect(reconcilePayrollSnapshot(historicalSnapshot([...APPROVED_HISTORY, invalidUnselected, changedAuto]), SINCE, deps, approval)).rejects.toThrow();
+    expect(durableState()).toEqual(before);
+  });
+
+  test('pinned approval cannot be removed, reduced or changed even when replacement source data matches', async () => {
+    await reconcilePayrollSnapshot(historicalSnapshot(APPROVED_HISTORY), SINCE, deps, approval);
+    const before = durableState();
+    const future = run('sample-future');
+    for (const manifest of [undefined, [], [APPROVED_HISTORY[1]!],
+      APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, amountSatang: item.amountSatang + 1 } : item)]) {
+      await expect(reconcilePayrollSnapshot(historicalSnapshot([...(manifest ?? []), future], manifest ?? []), SINCE, deps,
+        { backfillManifest: manifest })).rejects.toThrow('approval changed or removed');
+      expect(durableState()).toEqual(before); expect(posts).toHaveLength(2);
+    }
+    const laterCutoff = '2025-09-16T00:00:00.000Z';
+    await expect(reconcilePayrollSnapshot(historicalSnapshot([...APPROVED_HISTORY, future]), laterCutoff, deps, approval)).rejects.toThrow('start changed');
+    expect(durableState()).toEqual(before);
+  });
+
+  test('omitting an approved batch after successful backfill fails before updating an automatic row', async () => {
+    await reconcilePayrollSnapshot(historicalSnapshot([...APPROVED_HISTORY, run()]), SINCE, deps, approval);
+    const before = durableState();
+    await expect(reconcilePayrollSnapshot(historicalSnapshot([APPROVED_HISTORY[0]!, run('batch-sample', { amountSatang: 8000000 })]),
+      SINCE, deps, approval)).rejects.toThrow('missing or changed');
+    expect(durableState()).toEqual(before); expect(posts).toHaveLength(2);
+  });
+
+  test('future automatic rows continue their normal lifecycle while historical approvals stay pinned', async () => {
+    const pending = historicalSnapshot([...APPROVED_HISTORY, run('sample-future')]);
+    await reconcilePayrollSnapshot(pending, SINCE, deps, approval);
+    expect(ap.getApRow('payroll-sample-future')!.outstandingSatang).toBe(6000000);
+    expect(posts).toHaveLength(2);
+    const paid = historicalSnapshot([...APPROVED_HISTORY, run('sample-future', { status: 'PAID', paidDate: '2025-10-02' })]);
+    await reconcilePayrollSnapshot(paid, SINCE, deps, approval); await reconcilePayrollSnapshot(paid, SINCE, deps, approval);
+    expect(posts).toHaveLength(3); expect(ap.getApRow('payroll-sample-future')!.payments).toHaveLength(1);
+    expect(ap.getApRow('payroll-sample-future')!.filedDate).toBe('2025-10-01');
+    expect((await reconcilePayrollSnapshot(historicalSnapshot(APPROVED_HISTORY), SINCE, deps, approval)).issues).toBe(1);
+    expect(ap.getApRow('payroll-sample-future')!.payments).toHaveLength(1);
+  });
+
+  test('historical payment response loss uses the same durable recovery without another POST', async () => {
+    const source = historicalSnapshot(APPROVED_HISTORY);
+    const calls: string[] = [];
+    const uncertain = { ...deps, post: async (payment: CreateApPaymentTransactionInput) => {
+      calls.push(payment.apRowId);
+      if (payment.apRowId === `payroll-${APPROVED_HISTORY[0]!.id}`) throw new Error('sample lost response');
+      return 'sample-other-confirmed-payment';
+    } };
+    expect((await reconcilePayrollSnapshot(source, SINCE, uncertain, approval)).issues).toBe(1);
+    expect((await reconcilePayrollSnapshot(source, SINCE, uncertain, approval)).issues).toBe(1);
+    expect(calls).toHaveLength(2);
+    recovered = 'sample-recovered-historical-payment';
+    expect((await reconcilePayrollSnapshot(source, SINCE, uncertain, approval)).issues).toBe(0);
+    expect(calls).toHaveLength(2);
+    expect(ap.getApRow(`payroll-${APPROVED_HISTORY[0]!.id}`)!.payments[0]!.transactionId).toBe(recovered);
+  });
+
+  test('competing first approval configurations serialize and only the pinned one can write', async () => {
+    const changed = APPROVED_HISTORY.map((item, index) => index === 0 ? { ...item, amountSatang: item.amountSatang + 1 } : item);
+    const outcomes = await Promise.allSettled([
+      reconcilePayrollSnapshot(historicalSnapshot(APPROVED_HISTORY), SINCE, deps, approval),
+      reconcilePayrollSnapshot(historicalSnapshot([...changed, run('sample-new')], changed), SINCE, deps, { backfillManifest: changed }),
+    ]);
+    expect(outcomes[0]!.status).toBe('fulfilled'); expect(outcomes[1]!.status).toBe('rejected');
+    expect(posts).toHaveLength(2); expect(ap.getApRow('payroll-sample-new')).toBeNull();
+    expect(ap.getApRow(`payroll-${APPROVED_HISTORY[0]!.id}`)!.grossSatang).toBe(APPROVED_HISTORY[0]!.amountSatang);
+  });
+
+  test('manifest schema is aggregate-only, paid-only, historical-only and duplicate-free', () => {
+    for (const manifest of [null, {}, [APPROVED_HISTORY[0], APPROVED_HISTORY[0]],
+      [{ ...APPROVED_HISTORY[0], status: 'PENDING', paidDate: null }],
+      [{ ...APPROVED_HISTORY[0], extraApprovalField: true }],
+      [{ ...APPROVED_HISTORY[0], amountSatang: 0.1 }],
+      [run('sample-future', { status: 'PAID', paidDate: '2025-10-02' })]]) {
+      expect(() => validatePayrollBackfillManifest(manifest, SINCE)).toThrow();
+    }
+    expect(validatePayrollBackfillManifest(undefined, SINCE)).toEqual([]);
+    expect(payrollRetrievalSince(SINCE, APPROVED_HISTORY)).toBe(APPROVED_HISTORY[0]!.submittedAt);
+  });
+
+  test('status reports only approved historical count, never the manifest or its financial fields', async () => {
+    process.env.PAYROLL_FEED_URL = 'http://example.invalid/payroll-feed';
+    process.env.PAYROLL_FEED_TOKEN = 'example-test-only-token'; process.env.PAYROLL_SYNC_SINCE = SINCE;
+    process.env.PAYROLL_BACKFILL_MANIFEST = JSON.stringify(APPROVED_HISTORY);
+    await reconcilePayrollSnapshot(historicalSnapshot(APPROVED_HISTORY), SINCE, deps, approval);
+    const status = payrollSyncStatus();
+    expect(status).toMatchObject({ enabled: true, since: SINCE, backfillRunCount: 2, runs: 2, issues: 0 });
+    for (const forbidden of ['sample-historical', 'amountSatang', 'employeeCount', 'example-test-only-token', 'backfillManifest']) {
+      expect(JSON.stringify(status)).not.toContain(forbidden);
+    }
+  });
+
+  test('invalid backfill configuration cannot crash startup or AP status and never fetches or posts', async () => {
+    process.env.PAYROLL_FEED_URL = 'http://example.invalid/payroll-feed';
+    process.env.PAYROLL_FEED_TOKEN = 'example-test-only-token'; process.env.PAYROLL_SYNC_SINCE = SINCE;
+    process.env.NODE_ENV = 'development'; process.env.DEV_USER = 'sample@example.com';
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = (() => { requests++; throw new Error('Unexpected request for invalid configuration'); }) as unknown as typeof fetch;
+    try {
+      for (const invalid of ['PRIVATE-SAMPLE-INVALID-JSON', JSON.stringify([{ ...APPROVED_HISTORY[0], privateField: 'PRIVATE-SAMPLE' }])]) {
+        process.env.PAYROLL_BACKFILL_MANIFEST = invalid;
+        expect(() => startPayrollSync()).not.toThrow();
+        expect(payrollSyncStatus()).toEqual({ enabled: true, lastSuccess: null, error: 'Payroll sync configuration is invalid' });
+        const response = await fetchHandler(new Request('http://localhost/api/ap/rows?f=all'));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.payrollSync.error).toBe('Payroll sync configuration is invalid');
+        expect(JSON.stringify(body)).not.toContain('PRIVATE-SAMPLE');
+        expect((await fetchHandler(new Request('http://localhost/healthz'))).status).toBe(200);
+      }
+      delete process.env.PAYROLL_BACKFILL_MANIFEST; process.env.PAYROLL_SYNC_SINCE = 'PRIVATE-SAMPLE-INVALID-DATE';
+      expect(() => startPayrollSync()).not.toThrow();
+      expect(payrollSyncStatus().error).toBe('Payroll sync configuration is invalid');
+      expect(requests).toBe(0); expect(posts).toHaveLength(0);
+    } finally { globalThis.fetch = originalFetch; }
+  });
 });
 afterEach(() => {
   ap._resetForTests();

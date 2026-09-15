@@ -50,6 +50,33 @@ clear only that receipt's `attempted` flag in `_reimbursement_receipts`, then
 resume. Preserve the AP/engine backup pair and the original source payload;
 never delete a real payment to make the sync appear healthy.
 
+## Payroll batches
+
+Each new payroll submission creates one read-only **จากระบบเงินเดือน** AP row
+under `salary`, containing the net transfer total and recipient count. Employee
+names, accounts and individual pay are not copied. The source has no property
+split, so the entity is **รวมทุกโรงแรม** (analytics: unknown property).
+The filing date is the Bangkok submission date; the payroll month and scheduled
+transfer date remain visible. This total is net pay, not gross salaries or the
+employer's social-security contribution.
+
+An uploaded or scheduled batch stays unpaid. Only payroll's verified matching
+bank result can supply `PAID` and the actual payment date. The ledger then records
+one AP-tagged bank expense; analytics continues counting the payable only once.
+Rejected unpaid runs are removed. Failed or missing runs remain visible for
+review. Edited settled source data and uncertain engine POSTs are never silently
+reposted. Recovery follows the receipt procedure above, using `_payroll_runs`.
+
+The existing CI/CD maps `EXPENSE_PAYROLL_FEED_URL` (ending `/api/ledger-feed`),
+`EXPENSE_PAYROLL_FEED_TOKEN`, and fixed repository variable
+`EXPENSE_PAYROLL_SYNC_SINCE` to `PAYROLL_FEED_URL`, `PAYROLL_FEED_TOKEN`, and
+`PAYROLL_SYNC_SINCE`. The matching source secret is `PAYROLL_LEDGER_FEED_TOKEN`
+in hf-finance. No token means the integration is disabled. Polling is every
+30 seconds at `/api/ledger-feed/payroll?since=...`; authenticated ledger route
+`GET /api/payroll/status` reports activation, successful polls and issues.
+The cutoff excludes historical payroll submissions. Never change it without
+explicit reconciliation of any existing manual salary entries.
+
 ## Identity table
 
 | Item | Value |

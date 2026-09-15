@@ -16,6 +16,7 @@ import {
 import { ApPaymentForm } from "../components/ApPaymentForm.tsx";
 import { ApRowDrawer } from "../components/ApRowDrawer.tsx";
 import { ReimbursementRowDrawer } from "../components/ReimbursementRowDrawer.tsx";
+import { PayrollRowDrawer } from "../components/PayrollRowDrawer.tsx";
 import { RowOrigin } from "../components/RowOrigin.tsx";
 import {
   AP,
@@ -129,6 +130,12 @@ export function ApPage({ filter }: Props) {
     drawerMode?.kind === "edit" ? (data?.rows.find((r) => r.id === drawerMode.rowId) ?? null) : null;
   const payingRow: ApRow | null = payingRowId ? (data?.rows.find((r) => r.id === payingRowId) ?? null) : null;
 
+  // A synced payment can leave the open filter while its details are shown.
+  // Close that view instead of accidentally opening an empty manual bill.
+  useEffect(() => {
+    if (data && drawerMode?.kind === 'edit' && !editingRow) setDrawerMode(null);
+  }, [data, drawerMode, editingRow]);
+
   // "no rows at all" (spec §7) needs a signal independent of the active
   // filter — `creditors` is server-supplied from EVERY row regardless of
   // f=/m= (src/server/apStore.ts's listCreditorHints), so an empty list
@@ -162,9 +169,12 @@ export function ApPage({ filter }: Props) {
     <div className="flex flex-col gap-4">
       <div className="rounded-lg bg-tint px-4 py-3 text-sm text-ink">
         <p><strong>จากระบบเบิกจ่าย</strong> — รายการเข้าเอง และเปลี่ยนเป็นจ่ายแล้วเมื่อจ่ายคืนพนักงาน ไม่ต้องบันทึกซ้ำ</p>
+        <p className="mt-1"><strong>จากระบบเงินเดือน</strong> — ยอดรวมแต่ละรอบ รอผลโอนจากธนาคารก่อนเปลี่ยนเป็นจ่ายแล้ว</p>
         <p className="mt-1"><strong>กรอกเอง</strong> — บิลที่คุณเพิ่มในหน้านี้ แก้ไขและบันทึกการจ่ายได้ตามปกติ</p>
         {data?.reimbursementSync?.enabled && (data.reimbursementSync.error || !data.reimbursementSync.lastSuccess) &&
           <p className="mt-2 font-medium text-bad">ข้อมูลเบิกจ่ายกำลังรออัปเดตหรือมีรายการต้องตรวจสอบ กรุณาดูสถานะที่ระบบเบิกจ่ายก่อน</p>}
+        {data?.payrollSync?.enabled && (data.payrollSync.error || !data.payrollSync.lastSuccess) &&
+          <p className="mt-2 font-medium text-bad">ข้อมูลเงินเดือนกำลังรออัปเดตหรือมีรายการต้องตรวจสอบ กรุณาดูผลล่าสุดที่ระบบเงินเดือน</p>}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-panel px-3 py-2">
         <div className="flex flex-wrap items-center gap-2">
@@ -330,7 +340,7 @@ export function ApPage({ filter }: Props) {
                     <span className="min-w-0 break-words text-ink">{row.creditor}</span>
                     <span className="min-w-0 text-ink">
                       <span className="block break-words">{row.item}</span>
-                      <RowOrigin synced={!!row.reimbursement} issue={row.reimbursement?.error} />
+                      <RowOrigin synced={!!row.reimbursement} payroll={!!row.payroll} issue={row.reimbursement?.error || row.payroll?.error} />
                       <span className="mt-0.5 flex flex-wrap items-center gap-1">
                         <span className="inline-block truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
                           {categoryChipLabel(row)}
@@ -369,7 +379,7 @@ export function ApPage({ filter }: Props) {
                       )}
                     </span>
                     <span>
-                      {!isSettled && !row.reimbursement && (
+                      {!isSettled && !row.reimbursement && !row.payroll && (
                         <button
                           type="button"
                           onClick={(e) => {
@@ -422,7 +432,7 @@ export function ApPage({ filter }: Props) {
                     </span>
                   </div>
                   <span className="break-words text-xs text-ink-muted">{row.item}</span>
-                  <div><RowOrigin synced={!!row.reimbursement} issue={row.reimbursement?.error} /></div>
+                  <div><RowOrigin synced={!!row.reimbursement} payroll={!!row.payroll} issue={row.reimbursement?.error || row.payroll?.error} /></div>
                   <div className="flex flex-wrap items-center gap-1">
                     <span className="inline-block w-fit truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
                       {categoryChipLabel(row)}
@@ -450,7 +460,7 @@ export function ApPage({ filter }: Props) {
                       </span>
                     )}
                   </div>
-                  {!isSettled && !row.reimbursement && (
+                  {!isSettled && !row.reimbursement && !row.payroll && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -470,7 +480,8 @@ export function ApPage({ filter }: Props) {
       )}
 
       {drawerMode && editingRow?.reimbursement && <ReimbursementRowDrawer row={editingRow} onClose={closeDrawer} />}
-      {drawerMode && !editingRow?.reimbursement && (
+      {drawerMode && editingRow?.payroll && <PayrollRowDrawer row={editingRow} onClose={closeDrawer} />}
+      {drawerMode && (drawerMode.kind === 'add' || editingRow) && !editingRow?.reimbursement && !editingRow?.payroll && (
         <ApRowDrawer
           row={editingRow}
           creditors={data?.creditors ?? []}

@@ -235,6 +235,12 @@ export function getApDbForReimbursement(): Database {
   return getDb();
 }
 
+/** Payroll sync keeps its source identity/payment journal in this same
+ * backed-up operational store. Financial rows use the existing AP CRUD. */
+export function getApDbForPayroll(): Database {
+  return getDb();
+}
+
 /** Test-only seam: closes the cached handle so the NEXT call re-opens from
  * (a possibly newly-set) AP_DB_PATH, rather than reusing a stale handle from
  * a previous test file's temp path. */

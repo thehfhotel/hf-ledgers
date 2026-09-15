@@ -9,6 +9,7 @@ import { currentMonthBangkok, isoToThaiLong, todayBangkok } from "@shared/date.t
 import { formatSatang, parseAmountToSatang } from "@shared/money.ts";
 import { AMOUNT_IN_TEXT_WARNING_TH, looksLikeAmountInText } from "@shared/textAmount.ts";
 import type { ExpenseInput, ExpenseTransaction, PaymentMethod } from "../../shared/types.ts";
+import { expenseOrigin } from "../../shared/expenseOrigin.ts";
 import {
   AMOUNT_ARIA_LABEL,
   AMOUNT_PLACEHOLDER,
@@ -258,7 +259,7 @@ export function EntryPage({ initialCategoryCode }: Props) {
   const itemPlaceholder =
     categoryCode && isBillingMonthCategory(categoryCode) ? ITEM_PLACEHOLDER_BILLING_MONTH : ITEM_PLACEHOLDER_DEFAULT;
 
-  const lastSimilar = monthEntries.find(r => r.categoryCode === categoryCode && !r.reimbursementRowId);
+  const lastSimilar = monthEntries.find(r => r.categoryCode === categoryCode && expenseOrigin(r) === 'manual');
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
@@ -275,7 +276,7 @@ export function EntryPage({ initialCategoryCode }: Props) {
             <span className="mt-1 block text-sm text-ink-muted">เก็บบิลไว้ในรายการค้างจ่าย</span>
           </button>
         </div>
-        <p className="mt-3 text-sm text-ink-muted">ใบเสร็จจากระบบเบิกจ่ายเข้ามาเอง ไม่ต้องกรอกซ้ำ</p>
+        <p className="mt-3 text-sm text-ink-muted">ใบเสร็จจากระบบเบิกจ่ายและรายการเงินเดือนเข้ามาเอง ไม่ต้องกรอกซ้ำ</p>
       </header>
 
       <section className="overflow-hidden rounded-2xl border border-line bg-panel shadow-sm">
@@ -294,7 +295,7 @@ export function EntryPage({ initialCategoryCode }: Props) {
             <label className="mb-2 block text-base font-semibold text-ink">เป็นค่าอะไร</label>
             <CategoryPicker value={categoryCode} onChange={code => {
               setCategoryCode(code);
-              const previous = monthEntries.find(r => r.categoryCode === code && !r.reimbursementRowId);
+              const previous = monthEntries.find(r => r.categoryCode === code && expenseOrigin(r) === 'manual');
               if (previous) setPaymentMethod(previous.paymentMethod);
             }} recentCodes={recentCodes} />
             {errors.category && <p className="mt-2 text-sm text-bad">{errors.category}</p>}
@@ -371,10 +372,10 @@ export function EntryPage({ initialCategoryCode }: Props) {
               >
                 <button
                   type="button"
-                  onClick={() => item.reimbursementRowId ? navigate('/ap?f=all') : setEditingItem(item)}
+                  onClick={() => expenseOrigin(item) !== 'manual' ? navigate('/ap?f=all') : setEditingItem(item)}
                   className="min-w-0 flex-1 truncate text-left text-ink hover:underline focus:outline-none"
                 >
-                  <span className="mr-2"><RowOrigin synced={!!item.reimbursementRowId} /></span>
+                  <span className="mr-2"><RowOrigin synced={expenseOrigin(item) === 'reimbursement'} payroll={expenseOrigin(item) === 'payroll'} /></span>
                   {categoryByCode(item.categoryCode).label}
                   <span className="text-ink-muted"> · {item.comment || "-"} · {PAYMENT_METHOD_LABELS[item.paymentMethod]}</span>
                 </button>

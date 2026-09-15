@@ -18,6 +18,7 @@ import {
 import { enqueueAnalyticsPush, startAnalyticsPush } from "./analytics-push.ts";
 import { withApWriteLock } from "./ap-write-lock.ts";
 import { isReimbursementRow, reimbursementExpenseView, reimbursementPhoto, reimbursementRowView, reimbursementSyncStatus, startReimbursementSync } from "./reimbursement-sync.ts";
+import { isPayrollRow, payrollExpenseView, payrollRowView, payrollSyncStatus, startPayrollSync } from "./payroll-sync.ts";
 import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution.ts";
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
 import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "@shared/date.ts";
@@ -508,10 +509,12 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     catch { return json(502, { error: 'receipt_photo_unavailable' }); }
   }
   if (method === 'GET' && path === '/reimbursement/status') return withApStore(() => json(200, reimbursementSyncStatus()));
+  if (method === 'GET' && path === '/payroll/status') return withApStore(() => json(200, payrollSyncStatus()));
   const managedWrite = path.match(/^\/ap\/rows\/([^/]+)(?:\/|$)/);
   if (!['GET', 'HEAD'].includes(method) && managedWrite) {
     try {
       if (isReimbursementRow(managedWrite[1]!)) return json(409, { error: 'reimbursement_managed' });
+      if (isPayrollRow(managedWrite[1]!)) return json(409, { error: 'payroll_managed' });
     } catch { return json(500, { error: 'ap_store_error' }); }
   }
 
@@ -528,7 +531,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     const month = url.searchParams.get("month");
     if (!month || !isValidMonth(month)) return json(400, { error: "invalid month" });
     return withEngine(async () => {
-      const items = (await getMonthExpenseTransactions(month)).map(reimbursementExpenseView);
+      const items = (await getMonthExpenseTransactions(month)).map(reimbursementExpenseView).map(payrollExpenseView);
       return json(200, buildMonthResponse(items));
     });
   }
@@ -644,10 +647,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
 
     return withApStore(() => {
       const filter: ApListFilter = m !== null ? { mode: "month", month: m } : { mode: f === "all" ? "all" : "open" };
-      const rows = apStore.listApRows(filter).map(reimbursementRowView);
+      const rows = apStore.listApRows(filter).map(reimbursementRowView).map(payrollRowView);
       const summary = apStore.computeApSummary(todayBangkok());
       const creditors = apStore.listCreditorHints();
-      return json(200, { rows, summary, creditors, reimbursementSync: reimbursementSyncStatus() });
+      return json(200, { rows, summary, creditors, reimbursementSync: reimbursementSyncStatus(), payrollSync: payrollSyncStatus() });
     });
   }
 
@@ -1085,6 +1088,7 @@ if (import.meta.main) {
     // touches the AP register sqlite file.
     startAnalyticsPush();
     startReimbursementSync();
+    startPayrollSync();
   } else {
     // Dev: HTML import lets Bun bundle the React client on the fly with HMR
     // (bunfig.toml registers the Tailwind plugin for this dev-serve path;
@@ -1116,5 +1120,6 @@ if (import.meta.main) {
     // module import.
     startAnalyticsPush();
     startReimbursementSync();
+    startPayrollSync();
   }
 }

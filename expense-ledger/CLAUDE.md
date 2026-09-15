@@ -123,6 +123,11 @@ Its image builds from the MONOREPO ROOT context with
   AP database for `_reimbursement_receipts` (source identity and payment
   attempt journal) and `_reimbursement_meta` (fixed activation time, status).
   `getApDbForReimbursement()` exposes it only to `reimbursement-sync.ts`.
+  Payroll uses `_payroll_runs` and `_payroll_meta` in the same AP database,
+  exposed through `getApDbForPayroll()`. It keeps one net payroll batch per
+  source request and settles only after verified bank success. All imported
+  payroll and reimbursement rows share the AP write lock and cannot be edited
+  or paid manually through the ledger. Both workers must stay single-process.
   Synced financial rows use the existing AP CRUD; settlement posts through
   `engine.ts`. The worker starts after the listener and is disabled unless
   all three `REIMBURSEMENT_*` settings are present. Never run multiple workers

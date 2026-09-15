@@ -13,6 +13,7 @@ import { formatSatang } from "@shared/money.ts";
 import type { ExpenseTransaction, MonthExpensesResponse } from "../../shared/types.ts";
 import { EditDrawer } from "../components/EditDrawer.tsx";
 import { RowOrigin } from "../components/RowOrigin.tsx";
+import { expenseOrigin } from "../../shared/expenseOrigin.ts";
 import { PhotoLightbox } from "../components/PhotoLightbox.tsx";
 import {
   CHECKLIST,
@@ -261,11 +262,11 @@ export function MonthPage({ month }: Props) {
                     key={item.id}
                     role="button"
                     tabIndex={0}
-                    onClick={() => item.reimbursementRowId ? navigate('/ap?f=all') : setEditingItem(item)}
+                    onClick={() => expenseOrigin(item) !== 'manual' ? navigate('/ap?f=all') : setEditingItem(item)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
-                        if (item.reimbursementRowId) navigate('/ap?f=all'); else setEditingItem(item);
+                        if (expenseOrigin(item) !== 'manual') navigate('/ap?f=all'); else setEditingItem(item);
                       }
                     }}
                     className={
@@ -277,7 +278,7 @@ export function MonthPage({ month }: Props) {
                     <span className="min-w-0 truncate text-ink">{categoryByCode(item.categoryCode).label}</span>
                     <span className="min-w-0 break-words text-ink" title={item.comment}>
                       {item.comment || EMPTY_VALUE}
-                      <span className="mt-1 block"><RowOrigin synced={!!item.reimbursementRowId} /></span>
+                      <span className="mt-1 block"><RowOrigin synced={expenseOrigin(item) === 'reimbursement'} payroll={expenseOrigin(item) === 'payroll'} /></span>
                     </span>
                     <span className="text-ink-muted">{PAYMENT_METHOD_LABELS[item.paymentMethod]}</span>
                     <span className="text-right tabular-nums text-ink">{formatSatang(item.amountSatang)}</span>
@@ -298,7 +299,7 @@ export function MonthPage({ month }: Props) {
                       )}
                     </span>
                     <span className="min-w-0 truncate text-xs text-ink-muted">
-                      {item.reimbursementRowId ? "ระบบเบิกจ่าย" : item.by ? item.by.split("@")[0] : EMPTY_VALUE}
+                      {expenseOrigin(item) === 'payroll' ? "ระบบเงินเดือน" : expenseOrigin(item) === 'reimbursement' ? "ระบบเบิกจ่าย" : item.by ? item.by.split("@")[0] : EMPTY_VALUE}
                     </span>
                   </div>
                 ))}

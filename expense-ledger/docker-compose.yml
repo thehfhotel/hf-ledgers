@@ -19,6 +19,10 @@ services:
       # boot never touch it. Backed by the expense_ap volume below, mounted
       # at this same path, NOT the engine's expense_data volume.
       - AP_DB_PATH=${AP_DB_PATH:-/app/data/ap.db}
+      # Analytics push (dormant when either is empty) — the deploy renders both into
+      # the host .env from env_payload; they only reach the process through this map.
+      - ANALYTICS_URL=${ANALYTICS_URL:-}
+      - ANALYTICS_TOKEN=${ANALYTICS_TOKEN:-}
     volumes:
       - expense_ap:/app/data
     depends_on:

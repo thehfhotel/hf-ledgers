@@ -334,6 +334,45 @@ export async function getMonthExpenseTransactions(monthIso: string): Promise<Exp
   return res.result.items.map(mapEngineTransaction);
 }
 
+/**
+ * Same month listing as getMonthExpenseTransactions, PLUS the ids among
+ * that month's transactions that carry an `ap:<rowId>` tag — for the
+ * analytics rollup (src/server/analytics-push.ts, src/shared/rollup.ts),
+ * which needs to exclude AP-managed transactions from `entered` for an
+ * entire month at once. Costs at most ONE extra engine call (the tag list)
+ * for the whole month, rather than isApManagedTransaction()'s per-id cost
+ * (a GET of that one transaction PLUS the tag list, repeated per
+ * transaction) — the tag list fetch is skipped entirely when nothing in
+ * the month carries any tag at all.
+ */
+export async function getMonthExpenseTransactionsWithApManaged(
+  monthIso: string,
+): Promise<{ transactions: ExpenseTransaction[]; apManagedIds: Set<string> }> {
+  const [year, month] = monthIso.split("-").map(Number);
+  await Promise.all([ensureCategoryCache(), ensureAccountCache()]);
+  const res = await engineFetch<{ items: EngineTransactionRaw[]; totalCount: number }>(
+    `/transactions/list/by_month.json?year=${year}&month=${month}&type=${TRANSACTION_TYPE_EXPENSE}&with_pictures=true`,
+  );
+  if (!res.success || !res.result) {
+    throw new Error(res.errorMessage || "failed to list this month's transactions");
+  }
+  const items = res.result.items;
+  const transactions = items.map(mapEngineTransaction);
+
+  const apManagedIds = new Set<string>();
+  if (items.some((raw) => extractTagIds(raw).length > 0)) {
+    const listRes = await engineFetch<EngineTag[]>("/transaction/tags/list.json");
+    if (!listRes.success || !listRes.result) {
+      throw new Error(listRes.errorMessage || "failed to list ezBookkeeping tags");
+    }
+    const apTagIds = new Set(listRes.result.filter((t) => t.name.startsWith("ap:")).map((t) => t.id));
+    for (const raw of items) {
+      if (extractTagIds(raw).some((tagId) => apTagIds.has(tagId))) apManagedIds.add(String(raw.id));
+    }
+  }
+  return { transactions, apManagedIds };
+}
+
 /** Thrown by getEngineTransaction/deleteExpenseTransaction when the engine
  * responds (a well-formed JSON envelope) with success:false for a specific
  * transaction id — as opposed to a network-level failure (fetch() itself

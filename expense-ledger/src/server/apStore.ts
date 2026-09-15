@@ -218,6 +218,18 @@ function getDb(): Database {
   return singleton;
 }
 
+/** Exposes the lazily-opened AP register handle to src/server/analytics-push.ts,
+ * which keeps its own outbox table (`_analytics_pending_pushes`) in this
+ * SAME sqlite file rather than a database of its own — see CLAUDE.md's "AP
+ * register storage exception" paragraph. This is the ONE other module
+ * allowed to touch this handle directly; every other caller goes through
+ * this file's row/payment/photo functions. Still fully lazy: calling this
+ * opens (and migrates) the database on first call, exactly like every
+ * other exported function here. */
+export function getApDbForAnalytics(): Database {
+  return getDb();
+}
+
 /** Test-only seam: closes the cached handle so the NEXT call re-opens from
  * (a possibly newly-set) AP_DB_PATH, rather than reusing a stale handle from
  * a previous test file's temp path. */
@@ -331,6 +343,7 @@ function mapRow(db: Database, raw: RawRow): ApRow {
     note: raw.note,
     createdAt: raw.created_at,
     createdBy: raw.created_by,
+    filedDate: raw.filed_date,
     // H3 fix: pass filed_date so a row settled with ZERO payments (a
     // discount/WHT alone brought outstanding to <= 0) gets a real settledAt
     // instead of null — see deriveSettledAt's doc comment.

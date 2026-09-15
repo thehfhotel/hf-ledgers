@@ -109,7 +109,15 @@ Its image builds from the MONOREPO ROOT context with
   posts as a real ledger transaction via `engine.ts`. The store is
   lazy-opened on the first `/api/ap/*` request (a missing volume directory is
   created on demand); `GET /healthz` and server boot never touch it — see
-  the rule above. Do not add a second database-of-its-own for anything else
+  the rule above. This same database also holds the analytics-push outbox
+  table (`_analytics_pending_pushes`, `src/server/analytics-push.ts`) —
+  operational state, not AP register data, but kept in this one file rather
+  than a database of its own — which means that when `ANALYTICS_URL` /
+  `ANALYTICS_TOKEN` are set, this database is lazy-opened on the first
+  enqueue from ANY mutating route (not just `/api/ap/*`) or on server boot's
+  own enqueue of the last three months, not only from an AP route; with
+  neither env var set the outbox stays fully inert and this exception is
+  unchanged. Do not add a second database-of-its-own for anything else
   without amending this rule first. Backed up nightly alongside `expense_ap`
   — see README.md's "Backup" section.
 - **UI language is Thai only**, matching the income ledger's convention for

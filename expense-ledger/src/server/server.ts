@@ -15,9 +15,10 @@ import {
   isApManagedTransaction,
   modifyExpenseTransaction,
 } from "./engine.ts";
+import { enqueueAnalyticsPush, startAnalyticsPushWorker } from "./analytics-push.ts";
 import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution.ts";
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
-import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "@shared/date.ts";
+import { currentMonthBangkok, isValidIso, isValidMonth, shiftMonths, todayBangkok } from "@shared/date.ts";
 import {
   apPhotoUrl,
   computeGross,
@@ -42,6 +43,18 @@ import { AMOUNT_SATANG_MAX, AMOUNT_SATANG_MIN, COMMENT_MAX_LEN } from "../shared
 
 const isProd = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT ?? 3000);
+
+// hf-analytics outbox: dormant unless ANALYTICS_URL/ANALYTICS_TOKEN are set
+// (see src/server/analytics-push.ts). Started unconditionally at module
+// init, same as the income ledger's server.ts (hf-ledgers root).
+startAnalyticsPushWorker();
+// Boot enqueue: the current month and the two before it, so a redeploy (or
+// a period with analytics newly enabled) always re-syncs recent data even
+// when no mutation happens to touch it in the meantime. No-ops when
+// analytics push is disabled (enqueueAnalyticsPush's own dormant check).
+enqueueAnalyticsPush(currentMonthBangkok());
+enqueueAnalyticsPush(shiftMonths(currentMonthBangkok(), -1));
+enqueueAnalyticsPush(shiftMonths(currentMonthBangkok(), -2));
 
 const distDir = join(process.cwd(), "dist", "client");
 const indexPath = join(distDir, "index.html");
@@ -107,13 +120,17 @@ async function withEngine(fn: () => Promise<Response>): Promise<Response> {
 
 /** 409s a write when `id`'s transaction falls outside the current Bangkok
  * calendar month — frontend spec §4 "Current month only". The server is
- * the real gate; client-side disabling in the edit drawer is only a hint. */
-async function currentMonthLockResponse(id: string): Promise<Response | null> {
+ * the real gate; client-side disabling in the edit drawer is only a hint.
+ * Also returns the transaction's (pre-edit) date on success, so callers
+ * that go on to mutate/delete it can enqueue that date's month for the
+ * analytics push (src/server/analytics-push.ts) without a second engine
+ * round trip. */
+async function currentMonthLockCheck(id: string): Promise<{ locked: Response } | { locked: null; date: string }> {
   const date = await getExpenseTransactionDate(id);
   if (date.slice(0, 7) !== currentMonthBangkok()) {
-    return json(409, { error: "current month only" });
+    return { locked: json(409, { error: "current month only" }) };
   }
-  return null;
+  return { locked: null, date };
 }
 
 /** Wraps a route body that only touches the AP register's own sqlite store
@@ -251,7 +268,7 @@ type ValidatedInput = { ok: true; value: ExpenseInput } | { ok: false; error: st
  *
  * H4 fix: the current-month check below applies to BOTH create and patch,
  * since this function gates both routes — previously only an EXISTING
- * transaction's date was checked (currentMonthLockResponse, PATCH/DELETE/
+ * transaction's date was checked (currentMonthLockCheck, PATCH/DELETE/
  * photo routes only), so an entry could be created directly in a closed
  * past month, or an edit could move an entry INTO one, with no check at
  * all. The existing-date lock below is unchanged and still applies on top
@@ -531,6 +548,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     if (budgetError) return budgetError;
     return withEngine(async () => {
       const id = await createExpenseTransaction(validated.value, identity.email);
+      enqueueAnalyticsPush(validated.value.date.slice(0, 7));
       return json(201, { id });
     });
   }
@@ -555,9 +573,16 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         // clerk gets the specific "manage it from ค้างจ่าย" message rather
         // than a generic "current month only" one.
         if (await isApManagedTransaction(id)) return json(409, { error: "ap_managed" });
-        const locked = await currentMonthLockResponse(id);
-        if (locked) return locked;
+        const check = await currentMonthLockCheck(id);
+        if (check.locked) return check.locked;
         await modifyExpenseTransaction(id, validated.value, identity.email);
+        // Old AND new month, in case a future relaxation of
+        // validateExpenseInput's current-month-only rule ever lets an edit
+        // move a transaction's date across a month boundary — today the two
+        // are always the same month (both are constrained to
+        // currentMonthBangkok()), so this enqueues once in practice.
+        enqueueAnalyticsPush(check.date.slice(0, 7));
+        enqueueAnalyticsPush(validated.value.date.slice(0, 7));
         return json(200, { id });
       });
     }
@@ -566,9 +591,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       return withEngine(async () => {
         // H2 fix — see the PATCH branch's comment above.
         if (await isApManagedTransaction(id)) return json(409, { error: "ap_managed" });
-        const locked = await currentMonthLockResponse(id);
-        if (locked) return locked;
+        const check = await currentMonthLockCheck(id);
+        if (check.locked) return check.locked;
         await deleteExpenseTransaction(id);
+        enqueueAnalyticsPush(check.date.slice(0, 7));
         return new Response(null, { status: 204 });
       });
     }
@@ -578,8 +604,8 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   if (method === "POST" && photoMatch) {
     const id = photoMatch[1]!;
     return withEngine(async () => {
-      const locked = await currentMonthLockResponse(id);
-      if (locked) return locked;
+      const check = await currentMonthLockCheck(id);
+      if (check.locked) return check.locked;
 
       let form: FormData;
       try {
@@ -592,6 +618,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       const filename = file instanceof File ? file.name : "photo.jpg";
 
       const uploaded = await attachExpensePhoto(id, file, filename);
+      enqueueAnalyticsPush(check.date.slice(0, 7));
       return json(201, uploaded);
     });
   }
@@ -600,9 +627,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   if (method === "DELETE" && photoDeleteMatch) {
     const [, id, photoId] = photoDeleteMatch as unknown as [string, string, string];
     return withEngine(async () => {
-      const locked = await currentMonthLockResponse(id);
-      if (locked) return locked;
+      const check = await currentMonthLockCheck(id);
+      if (check.locked) return check.locked;
       await detachExpensePhoto(id, photoId);
+      enqueueAnalyticsPush(check.date.slice(0, 7));
       return new Response(null, { status: 204 });
     });
   }
@@ -641,6 +669,9 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     return withApWriteLock(() =>
       withApStore(() => {
         const id = apStore.createApRow(validated.value, identity.email);
+        // A new row always files into the CURRENT Bangkok month
+        // (apStore.createApRow stamps filed_date = todayBangkok()).
+        enqueueAnalyticsPush(currentMonthBangkok());
         return json(201, { id });
       }),
     );
@@ -683,6 +714,9 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             return json(400, { error: "negative outstanding" });
           }
           apStore.updateApRow(id, validated.value);
+          // filed_date never changes on an edit (apStore.updateApRow does
+          // not touch it) — enqueue the row's existing filed month.
+          enqueueAnalyticsPush(existing.filedDate.slice(0, 7));
           return json(200, { id });
         }),
       );
@@ -699,6 +733,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             if (err instanceof apStore.ApRowHasPaymentsError) return json(409, { error: "has_payments" });
             throw err;
           }
+          enqueueAnalyticsPush(existing.filedDate.slice(0, 7));
           // The DB's ap_photo rows are already gone (ON DELETE CASCADE via
           // ap_row's foreign key) — this only removes the FILES, recursively,
           // for whatever photos (zero or more) this row had.
@@ -796,6 +831,9 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             },
             categoryCodeToPersist,
           );
+          // A payment changes this row's paidSatang/outstandingSatang, so
+          // its (unchanging) filed month needs a fresh push.
+          enqueueAnalyticsPush(row.filedDate.slice(0, 7));
           // L1 fix: echo back the categoryCode this payment ACTUALLY posted
           // under — the client uses this directly for its confirmation
           // text instead of re-deriving it from possibly-stale local state.
@@ -835,7 +873,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         if (!payment) return json(404, { error: "not found" });
 
         // The AP register's own current-month lock, mirroring
-        // currentMonthLockResponse — the engine itself has no such rule,
+        // currentMonthLockCheck — the engine itself has no such rule,
         // this app enforces it before ever calling deleteExpenseTransaction.
         // H2b / L4 fix: a MISSING/already-deleted engine transaction during
         // undo is treated as already-undone, not an error — the desired end
@@ -879,6 +917,11 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
           console.error("[ap-store] payment delete failed AFTER its ledger transaction was already deleted/gone", err);
           return json(500, { error: "ap_store_error" });
         }
+        // The row's filed month never changes; fetch it fresh (the row
+        // itself is untouched by a payment delete, only its
+        // paid/outstanding derivation) rather than trusting any stale copy.
+        const row = apStore.getApRow(rowId);
+        if (row) enqueueAnalyticsPush(row.filedDate.slice(0, 7));
         return new Response(null, { status: 204 });
       }),
     );
@@ -942,6 +985,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         createdBy: identity.email,
         data: file,
       });
+      enqueueAnalyticsPush(row.filedDate.slice(0, 7));
       return json(201, { id: photo.id, url: apPhotoUrl(photo.id) });
     });
   }
@@ -980,6 +1024,8 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       const record = apStore.deleteApPhoto(rowId, photoId);
       if (!record) return json(404, { error: "not found" });
       await apStore.deleteApPhotoFile(record);
+      const row = apStore.getApRow(rowId);
+      if (row) enqueueAnalyticsPush(row.filedDate.slice(0, 7));
       return new Response(null, { status: 204 });
     });
   }

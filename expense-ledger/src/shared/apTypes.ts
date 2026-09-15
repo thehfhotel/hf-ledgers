@@ -59,6 +59,15 @@ export interface ApRow {
    * calendar date), which this interface never needs to expose. */
   createdAt: string;
   createdBy: string;
+  /** Bangkok calendar "YYYY-MM-DD" this row was FILED into the register
+   * (src/server/apStore.ts's `filed_date` column, todayBangkok() at create
+   * time — never changes after that). Distinct from `dueDate` (กำหนดชำระ,
+   * clerk-entered, can be edited) and from `createdAt` (a full UTC
+   * timestamp, wrong for month-grouping near a Bangkok midnight — see
+   * apStore.ts's filed_date column comment). This is the field the
+   * analytics rollup (src/shared/rollup.ts) scopes `filed`/`filedByEntity`
+   * by: "a bill counts once, when it is FILED", never by `dueDate`. */
+  filedDate: string;
   /** The newest payment's date once outstanding <= 0, else null — the
    * "จ่ายแล้ว {date}" label (spec §3, §6). Computed at read time from
    * `payments`, never stored, so it can never drift from what it summarizes

@@ -56,6 +56,17 @@ export interface ExpenseLedgerRollup {
   filed: Partial<Record<string, { count: number; grossSatang: number; outstandingSatang: number }>>;
   /** The same AP rows by normalised entity. */
   filedByEntity: Partial<Record<"hf" | "hfville" | "unknown", { count: number; grossSatang: number; outstandingSatang: number }>>;
+  /** LOCKED CONTRACT EXTENSION (2026-09-17, additive): the same AP rows by
+   * WHO FILED them — see apRowSource() below for the exact rule. Optional
+   * on the type only so hf-analytics' receiver tolerates an OLDER pusher's
+   * payload that omits this field entirely; THIS function always computes
+   * it (never omits the key, same convention as `filed`/`filedByEntity`
+   * above — an empty month is `{}`, not a missing field). A zero-count
+   * source key is omitted, same convention as every other bucket here.
+   * When present, Σ grossSatang over sources === filedGrossSatang and
+   * Σ outstandingSatang over sources === filedOutstandingSatang, to the
+   * satang — enforced by the "three totals foot" test below. */
+  filedBySource?: Partial<Record<ApRowSource, { count: number; grossSatang: number; outstandingSatang: number }>>;
   /** Of the 17 recurring leaves (RECURRING_CATEGORY_CODES), those with
    * >= 1 entered tx OR >= 1 filed AP row this month. */
   recurringFiled: string[];
@@ -98,9 +109,33 @@ export interface RollupApRowInput {
   filedDate: string;
   grossSatang: number;
   outstandingSatang: number;
+  /** Presence (not shape) is what matters here — see apRowSource(). Typed
+   * `unknown` rather than importing ApRow's full `payroll`/`reimbursement`
+   * shape (src/shared/apTypes.ts), same "deliberately structural" reasoning
+   * as the rest of this interface: a real ApRow (which has these as real
+   * objects when synced) satisfies this without a cast, and a test fixture
+   * only needs to set the key to a truthy placeholder. */
+  payroll?: unknown;
+  reimbursement?: unknown;
 }
 
 export type NormalizedApEntity = "hf" | "hfville" | "unknown";
+
+/** LOCKED CONTRACT (2026-09-17): who filed an AP row, decided by presence
+ * of ApRow.payroll / ApRow.reimbursement (never by categoryCode, entity or
+ * any other heuristic) — src/server/payroll-sync.ts's payrollRowView and
+ * src/server/reimbursement-sync.ts's reimbursementRowView are the only
+ * writers of those two fields, and a row can carry at most one of them (a
+ * payroll batch and a reimbursement receipt are disjoint sync sources).
+ * Every other row — including a manually-filed salary or social-security
+ * row that merely LOOKS like payroll by category — is "manual". */
+export type ApRowSource = "manual" | "payroll" | "reimbursement";
+
+export function apRowSource(row: Pick<RollupApRowInput, "payroll" | "reimbursement">): ApRowSource {
+  if (row.payroll) return "payroll";
+  if (row.reimbursement) return "reimbursement";
+  return "manual";
+}
 
 /**
  * AP `entity` is free text (src/server/apStore.ts) and already drifts
@@ -149,6 +184,7 @@ export function computeExpenseLedgerRollup(
 
   const filed: ExpenseLedgerRollup["filed"] = {};
   const filedByEntity: ExpenseLedgerRollup["filedByEntity"] = {};
+  const filedBySource: NonNullable<ExpenseLedgerRollup["filedBySource"]> = {};
   let filedGrossSatang = 0;
   let filedOutstandingSatang = 0;
   for (const row of apRows) {
@@ -169,6 +205,13 @@ export function computeExpenseLedgerRollup(
     entityBucket.outstandingSatang += outstanding;
     filedByEntity[entityKey] = entityBucket;
 
+    const sourceKey = apRowSource(row);
+    const sourceBucket = filedBySource[sourceKey] ?? { count: 0, grossSatang: 0, outstandingSatang: 0 };
+    sourceBucket.count += 1;
+    sourceBucket.grossSatang += row.grossSatang;
+    sourceBucket.outstandingSatang += outstanding;
+    filedBySource[sourceKey] = sourceBucket;
+
     filedGrossSatang += row.grossSatang;
     filedOutstandingSatang += outstanding;
   }
@@ -183,6 +226,7 @@ export function computeExpenseLedgerRollup(
     entered,
     filed,
     filedByEntity,
+    filedBySource,
     recurringFiled,
     recurringTotal: RECURRING_CATEGORY_COUNT,
     enteredTotalSatang,

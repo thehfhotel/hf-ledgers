@@ -235,6 +235,11 @@ export const AP_EMPTY = {
 export const AP_VALIDATION = {
   creditorRequired: "กรอกชื่อเจ้าหนี้",
   itemRequired: "กรอกรายการ",
+  /** CL-6: shown both as a passive (ink-muted) hint the moment the picker
+   * shows no button pressed (an existing row whose free-text `entity`
+   * doesn't classify under hf/hfville/all) and, in the same wording, as the
+   * active (red) error if the clerk tries to save before picking one. */
+  entityRequired: "ไม่ระบุ — เลือกว่าบิลนี้เป็นของโรงแรมไหน",
   negativeOutstanding: "ยอดค้างชำระติดลบ - ตรวจสอบจำนวนเงินหรือส่วนลด",
   payTooMuch: "จำนวนที่จ่ายเกินยอดค้างชำระ",
   hasPayments: "รายการนี้มีการชำระแล้ว ลบไม่ได้ - ให้ยกเลิกการชำระก่อน",
@@ -269,5 +274,3 @@ export const AP_VALIDATION = {
    * photo from a saved one. */
   stagedPhotosNotUploaded: (n: number) => `รูปบิล ${n} รูปยังไม่ได้แนบ - ลองใหม่อีกครั้ง`,
 };
-
-export const AP_ENTITIES = ["บจก.สายชล เฮอริเทจ", "HF Ville", "HF", "SCM", "บจก.สายชล เฮอริเทจ ทหารไทย"];

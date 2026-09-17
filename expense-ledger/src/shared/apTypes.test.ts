@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AP_ENTITY_CANONICAL,
   apPhotoUrl,
   apRowPhotoCount,
   apTagName,
@@ -9,6 +10,8 @@ import {
   deriveSettledAt,
   deriveStatus,
   derivePaymentKind,
+  normalizeApEntityChoice,
+  normalizeApEntityForSave,
   paymentKindSuffix,
   paymentNeedsCategoryPicker,
   resolveCreditorHintCategoryCode,
@@ -220,6 +223,70 @@ describe("buildApPaymentComment", () => {
 describe("apPhotoUrl", () => {
   test("builds the stable GET /api/ap/photos/:photoId path", () => {
     expect(apPhotoUrl("abc-123")).toBe("/api/ap/photos/abc-123");
+  });
+});
+
+// CL-6: every distinct `entity` string present in a fresh production ap.db
+// copy (2026-09-17, expense-ledger-engine:/app/data/ap.db, 8 distinct
+// spellings across 52 rows) — the picker's normaliser must classify each
+// one exactly as documented, so a legacy row displays under the right
+// button and no real row silently lands under the wrong hotel or a false
+// "ไม่ระบุ".
+describe("normalizeApEntityChoice — classifying real production entity spellings", () => {
+  test("HF -> hf", () => {
+    expect(normalizeApEntityChoice("HF")).toBe("hf");
+  });
+
+  test("HF Ville -> hfville (ville checked before the bare hf substring)", () => {
+    expect(normalizeApEntityChoice("HF Ville")).toBe("hfville");
+  });
+
+  test("บจก.สายชล เฮอริเทจ (สายชล marker) -> hf", () => {
+    expect(normalizeApEntityChoice("บจก.สายชล เฮอริเทจ")).toBe("hf");
+  });
+
+  test("a bare vendor name with no hotel marker -> null (ไม่ระบุ)", () => {
+    expect(normalizeApEntityChoice("บริษัท เอส ซี เอ็ม ทรานสปอร์ต จำกัด")).toBeNull();
+  });
+
+  test("empty string -> null (ไม่ระบุ)", () => {
+    expect(normalizeApEntityChoice("")).toBeNull();
+  });
+
+  test("บจก.สายชล เฮอริเทจ  HF (สายชล + hf, both -> hf) -> hf", () => {
+    expect(normalizeApEntityChoice("บจก.สายชล เฮอริเทจ  HF")).toBe("hf");
+  });
+
+  test("บจก.สายชล เฮอริเทจ  HF-VILLE -> hfville (ville wins over the สายชล/hf markers also present)", () => {
+    expect(normalizeApEntityChoice("บจก.สายชล เฮอริเทจ  HF-VILLE")).toBe("hfville");
+  });
+
+  test("รวมทุกโรงแรม (payroll's literal entity string) -> all", () => {
+    expect(normalizeApEntityChoice("รวมทุกโรงแรม")).toBe("all");
+  });
+
+  test("case-insensitive on the latin markers", () => {
+    expect(normalizeApEntityChoice("hf ville")).toBe("hfville");
+    expect(normalizeApEntityChoice("hop inn hf")).toBe("hf");
+  });
+});
+
+describe("normalizeApEntityForSave — apStore's normalise-on-save rule", () => {
+  test("a classifiable spelling is rewritten to the canonical string", () => {
+    expect(normalizeApEntityForSave("บจก.สายชล เฮอริเทจ  HF-VILLE")).toBe(AP_ENTITY_CANONICAL.hfville);
+    expect(normalizeApEntityForSave("บจก.สายชล เฮอริเทจ")).toBe(AP_ENTITY_CANONICAL.hf);
+    expect(normalizeApEntityForSave("รวมทุกโรงแรม")).toBe(AP_ENTITY_CANONICAL.all);
+  });
+
+  test("an already-canonical string round-trips unchanged", () => {
+    expect(normalizeApEntityForSave("HF")).toBe("HF");
+    expect(normalizeApEntityForSave("HF Ville")).toBe("HF Ville");
+    expect(normalizeApEntityForSave("รวมทุกโรงแรม")).toBe("รวมทุกโรงแรม");
+  });
+
+  test("an unclassifiable value (vendor name, empty) is kept exactly as filed — never forced into a wrong bucket", () => {
+    expect(normalizeApEntityForSave("บริษัท เอส ซี เอ็ม ทรานสปอร์ต จำกัด")).toBe("บริษัท เอส ซี เอ็ม ทรานสปอร์ต จำกัด");
+    expect(normalizeApEntityForSave("")).toBe("");
   });
 });
 

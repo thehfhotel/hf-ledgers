@@ -84,6 +84,20 @@ describe("createApRow / getApRow round trip", () => {
   test("returns null for an unknown id", () => {
     expect(getApRow("does-not-exist")).toBeNull();
   });
+
+  // CL-6: apStore normalises `entity` onto its canonical spelling on save
+  // (src/shared/apTypes.ts's normalizeApEntityForSave) — a drifted spelling
+  // that classifies under one of the 3 picker choices is rewritten, never
+  // stored verbatim.
+  test("normalises a classifiable entity spelling to its canonical form on create", () => {
+    const id = createApRow(baseRowInput({ entity: "บจก.สายชล เฮอริเทจ  HF-VILLE" }), "clerk@thehfhotel.org");
+    expect(getApRow(id)!.entity).toBe("HF Ville");
+  });
+
+  test("keeps an unclassifiable entity (a vendor name) exactly as filed on create", () => {
+    const id = createApRow(baseRowInput({ entity: "SCM" }), "clerk@thehfhotel.org");
+    expect(getApRow(id)!.entity).toBe("SCM");
+  });
 });
 
 describe("updateApRow", () => {
@@ -94,6 +108,15 @@ describe("updateApRow", () => {
     expect(row.creditor).toBe("หจก.บุญดี");
     expect(row.amountSatang).toBe(20_000);
     expect(row.note).toBe("แก้ไขแล้ว");
+  });
+
+  // CL-6: same normalise-on-save rule applies to an edit, so fixing a row's
+  // hotel via the picker also cleans up a legacy drifted spelling instead
+  // of just swapping it for a different one.
+  test("normalises entity on update the same way as create", () => {
+    const id = createApRow(baseRowInput({ entity: "HF" }), "clerk@thehfhotel.org");
+    updateApRow(id, baseRowInput({ entity: "บจก.สายชล เฮอริเทจ" }));
+    expect(getApRow(id)!.entity).toBe("HF");
   });
 });
 

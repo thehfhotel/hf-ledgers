@@ -32,6 +32,7 @@ import {
   computeOutstanding,
   deriveSettledAt,
   deriveStatus,
+  normalizeApEntityForSave,
   type ApCreditorHint,
   type ApListFilter,
   type ApPayment,
@@ -390,7 +391,11 @@ export function createApRow(input: ApRowInput, createdBy: string, source?: { id:
       input.whtSatang,
       input.discountSatang,
       input.dueDate,
-      input.entity,
+      // CL-6: normalise the picker's (or a sync's) `entity` onto its
+      // canonical spelling on save — see normalizeApEntityForSave's doc
+      // comment. Never rewrites an EXISTING row (this only runs at
+      // create/update time on the value just supplied).
+      normalizeApEntityForSave(input.entity),
       input.categoryCode,
       input.note,
       createdAt,
@@ -423,7 +428,8 @@ export function updateApRow(id: string, input: ApRowInput): void {
       input.whtSatang,
       input.discountSatang,
       input.dueDate,
-      input.entity,
+      // CL-6: same normalise-on-save as createApRow above.
+      normalizeApEntityForSave(input.entity),
       input.categoryCode,
       input.note,
       id,

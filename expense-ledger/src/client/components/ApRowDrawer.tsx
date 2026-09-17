@@ -13,11 +13,16 @@ import { categoryByCode, type ExpenseCategoryCode } from "../../shared/categorie
 import { isoToBuddhist, isoToThaiLong } from "@shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "@shared/money.ts";
 import {
+  AP_ENTITY_CANONICAL,
+  AP_ENTITY_CHOICES,
+  AP_ENTITY_PICKER_LABELS,
   apPhotoExtForFilename,
   computeGross,
   computeOutstanding,
+  normalizeApEntityChoice,
   resolveCreditorHintCategoryCode,
   type ApCreditorHint,
+  type ApEntityChoice,
   type ApPayment,
   type ApRow,
   type ApRowInput,
@@ -28,7 +33,6 @@ import { ApPaymentForm } from "./ApPaymentForm.tsx";
 import { PhotoLightbox } from "./PhotoLightbox.tsx";
 import {
   AP,
-  AP_ENTITIES,
   AP_FIELDS,
   AP_PAY,
   AP_VALIDATION,
@@ -63,6 +67,7 @@ interface FieldErrors {
   wht?: string;
   discount?: string;
   outstanding?: string;
+  entity?: string;
 }
 
 /** L6 fix: date range for กำหนดชำระ's native date input — the paper workbook
@@ -102,7 +107,18 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
   const [whtText, setWhtText] = useState(row?.whtSatang != null ? (row.whtSatang / 100).toFixed(2) : "");
   const [discountText, setDiscountText] = useState(row && row.discountSatang > 0 ? (row.discountSatang / 100).toFixed(2) : "");
   const [dueDate, setDueDate] = useState(row?.dueDate ?? "");
-  const [entity, setEntity] = useState(row?.entity ?? creditors[0]?.entity ?? "HF");
+  // CL-6: the fixed 3-way picker's SELECTED CHOICE, derived from whatever
+  // free text `entity` already carries (row's own, or — ADD mode only — the
+  // matched creditor's most recent row) via the SAME classification rule
+  // used on save (normalizeApEntityChoice) — never a raw string here any
+  // more. null = ไม่ระบุ: an existing row whose entity classifies under
+  // none of the 3 choices (a bare vendor name, empty, an unrecognized
+  // spelling) shows no button pressed and asks the clerk to pick one
+  // (validate() below) rather than silently guessing or falling back to a
+  // free-text field.
+  const [entityChoice, setEntityChoice] = useState<ApEntityChoice | null>(() =>
+    normalizeApEntityChoice(row?.entity ?? creditors[0]?.entity ?? "HF"),
+  );
   const [categoryCode, setCategoryCode] = useState<ExpenseCategoryCode | null>(row?.categoryCode ?? null);
   const [note, setNote] = useState(row?.note ?? "");
   const [detailsOpen, setDetailsOpen] = useState(!!(row?.vatSatang || row?.whtSatang || row?.discountSatang || row?.dueDate || row?.note));
@@ -205,7 +221,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
         // Functional update so this reads the LATEST categoryCode rather
         // than one possibly-stale closure value.
         setCategoryCode((current) => resolveCreditorHintCategoryCode(current, hint.categoryCode));
-        setEntity(hint.entity);
+        setEntityChoice(normalizeApEntityChoice(hint.entity));
       }
     }
   }
@@ -227,6 +243,10 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     const next: FieldErrors = {};
     if (creditor.trim() === "") next.creditor = AP_VALIDATION.creditorRequired;
     if (item.trim() === "") next.item = AP_VALIDATION.itemRequired;
+    // CL-6: the picker replaces free text — a row with no classifiable
+    // choice must be resolved (asked) before it can save, rather than
+    // silently filing under a guessed hotel or an empty string.
+    if (entityChoice === null) next.entity = AP_VALIDATION.entityRequired;
 
     const parsedAmount = parseAmountToSatang(amountText);
     if (amountText.trim() === "") next.amount = VALIDATION.amountRequired;
@@ -274,7 +294,9 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
       whtSatang: whtSatangLive,
       discountSatang: discountSatangLive,
       dueDate: dueDate.trim() === "" ? null : dueDate,
-      entity: entity.trim(),
+      // entityChoice is guaranteed non-null here — validate() above already
+      // rejected a null choice and returned before this point runs.
+      entity: entityChoice ? AP_ENTITY_CANONICAL[entityChoice] : "",
       categoryCode,
       note,
     };
@@ -622,18 +644,33 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
 
 
             <div>
-              <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-entity">
+              <span id="ap-entity-label" className="mb-1.5 block text-xs font-semibold text-ink-muted">
                 บิลของที่ไหน
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {['HF', 'HF Ville', ''].map(value => <button key={value} type="button" onClick={() => setEntity(value)}
-                  aria-pressed={value ? entity === value : !['HF', 'HF Ville'].includes(entity)}
-                  className={'min-h-12 rounded-lg border px-3 text-sm font-medium ' + ((value ? entity === value : !['HF', 'HF Ville'].includes(entity)) ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-line-strong text-ink')}>
-                  {value === 'HF' ? 'HF Hotel' : value || 'ชื่ออื่น'}
-                </button>)}
+              </span>
+              <div className="grid grid-cols-3 gap-2" role="group" aria-labelledby="ap-entity-label">
+                {AP_ENTITY_CHOICES.map((choice) => (
+                  <button
+                    key={choice}
+                    type="button"
+                    onClick={() => {
+                      setEntityChoice(choice);
+                      setErrors((prev) => (prev.entity ? { ...prev, entity: undefined } : prev));
+                    }}
+                    aria-pressed={entityChoice === choice}
+                    className={
+                      'min-h-12 rounded-lg border px-3 text-sm font-medium ' +
+                      (entityChoice === choice ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-line-strong text-ink')
+                    }
+                  >
+                    {AP_ENTITY_PICKER_LABELS[choice]}
+                  </button>
+                ))}
               </div>
-              {!['HF', 'HF Ville'].includes(entity) && <input id="ap-entity" aria-label="ชื่อในบิล" value={entity} onChange={e => setEntity(e.target.value)} maxLength={200} placeholder="ระบุชื่อในบิล"
-                className="mt-2 h-12 w-full rounded-lg border border-line-strong px-3 text-base text-ink" />}
+              {errors.entity ? (
+                <p className="mt-1 text-xs text-bad">{errors.entity}</p>
+              ) : entityChoice === null ? (
+                <p className="mt-2 text-xs text-ink-muted">{AP_VALIDATION.entityRequired}</p>
+              ) : null}
               <p className="mt-2 text-xs text-ink-muted">{row ? 'ตามข้อมูลที่บันทึกไว้ เปลี่ยนได้' : creditors.length ? 'เลือกจากบิลล่าสุดให้แล้ว เปลี่ยนได้ตามบิลนี้' : 'เลือกโรงแรมที่ใช้บิลนี้'}</p>
             </div>
 

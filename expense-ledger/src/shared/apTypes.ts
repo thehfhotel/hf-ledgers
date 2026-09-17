@@ -164,6 +164,84 @@ export interface CreateApPaymentResponse {
   categoryCode: ExpenseCategoryCode;
 }
 
+// ── ในนาม ("บิลของที่ไหน") entity picker (CL-6) ─────────────────────────
+
+/** The fixed 3-way picker src/client/components/ApRowDrawer.tsx renders for
+ * `entity`, replacing the free-text input that let real rows drift across
+ * ~8 spellings (HF, HF Ville, บจก.สายชล เฮอริเทจ, ...HF-VILLE, a bare
+ * vendor name, empty, รวมทุกโรงแรม — confirmed against a fresh production
+ * ap.db copy 2026-09-17). Payroll/reimbursement rows are read-only and
+ * never go through this picker (src/server/payroll-sync.ts /
+ * reimbursement-sync.ts set `entity` directly), but they already write one
+ * of AP_ENTITY_CANONICAL's exact strings, so they normalize the same way. */
+export type ApEntityChoice = "hf" | "hfville" | "all";
+
+/** Canonical string this app WRITES into ap_row.entity for each picker
+ * choice — chosen to match what payroll-sync.ts ('รวมทุกโรงแรม') and
+ * reimbursement-sync.ts ('HF' / 'HF Ville') already write, so a manually
+ * picked row and a synced row land on the exact same spelling instead of
+ * this picker adding a 4th/6th one. Never store a different string for
+ * these 3 choices — apPage's register list and the syncs both rely on this
+ * exact spelling. */
+export const AP_ENTITY_CANONICAL: Record<ApEntityChoice, string> = {
+  hf: "HF",
+  hfville: "HF Ville",
+  all: "รวมทุกโรงแรม",
+};
+
+/** Button labels for the fixed picker — deliberately friendlier than the
+ * canonical STORED string above (hf stores "HF" but reads "HF Hotel" on
+ * the button, matching this component's pre-picker convention). */
+export const AP_ENTITY_PICKER_LABELS: Record<ApEntityChoice, string> = {
+  hf: "HF Hotel",
+  hfville: "HF Ville",
+  all: "รวมทุกโรงแรม",
+};
+
+/** Picker button order (ApRowDrawer's 3-column grid). */
+export const AP_ENTITY_CHOICES: readonly ApEntityChoice[] = ["hf", "hfville", "all"];
+
+/**
+ * Maps free-text `entity` onto one of the picker's 3 fixed choices, or null
+ * when it cannot be classified (ไม่ระบุ — the clerk is asked to pick one
+ * explicitly; see ApRowDrawer's validate()). SAME "ville" / "hf|สายชล|hop"
+ * substring rule, same order, as src/shared/rollup.ts's normalizeApEntity —
+ * never let these two drift on that shared part of the rule. That function
+ * is NOT reused directly here: it is separately locked to hf-analytics'
+ * own 3-key wire contract (hf/hfville/unknown) and has no "all" concept, so
+ * duplicating its exact rule here (rather than importing across that
+ * boundary) keeps each side free to evolve its own third case without the
+ * other's contract silently moving. This adds ONE extra branch rollup.ts
+ * intentionally does not have: รวมทุกโรงแรม ("all hotels combined") is
+ * payroll's literal entity string and a legitimate manual choice for a
+ * shared/corporate bill — checked before the hf/ville branches only
+ * because it happens not to overlap with them (no known entity string
+ * matches more than one branch).
+ */
+export function normalizeApEntityChoice(entity: string): ApEntityChoice | null {
+  const lower = entity.toLowerCase();
+  if (lower.includes("ville")) return "hfville";
+  if (entity.includes("รวมทุก")) return "all";
+  if (lower.includes("hf") || lower.includes("สายชล") || lower.includes("hop")) return "hf";
+  return null;
+}
+
+/**
+ * What apStore.ts's createApRow/updateApRow persist for a given raw
+ * `entity` input: the canonical spelling when it classifies under one of
+ * the 3 picker choices (fixing drift on save, e.g. "...HF-VILLE" ->
+ * "HF Ville"), otherwise the trimmed raw string unchanged (never forced
+ * into a wrong bucket — a genuine vendor name like "SCM" or an empty
+ * string stays exactly as filed, per the ruling: never rewrite existing
+ * rows behind the clerk's back beyond what THIS save touches). Pulled out
+ * as a pure function so apStore.ts's persistence call sites and this
+ * file's tests share the exact same rule.
+ */
+export function normalizeApEntityForSave(entity: string): string {
+  const choice = normalizeApEntityChoice(entity);
+  return choice ? AP_ENTITY_CANONICAL[choice] : entity;
+}
+
 // ── Arithmetic ──────────────────────────────────────────────────────────
 
 export function computeGross(amountSatang: number, vatSatang: number | null, whtSatang: number | null): number {

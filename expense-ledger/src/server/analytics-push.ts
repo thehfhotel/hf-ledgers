@@ -39,6 +39,8 @@
 
 import { getApDbForAnalytics, listApRows } from "./apStore.ts";
 import { getMonthExpenseTransactionsWithApManaged } from "./engine.ts";
+import { payrollRowView } from "./payroll-sync.ts";
+import { reimbursementRowView } from "./reimbursement-sync.ts";
 import { computeExpenseLedgerRollup, type ExpenseLedgerRollup } from "../shared/rollup.ts";
 import { currentMonthBangkok, shiftMonths } from "@shared/date.ts";
 
@@ -95,10 +97,17 @@ export function enqueueAnalyticsPush(month: string): void {
  * filed_date — see src/shared/rollup.ts's file header for why it isn't
  * pre-filtered here). `generatedAt` is stamped at push time here, not
  * inside the pure rollup.ts function.
+ *
+ * `.map(reimbursementRowView).map(payrollRowView)` decorates each row with
+ * its `.payroll`/`.reimbursement` marker (same two calls, same order, as
+ * server.ts's GET /api/ap/rows route) — computeExpenseLedgerRollup's
+ * `filedBySource` bucket (src/shared/rollup.ts's apRowSource()) needs that
+ * presence to tell a payroll/reimbursement-synced row apart from a manual
+ * one; `listApRows` alone never sets either field.
  */
 async function buildPayload(month: string): Promise<ExpenseLedgerRollup> {
   const { transactions, apManagedIds } = await getMonthExpenseTransactionsWithApManaged(month);
-  const apRows = listApRows({ mode: "all" });
+  const apRows = listApRows({ mode: "all" }).map(reimbursementRowView).map(payrollRowView);
   return computeExpenseLedgerRollup(month, transactions, apManagedIds, apRows, new Date().toISOString());
 }
 

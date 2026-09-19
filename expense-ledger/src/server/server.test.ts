@@ -5,9 +5,9 @@
 // dev-mode bypass without a real Cloudflare Access JWT.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { makeTmpVolume } from "./test-support/tmpVolume.ts";
 import * as apStore from "./apStore.ts";
 import { _internal as engineInternal } from "./engine.ts";
 import { buildTransactionUnixTimeSeconds } from "./transactionBuilder.ts";
@@ -507,7 +507,7 @@ describe("AP register: DB lazy-open", () => {
   let dbPath: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "ap-lazy-open-test-"));
+    tmpDir = makeTmpVolume("ap-lazy-open-test-");
     dbPath = join(tmpDir, "ap.db");
     process.env.AP_DB_PATH = dbPath;
     apStore._resetForTests();
@@ -546,7 +546,7 @@ describe("AP register: row validation and CRUD (no engine involved)", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "ap-crud-test-"));
+    tmpDir = makeTmpVolume("ap-crud-test-");
     process.env.AP_DB_PATH = join(tmpDir, "ap.db");
     apStore._resetForTests();
   });
@@ -914,7 +914,7 @@ describe("AP register: payment posting (mocked engine HTTP)", () => {
   let nextTransactionId = 900;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "ap-payment-test-"));
+    tmpDir = makeTmpVolume("ap-payment-test-");
     process.env.AP_DB_PATH = join(tmpDir, "ap.db");
     process.env.ENGINE_API_TOKEN = "test-token";
     apStore._resetForTests();
@@ -1242,7 +1242,7 @@ describe("AP register: payment undo (mocked engine HTTP)", () => {
   let transactionTimesById: Record<string, number> = {};
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "ap-undo-test-"));
+    tmpDir = makeTmpVolume("ap-undo-test-");
     process.env.AP_DB_PATH = join(tmpDir, "ap.db");
     process.env.ENGINE_API_TOKEN = "test-token";
     apStore._resetForTests();
@@ -1406,7 +1406,7 @@ describe("AP register: row photos (รูปบิล)", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "ap-photo-test-"));
+    tmpDir = makeTmpVolume("ap-photo-test-");
     process.env.AP_DB_PATH = join(tmpDir, "ap.db");
     apStore._resetForTests();
   });

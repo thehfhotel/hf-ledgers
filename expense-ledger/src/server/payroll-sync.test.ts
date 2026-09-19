@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, describe, test, expect } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { makeTmpVolume } from './test-support/tmpVolume.ts';
 import * as ap from './apStore.ts';
 import { reconcilePayrollSnapshot, payrollRowView, payrollExpenseView, payrollSyncStatus, validatePayrollSnapshot,
   validatePayrollBackfillManifest, payrollRetrievalSince, type SourcePayrollRun } from './payroll-sync.ts';
@@ -54,7 +54,7 @@ function durableState() {
 
 describe('approved historical payroll backfill', () => {
   test('only approved paid batches settle once across replay and database reopen; manual salary remains separate', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'payroll-approved-backfill-'));
+    const directory = makeTmpVolume('payroll-approved-backfill-');
     ap._resetForTests(); process.env.AP_DB_PATH = join(directory, 'ap.db');
     try {
       const manualId = ap.createApRow({ creditor: 'เจ้าหนี้ตัวอย่าง', item: 'ค่าบริการตัวอย่าง', amountSatang: 95000,

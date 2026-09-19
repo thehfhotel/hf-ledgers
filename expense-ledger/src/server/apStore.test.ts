@@ -7,9 +7,9 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { makeTmpVolume } from "./test-support/tmpVolume.ts";
 import {
   AP_PHOTO_MAX_BYTES,
   ApRowHasPaymentsError,
@@ -61,7 +61,7 @@ function baseRowInput(overrides: Partial<ApRowInput> = {}): ApRowInput {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "ap-store-test-"));
+  tmpDir = makeTmpVolume("ap-store-test-");
   process.env.AP_DB_PATH = join(tmpDir, "ap.db");
   _resetForTests();
 });

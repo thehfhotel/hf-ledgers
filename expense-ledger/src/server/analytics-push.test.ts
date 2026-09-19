@@ -16,16 +16,16 @@
 // server.ts, since apStore.ts's db is lazily opened the first time anything
 // touches it.
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { makeTmpVolume } from "./test-support/tmpVolume.ts";
 
 // ── Import-time side-effect check ───────────────────────────────────────
 // Runs FIRST, before any env var below is set and before server.ts (which
 // re-exports/imports analytics-push.ts) is ever imported: proves that
 // merely loading the module does not open (or create) any sqlite file, even
 // pointed at a path whose directory does not exist.
-const noEnvTmpDir = mkdtempSync(join(tmpdir(), "analytics-push-noenv-test-"));
+const noEnvTmpDir = makeTmpVolume("analytics-push-noenv-test-");
 const noEnvDbPath = join(noEnvTmpDir, "does-not-exist", "ap.db");
 {
   const savedApDbPath = process.env.AP_DB_PATH;
@@ -45,7 +45,7 @@ const noEnvDbPath = join(noEnvTmpDir, "does-not-exist", "ap.db");
 const importWithNoEnvCreatedNoFile = !existsSync(noEnvDbPath);
 rmSync(noEnvTmpDir, { recursive: true, force: true });
 
-const tmpDir = mkdtempSync(join(tmpdir(), "analytics-push-test-"));
+const tmpDir = makeTmpVolume("analytics-push-test-");
 process.env.AP_DB_PATH = join(tmpDir, "ap.db");
 process.env.NODE_ENV = "development";
 process.env.DEV_USER = "tester@thehfhotel.org";

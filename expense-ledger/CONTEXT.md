@@ -13,8 +13,14 @@ _Avoid_: ค่าใช้จ่ายจ่ายจริง, cash out, spend
 
 **งวด** (cost period):
 The month a cost belongs to: the month the electricity was used, the staff worked, the room was
-cleaned. Every bill has exactly one. It is the axis ต้นทุน is summed on.
+cleaned. Every bill has exactly one — the month of its วันที่ลงบิล. It is the axis ต้นทุน is summed on.
 _Avoid_: filing month, บันทึกเดือน, the month the bill arrived
+
+**วันที่ลงบิล** (bill date):
+The date the accountant assigns a bill to — the day its cost belongs to. Its month is the
+บิล's งวด. Defaults to the document date; set by hand when the document says otherwise, and to
+the last day of the span for a bill covering more than one month (owner, 2026-09-19).
+_Avoid_: วันที่ยื่น, entry date, วันที่ลงรายการ (that is the filing date)
 
 **วันยื่นบิล** (filing date):
 The day a bill was entered into the book. A property of the record, never of the cost — a bill

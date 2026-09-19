@@ -16,6 +16,11 @@ Considered and rejected: cash basis (when paid) — hides everything ค้า�
 look cheap while bills wait; filing month (the status quo) — puts a cost in whichever month the
 accountant got to it, which is nobody's month.
 
+Implementation (owner, 2026-09-19): one editable date on every bill, **วันที่ลงบิล**, whose month is
+the งวด — rather than a separate period field. Existing bills keep the month they were filed in
+except where the document already says its period (payroll batches → last day of their period;
+staff receipts → purchase date).
+
 Consequences: every bill needs a งวด at filing (defaulted where the document prints one); the
 monthly rollup is re-keyed by งวด; a bill filed after its month's report was sent restates that
 month.

@@ -257,6 +257,20 @@ describe('payroll reconciliation', () => {
     await reconcilePayrollSnapshot(snapshot([run('sample', { status: 'SCHEDULED' })]), SINCE, deps);
     expect(months).toEqual([]); // unchanged polling does not fan out analytics work
   });
+  test('a corrected period MOVES the งวด and restates BOTH months, never only the new one', async () => {
+    await reconcilePayrollSnapshot(snapshot([run('sample')]), SINCE, deps);
+    expect(ap.getApRow('payroll-sample')!.billDate).toBe('2025-09-30');
+    expect(months).toEqual(['2025-09']);
+    months = [];
+    // The upstream batch is corrected to the August งวด before anything is
+    // paid. 2025-09 must be restated too — pushing only the new month leaves
+    // September still holding a batch it no longer has, and the largest single
+    // cost of the month is counted in two งวด.
+    await reconcilePayrollSnapshot(snapshot([run('sample', { period: '2025-08' })]), SINCE, deps);
+    expect(ap.getApRow('payroll-sample')!.billDate).toBe('2025-08-31');
+    expect(months).toContain('2025-09'); // the งวด it LEFT
+    expect(months).toContain('2025-08'); // the งวด it joined
+  });
   test('verified bank settlement pays the same row once using actual payment date', async () => {
     await reconcilePayrollSnapshot(snapshot([run()]), SINCE, deps);
     const paid = snapshot([run('batch-sample', { status: 'PAID', paidDate: '2025-11-01' })]);

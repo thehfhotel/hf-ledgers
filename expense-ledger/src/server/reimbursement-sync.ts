@@ -130,6 +130,11 @@ export async function reconcileSnapshot(value: unknown, since: string, deps: Syn
           }
         })();
         const row = ap.getApRow(rowId)!;
+        // A corrected purchase date MOVES วันที่ลงบิล, so the bill leaves one
+        // งวด and joins another. Restate BOTH months (as the PATCH route
+        // does): pushing only the new one leaves the old งวด still holding a
+        // bill it no longer has, and the cost is counted twice.
+        if (before && before.billDate !== row.billDate) deps.enqueue(before.billDate.slice(0, 7));
         deps.enqueue(row.billDate.slice(0, 7));
         if (r.status !== 'PAID' || row.payments.length) continue;
         if (!r.paymentMatchesReceipts) throw new Error('Paid request total differs from receipt total');

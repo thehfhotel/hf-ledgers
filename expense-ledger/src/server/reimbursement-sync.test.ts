@@ -10,14 +10,14 @@ const receipt = (id: string, extra: Partial<SourceReceipt> = {}): SourceReceipt 
   property: 'hf-hotel', amountSatang: 12345, date: '2026-09-10', note: 'ตัวอย่าง', photoCount: 2, ...extra,
 });
 const snapshot = (items: SourceReceipt[]) => ({ version: 1, complete: true, since: SINCE, generatedAt: '2026-09-16T00:00:00.000Z', items });
-let posts: string[], recovered: string | null;
+let posts: string[], recovered: string | null, months: string[];
 const deps = {
   post: async (p: { apRowId: string }) => { posts.push(p.apRowId); return 'engine-sample'; },
   find: async () => recovered,
-  enqueue: (_: string) => {},
+  enqueue: (month: string) => { months.push(month); },
 };
 let originalPath: string | undefined;
-beforeEach(() => { originalPath = process.env.AP_DB_PATH; ap._resetForTests(); process.env.AP_DB_PATH = ':memory:'; posts = []; recovered = null; });
+beforeEach(() => { originalPath = process.env.AP_DB_PATH; ap._resetForTests(); process.env.AP_DB_PATH = ':memory:'; posts = []; recovered = null; months = []; });
 afterEach(() => { ap._resetForTests(); if (originalPath === undefined) delete process.env.AP_DB_PATH; else process.env.AP_DB_PATH = originalPath; });
 
 describe('reimbursement reconciliation', () => {
@@ -39,6 +39,26 @@ describe('reimbursement reconciliation', () => {
     const rows = ap.listApRows({ mode: 'all' });
     expect(rows).toHaveLength(2); expect(posts).toHaveLength(2);
     for (const r of rows) { expect(r.outstandingSatang).toBe(0); expect(r.settledAt).toBe('2026-10-01'); expect(r.filedDate).toBe('2026-09-16'); expect(r.payments).toHaveLength(1); }
+  });
+  test('a corrected purchase date MOVES the งวด and restates BOTH months, never only the new one', async () => {
+    await reconcileSnapshot(snapshot([receipt('a', { date: '2026-08-10' })]), SINCE, deps);
+    expect(ap.getApRow('reimbursement-a')!.billDate).toBe('2026-08-10');
+    expect(months).toEqual(['2026-08']);
+    months = [];
+    // The claim is corrected upstream: the thing was bought on 2 July, so the
+    // ต้นทุน is งวด 2026-07 now. 2026-08 must be restated too — pushing only
+    // the new month leaves August still holding a bill it no longer has, and
+    // the same cost is counted in two งวด.
+    await reconcileSnapshot(snapshot([receipt('a', { date: '2026-07-02' })]), SINCE, deps);
+    expect(ap.getApRow('reimbursement-a')!.billDate).toBe('2026-07-02');
+    expect(months).toContain('2026-08'); // the งวด it LEFT
+    expect(months).toContain('2026-07'); // the งวด it joined
+  });
+  test('an unchanged purchase date restates one งวด only', async () => {
+    await reconcileSnapshot(snapshot([receipt('a', { date: '2026-08-10' })]), SINCE, deps);
+    months = [];
+    await reconcileSnapshot(snapshot([receipt('a', { date: '2026-08-10', note: 'แก้หมายเหตุ' })]), SINCE, deps);
+    expect(months).toEqual(['2026-08']);
   });
   test('concurrent passes cannot post twice', async () => {
     const s = snapshot([receipt('a', { status: 'PAID', paidAt: '2026-09-17T01:00:00.000Z' })]);

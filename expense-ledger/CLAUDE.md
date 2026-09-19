@@ -152,7 +152,19 @@ Its image builds from the MONOREPO ROOT context with
   `"filed-month"` means the old filing-month meaning, and an ABSENT basis
   must be read as `"filed-month"` and said so, never guessed. Any route that
   changes a row enqueues the row's BILL-DATE month (an edit that moves the
-  date enqueues both the old and the new one), never the clock's month.
+  date enqueues both the old and the new one — including a source correction
+  in `payroll-sync.ts` / `reimbursement-sync.ts`, where a changed period or
+  purchase date moves วันที่ลงบิล), never the clock's month.
+- **Deploy hf-data's migration 027 BEFORE this app — the order is not
+  free.** An un-migrated receiver accepts a bill-date payload (its
+  `ingestSchema` is non-strict, so nothing 4xx's and nothing drops from the
+  outbox) but silently discards `basis`, leaving งวด figures stored under a
+  NULL basis — which hf-mcp reads as filed-month and SAYS SO out loud. That
+  is a confidently wrong label on a งวด, precisely what the three-state
+  contract exists to prevent. In the right order nothing needs a backfill:
+  this app's boot (`startAnalyticsPush`) enqueues the current month and the
+  two before it, which is the register's whole span, so every month is
+  restated with its basis on the first deploy.
 - **UI language is Thai only**, matching the income ledger's convention for
   this estate's front-of-house tools. No `name_en` field, no English-first
   copy.

@@ -221,6 +221,11 @@ export async function reconcilePayrollSnapshot(value: unknown, since: string, de
           }
         })();
         const row = ap.getApRow(rowId)!;
+        // A corrected period MOVES วันที่ลงบิล, so the batch leaves one งวด and
+        // joins another. Restate BOTH months (as the PATCH route does):
+        // pushing only the new one leaves the old งวด still holding a bill it
+        // no longer has, and the payroll cost is counted twice.
+        if (before && before.billDate !== row.billDate) deps.enqueue(before.billDate.slice(0, 7));
         deps.enqueue(row.billDate.slice(0, 7));
         if (run.status === 'FAILED') throw new Error('Payroll bank outcome needs review');
         if (run.status !== 'PAID' || row.payments.length) continue;

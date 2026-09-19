@@ -7,9 +7,9 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { makeTmpVolume } from "./test-support/tmpVolume.ts";
 import {
   AP_PHOTO_MAX_BYTES,
   ApRowHasPaymentsError,
@@ -31,6 +31,7 @@ import {
   getApPayment,
   getApPhotoRecord,
   getApRow,
+  earliestBillMonth,
   listApRows,
   listCreditorHints,
   updateApRow,
@@ -52,12 +53,15 @@ function baseRowInput(overrides: Partial<ApRowInput> = {}): ApRowInput {
     entity: "HF",
     categoryCode: "commission-booking",
     note: "",
+    // วันที่ลงบิล (ADR-0001) — required on every write path; individual
+    // tests override it when the งวด is what they are about.
+    billDate: "2026-07-15",
     ...overrides,
   };
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "ap-store-test-"));
+  tmpDir = makeTmpVolume("ap-store-test-");
   process.env.AP_DB_PATH = join(tmpDir, "ap.db");
   _resetForTests();
 });
@@ -673,5 +677,224 @@ describe("AP row photos", () => {
 
   test("AP_PHOTO_MAX_BYTES is 10 MiB", () => {
     expect(AP_PHOTO_MAX_BYTES).toBe(10 * 1024 * 1024);
+  });
+});
+
+
+// ── วันที่ลงบิล (owner decision, 2026-09-19 — ADR-0001) ───────────────────
+
+describe("วันที่ลงบิล: the row's own งวด", () => {
+  test("createApRow stores the supplied bill date and getApRow reads it back", () => {
+    const id = createApRow(baseRowInput({ billDate: "2026-08-31" }), "clerk@thehfhotel.org");
+    expect(getApRow(id)!.billDate).toBe("2026-08-31");
+  });
+
+  test("a bill date back-dated into an earlier งวด than the filing day survives the round trip untouched", () => {
+    const id = createApRow(baseRowInput({ billDate: "2026-06-30" }), "clerk@thehfhotel.org");
+    const row = getApRow(id)!;
+    expect(row.billDate).toBe("2026-06-30");
+    // ...and the filing date is still TODAY: the two are different facts.
+    expect(row.filedDate).toBe(todayBangkok());
+    expect(row.billDate.slice(0, 7)).not.toBe(row.filedDate.slice(0, 7));
+  });
+
+  test("an empty bill date falls back to today rather than storing a row with no งวด", () => {
+    const id = createApRow(baseRowInput({ billDate: "" }), "clerk@thehfhotel.org");
+    expect(getApRow(id)!.billDate).toBe(todayBangkok());
+  });
+
+  test("updateApRow moves the row to another งวด, and never touches its filing date", () => {
+    const id = createApRow(baseRowInput({ billDate: "2026-09-18" }), "clerk@thehfhotel.org");
+    const filedDate = getApRow(id)!.filedDate;
+    updateApRow(id, baseRowInput({ billDate: "2026-08-31" }));
+    const row = getApRow(id)!;
+    expect(row.billDate).toBe("2026-08-31");
+    expect(row.filedDate).toBe(filedDate);
+  });
+
+  test("earliestBillMonth is the oldest วันที่ลงบิล's month — a back-dated bill, not the oldest filing", () => {
+    expect(earliestBillMonth()).toBeNull();
+    createApRow(baseRowInput({ billDate: "2026-09-01" }), "clerk@thehfhotel.org");
+    createApRow(baseRowInput({ creditor: "การไฟฟ้า", billDate: "2026-05-31" }), "clerk@thehfhotel.org");
+    expect(earliestBillMonth()).toBe("2026-05");
+  });
+});
+
+describe("migrateBillDate: a pre-decision volume, shaped exactly like prod's ap.db", () => {
+  /** Builds the PRE-migration schema (no bill_date column) plus the two sync
+   * journals prod actually carries, then seeds it with the real shape of a
+   * production register: manual rows filed across three months, the two real
+   * payroll batches (เงินเดือน กรกฎาคม/สิงหาคม 2569 — ฿175,062.74 filed
+   * 2026-08-04 for period 2026-07, ฿181,591.36 filed 2026-09-04 for period
+   * 2026-08, both bank-verified) and a reimbursement receipt whose purchase
+   * date precedes its filing. Amounts and dates are the production ones; the
+   * claimant/creditor strings are not (this repo is public). */
+  function seedPreDecisionVolume(): void {
+    _resetForTests();
+    const db = new Database(process.env.AP_DB_PATH!, { create: true });
+    db.exec(`
+      CREATE TABLE ap_row (
+        id TEXT PRIMARY KEY,
+        creditor TEXT NOT NULL,
+        item TEXT NOT NULL,
+        amount_satang INTEGER NOT NULL,
+        vat_satang INTEGER,
+        wht_satang INTEGER,
+        discount_satang INTEGER NOT NULL DEFAULT 0,
+        due_date TEXT,
+        entity TEXT NOT NULL DEFAULT '',
+        category_code TEXT,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        filed_date TEXT NOT NULL
+      );
+      CREATE TABLE ap_payment (
+        id TEXT PRIMARY KEY,
+        row_id TEXT NOT NULL REFERENCES ap_row(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        amount_satang INTEGER NOT NULL,
+        payment_method TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        installment_number INTEGER,
+        payer_email TEXT NOT NULL,
+        transaction_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE ap_photo (
+        id TEXT PRIMARY KEY,
+        row_id TEXT NOT NULL REFERENCES ap_row(id) ON DELETE CASCADE,
+        ext TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL
+      );
+      CREATE TABLE _payroll_runs (
+        run_id TEXT PRIMARY KEY, row_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
+        attempted INTEGER NOT NULL DEFAULT 0, error TEXT);
+      CREATE TABLE _reimbursement_receipts (
+        receipt_id TEXT PRIMARY KEY, row_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
+        attempted INTEGER NOT NULL DEFAULT 0, error TEXT);
+    `);
+    const insertRow = db.query(
+      `INSERT INTO ap_row
+        (id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by, filed_date)
+       VALUES (?, ?, ?, ?, NULL, NULL, 0, NULL, ?, ?, '', ?, 'clerk@thehfhotel.org', ?)`,
+    );
+    insertRow.run("manual-july", "Booking.com", "ค่าคอมมิชชั่น", 902_609, "HF", "commission-booking", "2026-07-31T05:00:00.000Z", "2026-07-31");
+    insertRow.run("manual-august", "การไฟฟ้า", "ค่าไฟ", 1_500_000, "HF", "electricity-hopinn47", "2026-08-12T05:00:00.000Z", "2026-08-12");
+    insertRow.run("manual-september", "บุญดี", "ของใช้แม่บ้าน", 250_000, "HF Ville", "housekeeping", "2026-09-16T05:00:00.000Z", "2026-09-16");
+    insertRow.run("payroll-20260804061357-1tu5fp", "เงินเดือนพนักงาน", "เงินเดือน กรกฎาคม 2569", 17_506_274, "รวมทุกโรงแรม", "salary", "2026-08-04T06:14:00.000Z", "2026-08-04");
+    insertRow.run("payroll-20260904081017-banhb5", "เงินเดือนพนักงาน", "เงินเดือน สิงหาคม 2569", 18_159_136, "รวมทุกโรงแรม", "salary", "2026-09-04T08:11:00.000Z", "2026-09-04");
+    insertRow.run("reimbursement-r1", "ผู้สำรองจ่าย", "แมคโคร", 29_600, "HF", "supplies", "2026-09-18T02:30:00.000Z", "2026-09-18");
+    db.query("INSERT INTO _payroll_runs (run_id, row_id, payload) VALUES (?, ?, ?)").run(
+      "20260804061357-1tu5fp",
+      "payroll-20260804061357-1tu5fp",
+      JSON.stringify({ id: "20260804061357-1tu5fp", period: "2026-07", submittedAt: "2026-08-04T06:13:57.992Z", effectiveDate: "2026-08-05", amountSatang: 17_506_274, employeeCount: 15, status: "PAID", paidDate: "2026-08-05" }),
+    );
+    db.query("INSERT INTO _payroll_runs (run_id, row_id, payload) VALUES (?, ?, ?)").run(
+      "20260904081017-banhb5",
+      "payroll-20260904081017-banhb5",
+      JSON.stringify({ id: "20260904081017-banhb5", period: "2026-08", submittedAt: "2026-09-04T08:10:17.311Z", effectiveDate: "2026-09-05", amountSatang: 18_159_136, employeeCount: 15, status: "PAID", paidDate: "2026-09-05" }),
+    );
+    db.query("INSERT INTO _reimbursement_receipts (receipt_id, row_id, payload) VALUES (?, ?, ?)").run(
+      "r1",
+      "reimbursement-r1",
+      JSON.stringify({ id: "r1", bundleId: "b1", requestName: "ซื้อของแมคโคร", status: "PAID", submittedAt: "2026-09-18T02:28:06.995Z", paidAt: "2026-09-18T14:14:51.088Z", paymentMatchesReceipts: true, merchant: "แมคโคร", claimant: "ผู้สำรองจ่าย", category: "อุปกรณ์แม่บ้าน", property: "hf-hotel", amountSatang: 29_600, date: "2026-09-15", note: "", photoCount: 1 }),
+    );
+    db.close();
+  }
+
+  test("the pre-decision volume really has no bill_date column before the first open", () => {
+    seedPreDecisionVolume();
+    const before = new Database(process.env.AP_DB_PATH!, { readonly: true });
+    const columns = before.query("PRAGMA table_info(ap_row)").all() as { name: string }[];
+    before.close();
+    expect(columns.some((c) => c.name === "bill_date")).toBe(false);
+  });
+
+  test("every row gets a bill_date — the column is NOT NULL and no row is left blank", () => {
+    seedPreDecisionVolume();
+    listApRows({ mode: "all" }); // forces the lazy open, which runs the migration
+    const db = new Database(process.env.AP_DB_PATH!, { readonly: true });
+    const columns = db.query("PRAGMA table_info(ap_row)").all() as { name: string; notnull: number }[];
+    const blank = db.query("SELECT COUNT(*) AS n FROM ap_row WHERE bill_date IS NULL OR bill_date = ''").get() as { n: number };
+    const total = db.query("SELECT COUNT(*) AS n FROM ap_row").get() as { n: number };
+    db.close();
+    expect(columns.find((c) => c.name === "bill_date")?.notnull).toBe(1);
+    expect(total.n).toBe(6);
+    expect(blank.n).toBe(0);
+  });
+
+  test("the two payroll batches land on 2026-07-31 and 2026-08-31 — the last day of the period they PAID, not the month they were filed in", () => {
+    seedPreDecisionVolume();
+    const july = getApRow("payroll-20260804061357-1tu5fp")!;
+    const august = getApRow("payroll-20260904081017-banhb5")!;
+    expect(july.billDate).toBe("2026-07-31");
+    expect(july.filedDate).toBe("2026-08-04");
+    expect(july.grossSatang).toBe(17_506_274);
+    expect(august.billDate).toBe("2026-08-31");
+    expect(august.filedDate).toBe("2026-09-04");
+    expect(august.grossSatang).toBe(18_159_136);
+  });
+
+  test("the reimbursement row lands on its purchase date (2026-09-15), not the day the claim was filed (2026-09-18)", () => {
+    seedPreDecisionVolume();
+    const row = getApRow("reimbursement-r1")!;
+    expect(row.billDate).toBe("2026-09-15");
+    expect(row.filedDate).toBe("2026-09-18");
+  });
+
+  test("every other existing row keeps its filed month — nothing moves until an accountant edits it", () => {
+    seedPreDecisionVolume();
+    for (const id of ["manual-july", "manual-august", "manual-september"]) {
+      const row = getApRow(id)!;
+      expect(row.billDate).toBe(row.filedDate);
+    }
+  });
+
+  test("payments and photos survive the table rebuild (the foreign keys still resolve after the rename)", async () => {
+    seedPreDecisionVolume();
+    addApPayment("manual-august", {
+      date: "2026-08-20",
+      amountSatang: 500_000,
+      paymentMethod: "bank",
+      kind: "installment",
+      installmentNumber: 1,
+      payerEmail: "clerk@thehfhotel.org",
+      transactionId: "tx-1",
+    });
+    await createApPhoto("manual-august", { ext: "jpg", size: 10, createdBy: "clerk@thehfhotel.org", data: new Blob(["x"]) });
+    const row = getApRow("manual-august")!;
+    expect(row.payments).toHaveLength(1);
+    expect(row.photos).toHaveLength(1);
+    expect(row.outstandingSatang).toBe(1_000_000);
+  });
+
+  test("re-opening an already-migrated volume is a no-op: bill dates set by an accountant are never re-derived", () => {
+    seedPreDecisionVolume();
+    updateApRow("manual-september", baseRowInput({ creditor: "บุญดี", item: "ของใช้แม่บ้าน", amountSatang: 250_000, billDate: "2026-08-31" }));
+    _resetForTests();
+    expect(getApRow("manual-september")!.billDate).toBe("2026-08-31");
+    expect(getApRow("payroll-20260804061357-1tu5fp")!.billDate).toBe("2026-07-31");
+  });
+
+  test("a sync journal that was never created (a volume with no payroll/reimbursement history) still migrates", () => {
+    _resetForTests();
+    const db = new Database(process.env.AP_DB_PATH!, { create: true });
+    db.exec(`
+      CREATE TABLE ap_row (
+        id TEXT PRIMARY KEY, creditor TEXT NOT NULL, item TEXT NOT NULL, amount_satang INTEGER NOT NULL,
+        vat_satang INTEGER, wht_satang INTEGER, discount_satang INTEGER NOT NULL DEFAULT 0, due_date TEXT,
+        entity TEXT NOT NULL DEFAULT '', category_code TEXT, note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, created_by TEXT NOT NULL, filed_date TEXT NOT NULL
+      );
+    `);
+    db.query(
+      `INSERT INTO ap_row (id, creditor, item, amount_satang, entity, category_code, created_at, created_by, filed_date)
+       VALUES ('solo', 'Booking.com', 'ค่าคอมมิชชั่น', 1000, 'HF', 'commission-booking', '2026-07-31T05:00:00.000Z', 'clerk@thehfhotel.org', '2026-07-31')`,
+    ).run();
+    db.close();
+    expect(getApRow("solo")!.billDate).toBe("2026-07-31");
   });
 });

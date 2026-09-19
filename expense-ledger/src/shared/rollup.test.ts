@@ -1,16 +1,22 @@
 // computeExpenseLedgerRollup, tested against real data dumped from
 // production (src/shared/rollup.fixtures/ — see that directory's own
 // note). Known real totals (docs/overall-cost-sources.md, hf-data):
-// 2026-07 has 63 transactions / ฿348,667.65 and 16 AP rows / ฿126,667
-// gross (rounded; the exact satang figure is asserted below).
+// 2026-07 has 63 transactions / ฿348,667.65 entered.
 //
 // ap_rows.json was REFRESHED 2026-09-17 from a fresh copy of prod's ap.db
-// (CARD CL-2) — it now carries 52 AP rows (was 43) across 2026-07/08/09,
-// including the two real payroll-synced rows (see the filedBySource
-// describe block below, which records the exact per-source satang for
-// 2026-08 and 2026-09 in its test names). Prod had zero reimbursement AP
-// rows as of the refresh, so filedBySource's "reimbursement" bucket is
+// (CARD CL-2) — it carries 52 AP rows (was 43) across 2026-07/08/09,
+// including the two real payroll-synced rows. Prod had zero reimbursement
+// AP rows as of the refresh, so filedBySource's "reimbursement" bucket is
 // exercised only by the hand-built fixture further down, not by real data.
+//
+// วันที่ลงบิล (2026-09-19, ADR-0001): every fixture row gained a `billDate`,
+// backfilled by the SAME rules src/server/apStore.ts's migrateBillDate
+// applies to the real volume — a payroll row takes the last day of its
+// batch's period, every other row keeps its filing date. The two payroll
+// batches are therefore the only rows that MOVE งวด (2026-08 -> 2026-07 and
+// 2026-09 -> 2026-08), and the per-งวด totals every test below asserts were
+// re-verified against a fresh prod ap.db copy on 2026-09-19: 2026-07 and
+// 2026-08 match prod's own migrated figures to the satang.
 
 import { describe, expect, test } from "bun:test";
 import { computeGross, computeOutstanding } from "./apTypes.ts";
@@ -48,6 +54,9 @@ interface RawFixtureApRow {
   entity: string;
   categoryCode: string | null;
   filedDate: string;
+  /** วันที่ลงบิล — the row's งวด (ADR-0001). Backfilled into this dump by
+   * migrateBillDate's rules; see the file header. */
+  billDate: string;
   paidSatang: number;
   /** Present only on a real payroll-synced/reimbursement-synced row
    * (payrollRowView/reimbursementRowView's markers) — shape irrelevant,
@@ -89,7 +98,7 @@ function toRollupApRow(raw: RawFixtureApRow): RollupApRowInput {
     id: raw.id,
     entity: raw.entity,
     categoryCode,
-    filedDate: raw.filedDate,
+    billDate: raw.billDate,
     grossSatang: gross,
     outstandingSatang: outstanding,
     ...(raw.payroll !== undefined ? { payroll: raw.payroll } : {}),
@@ -117,9 +126,15 @@ describe("computeExpenseLedgerRollup — real fixtures (2026-07)", () => {
     expect(rollup.enteredTotalSatang).toBe(34_866_765);
   });
 
-  test("filed has exactly 16 AP rows", () => {
+  test("งวด 2026-07 holds exactly 17 bills totalling ฿301,729.42 (16 filed that month + July's payroll batch, which was FILED in August)", () => {
     const rowCount = Object.values(rollup.filed).reduce((sum, bucket) => sum + (bucket?.count ?? 0), 0);
-    expect(rowCount).toBe(16);
+    expect(rowCount).toBe(17);
+    expect(rollup.filedGrossSatang).toBe(30_172_942);
+    expect(rollup.filedOutstandingSatang).toBe(11_213_668);
+  });
+
+  test("basis is always the explicit string 'bill-date' — never absent, never inferred", () => {
+    expect(rollup.basis).toBe("bill-date");
   });
 
   test("month/generatedAt are threaded straight through", () => {
@@ -136,7 +151,7 @@ describe("computeExpenseLedgerRollup — real fixtures (2026-07)", () => {
 describe("computeExpenseLedgerRollup — the three totals foot, every month present in the fixtures", () => {
   const months = new Set<string>([
     ...fixtureTransactions.map((t) => t.date.slice(0, 7)),
-    ...fixtureApRows.map((r) => r.filedDate.slice(0, 7)),
+    ...fixtureApRows.map((r) => r.billDate.slice(0, 7)),
   ]);
 
   for (const month of months) {
@@ -217,7 +232,7 @@ describe("computeExpenseLedgerRollup — AP-managed transactions are excluded fr
 describe("computeExpenseLedgerRollup — uncategorized filed rows", () => {
   test("a null categoryCode files under the literal key 'uncategorized'", () => {
     const rows: RollupApRowInput[] = [
-      { id: "row-1", entity: "HF", categoryCode: null, filedDate: "2026-08-01", grossSatang: 5_000, outstandingSatang: 5_000 },
+      { id: "row-1", entity: "HF", categoryCode: null, billDate: "2026-08-01", grossSatang: 5_000, outstandingSatang: 5_000 },
     ];
     const rollup = computeExpenseLedgerRollup("2026-08", [], new Set(), rows, "2026-09-15T00:00:00.000Z");
     expect(rollup.filed.uncategorized).toEqual({ count: 1, grossSatang: 5_000, outstandingSatang: 5_000 });
@@ -229,7 +244,7 @@ describe("computeExpenseLedgerRollup — uncategorized filed rows", () => {
         id: "row-1",
         entity: "HF",
         categoryCode: "other",
-        filedDate: "2026-08-01",
+        billDate: "2026-08-01",
         grossSatang: 5_000,
         outstandingSatang: -1_000, // overpaid/over-discounted
       },
@@ -251,7 +266,7 @@ describe("computeExpenseLedgerRollup — recurringFiled", () => {
           id: "row-1",
           entity: "HF",
           categoryCode: "social-security",
-          filedDate: "2026-08-01",
+          billDate: "2026-08-01",
           grossSatang: 1_000,
           outstandingSatang: 1_000,
         },
@@ -303,59 +318,97 @@ describe("apRowSource", () => {
   });
 });
 
-describe("computeExpenseLedgerRollup — filedBySource against the real (refreshed 2026-09-17) fixtures", () => {
-  // 2026-07 predates the payroll sync going live (first batch filed
-  // 2026-08-04) — every one of its 16 rows is manual.
-  test("2026-07: no synced rows at all -> filedBySource carries only 'manual' (16 rows, ฿126,666.68)", () => {
-    const rollup = computeExpenseLedgerRollup(
-      "2026-07",
-      allTransactions,
-      apManagedIdsFromFixture(),
-      allApRows,
-      "2026-09-15T00:00:00.000Z",
-    );
+describe("computeExpenseLedgerRollup — per-งวด totals by source, real fixtures on the วันที่ลงบิล basis (ADR-0001)", () => {
+  const forMonth = (month: string) =>
+    computeExpenseLedgerRollup(month, allTransactions, apManagedIdsFromFixture(), allApRows, "2026-09-15T00:00:00.000Z");
+
+  // THE CHANGE, in one test: the July payroll batch was FILED 2026-08-04
+  // and used to count as August cost. Its งวด is July, so it now lands
+  // here — with the 16 bills actually filed in July, which were already
+  // July's.
+  test("งวด 2026-07 = ฿301,729.42 over 17 bills: 16 manual (฿126,666.68) + the July payroll batch ฿175,062.74 (filed 2026-08-04)", () => {
+    const rollup = forMonth("2026-07");
     expect(rollup.filedBySource).toEqual({
       manual: { count: 16, grossSatang: 12_666_668, outstandingSatang: 11_213_668 },
-    });
-  });
-
-  // เงินเดือน กรกฎาคม 2569, filed 2026-08-04, the July payroll batch —
-  // src/server/payroll-sync.ts's payrollRowView marks it, the other 14
-  // rows that month (including a manual salary-category row is NOT among
-  // them this month) are plain AP filings.
-  test("2026-08: 1 payroll row (฿175,062.74) + 14 manual rows (฿108,812.43), zero reimbursement key", () => {
-    const rollup = computeExpenseLedgerRollup(
-      "2026-08",
-      allTransactions,
-      apManagedIdsFromFixture(),
-      allApRows,
-      "2026-09-15T00:00:00.000Z",
-    );
-    expect(rollup.filedBySource).toEqual({
       payroll: { count: 1, grossSatang: 17_506_274, outstandingSatang: 0 },
-      manual: { count: 14, grossSatang: 10_881_243, outstandingSatang: 7_136_190 },
     });
+    expect(rollup.filedGrossSatang).toBe(30_172_942);
     expect(rollup.filedBySource?.reimbursement).toBeUndefined();
   });
 
-  // เงินเดือน สิงหาคม 2569, filed 2026-09-04, PLUS a second, manually-filed
-  // 750,000-satang salary row (2026-09-16) that is NOT payroll-synced (no
-  // _payroll_runs link) — together they're the 18,909,136 satang "2026-09
-  // salary, 2 rows" figure from prod, but split across sources: only the
-  // synced batch counts as "payroll", the manual top-up stays "manual".
-  test("2026-09: 1 payroll row (฿181,591.36) + 20 manual rows (฿246,873.79), zero reimbursement key", () => {
-    const rollup = computeExpenseLedgerRollup(
-      "2026-09",
-      allTransactions,
-      apManagedIdsFromFixture(),
-      allApRows,
-      "2026-09-15T00:00:00.000Z",
-    );
+  // Symmetrically: August loses the July batch it used to carry and gains
+  // the August one (filed 2026-09-04), which is what "cost lines up with
+  // revenue month for month" actually means here.
+  test("งวด 2026-08 = ฿290,403.79 over 15 bills: 14 manual (฿108,812.43) + the August payroll batch ฿181,591.36 (filed 2026-09-04)", () => {
+    const rollup = forMonth("2026-08");
     expect(rollup.filedBySource).toEqual({
+      manual: { count: 14, grossSatang: 10_881_243, outstandingSatang: 7_136_190 },
       payroll: { count: 1, grossSatang: 18_159_136, outstandingSatang: 0 },
+    });
+    expect(rollup.filedGrossSatang).toBe(29_040_379);
+    expect(rollup.filedBySource?.reimbursement).toBeUndefined();
+  });
+
+  // September keeps every bill filed in September EXCEPT the payroll batch
+  // that moved to August — including the manually-filed 750,000-satang
+  // salary row (2026-09-16), which is NOT payroll-synced (no _payroll_runs
+  // link) and therefore stays "manual" in its own filing month.
+  test("งวด 2026-09 = ฿246,873.79 over 20 bills, all manual — the August payroll batch filed on 2026-09-04 has left for งวด 2026-08", () => {
+    const rollup = forMonth("2026-09");
+    expect(rollup.filedBySource).toEqual({
       manual: { count: 20, grossSatang: 24_687_379, outstandingSatang: 11_669_169 },
     });
-    expect(rollup.filedBySource?.reimbursement).toBeUndefined();
+    expect(rollup.filedGrossSatang).toBe(24_687_379);
+    expect(rollup.filedBySource?.payroll).toBeUndefined();
+  });
+
+  test("no bill is lost or double-counted by the move: the three งวด still sum to the fixture's whole gross", () => {
+    const perMonth = ["2026-07", "2026-08", "2026-09"].map((m) => forMonth(m).filedGrossSatang);
+    const everyRowGross = allApRows.reduce((sum, r) => sum + r.grossSatang, 0);
+    expect(perMonth.reduce((a, b) => a + b, 0)).toBe(everyRowGross);
+    expect(everyRowGross).toBe(30_172_942 + 29_040_379 + 24_687_379);
+  });
+
+  test("every month's payload carries basis: 'bill-date'", () => {
+    for (const month of ["2026-07", "2026-08", "2026-09"]) {
+      expect(forMonth(month).basis).toBe("bill-date");
+    }
+  });
+});
+
+describe("computeExpenseLedgerRollup — a bill's งวด is its วันที่ลงบิล, never its filing month", () => {
+  // PEA's own case: the August electricity bill arrives and is filed in
+  // September, and the accountant sets วันที่ลงบิล to the day the reading
+  // period ends (2026-08-31 — "a bill spanning months belongs to the month
+  // its span ENDS in").
+  const peaBill: RollupApRowInput = {
+    id: "pea-august",
+    entity: "HF",
+    categoryCode: "electricity-hopinn47",
+    billDate: "2026-08-31",
+    grossSatang: 9_000_000,
+    outstandingSatang: 9_000_000,
+  };
+
+  test("it counts in the งวด its วันที่ลงบิล falls in", () => {
+    const rollup = computeExpenseLedgerRollup("2026-08", [], new Set(), [peaBill], "2026-09-20T00:00:00.000Z");
+    expect(rollup.filedGrossSatang).toBe(9_000_000);
+    expect(rollup.filed["electricity-hopinn47"]).toEqual({ count: 1, grossSatang: 9_000_000, outstandingSatang: 9_000_000 });
+  });
+
+  test("and contributes nothing to the month it was filed in", () => {
+    const rollup = computeExpenseLedgerRollup("2026-09", [], new Set(), [peaBill], "2026-09-20T00:00:00.000Z");
+    expect(rollup.filed).toEqual({});
+    expect(rollup.filedGrossSatang).toBe(0);
+  });
+
+  test("paying it later never moves it either — ค้างจ่าย is a payment state, not a second cost", () => {
+    const paid: RollupApRowInput = { ...peaBill, outstandingSatang: 0 };
+    const september = computeExpenseLedgerRollup("2026-09", [], new Set(), [paid], "2026-10-05T00:00:00.000Z");
+    const august = computeExpenseLedgerRollup("2026-08", [], new Set(), [paid], "2026-10-05T00:00:00.000Z");
+    expect(september.filedGrossSatang).toBe(0);
+    expect(august.filedGrossSatang).toBe(9_000_000);
+    expect(august.filedOutstandingSatang).toBe(0);
   });
 });
 
@@ -370,7 +423,7 @@ describe("computeExpenseLedgerRollup — filedBySource with a synthetic payroll 
       id: "payroll-row",
       entity: "รวมทุกโรงแรม",
       categoryCode: "salary",
-      filedDate: "2026-10-04",
+      billDate: "2026-10-04",
       grossSatang: 17_000_000,
       outstandingSatang: 0,
       payroll: { runId: "run-1", period: "2026-09", effectiveDate: "2026-10-05", employeeCount: 15, status: "PAID", error: false, paidDate: "2026-10-05" },
@@ -379,7 +432,7 @@ describe("computeExpenseLedgerRollup — filedBySource with a synthetic payroll 
       id: "reimbursement-row-1",
       entity: "HF",
       categoryCode: "other",
-      filedDate: "2026-10-10",
+      billDate: "2026-10-10",
       grossSatang: 1_500,
       outstandingSatang: 1_500,
       reimbursement: { receiptId: "r1", bundleId: "b1", requestName: "แม่บ้าน A", purchaseDate: "2026-10-09", note: "", status: "PENDING", error: false },
@@ -388,7 +441,7 @@ describe("computeExpenseLedgerRollup — filedBySource with a synthetic payroll 
       id: "reimbursement-row-2",
       entity: "HF Ville",
       categoryCode: "other",
-      filedDate: "2026-10-11",
+      billDate: "2026-10-11",
       grossSatang: 2_500,
       outstandingSatang: 0,
       reimbursement: { receiptId: "r2", bundleId: "b2", requestName: "แม่บ้าน B", purchaseDate: "2026-10-09", note: "", status: "PAID", error: false },
@@ -397,7 +450,7 @@ describe("computeExpenseLedgerRollup — filedBySource with a synthetic payroll 
       id: "manual-row-1",
       entity: "HF",
       categoryCode: "electricity-hopinn47",
-      filedDate: "2026-10-12",
+      billDate: "2026-10-12",
       grossSatang: 500_000,
       outstandingSatang: 500_000,
     },
@@ -405,7 +458,7 @@ describe("computeExpenseLedgerRollup — filedBySource with a synthetic payroll 
       id: "manual-row-2",
       entity: "HF Ville",
       categoryCode: "water-utility-saichon",
-      filedDate: "2026-10-13",
+      billDate: "2026-10-13",
       grossSatang: 8_000,
       outstandingSatang: 0,
     },
@@ -437,8 +490,8 @@ describe("computeExpenseLedgerRollup — filedBySource with a synthetic payroll 
 describe("computeExpenseLedgerRollup — filedBySource with no synced rows at all", () => {
   test("a rollup built from AP rows that are ALL manual carries only the 'manual' key", () => {
     const rows: RollupApRowInput[] = [
-      { id: "row-1", entity: "HF", categoryCode: "other", filedDate: "2026-11-01", grossSatang: 1_000, outstandingSatang: 1_000 },
-      { id: "row-2", entity: "HF Ville", categoryCode: "other", filedDate: "2026-11-02", grossSatang: 2_000, outstandingSatang: 0 },
+      { id: "row-1", entity: "HF", categoryCode: "other", billDate: "2026-11-01", grossSatang: 1_000, outstandingSatang: 1_000 },
+      { id: "row-2", entity: "HF Ville", categoryCode: "other", billDate: "2026-11-02", grossSatang: 2_000, outstandingSatang: 0 },
     ];
     const rollup = computeExpenseLedgerRollup("2026-11", [], new Set(), rows, "2026-11-05T00:00:00.000Z");
     expect(rollup.filedBySource).toEqual({

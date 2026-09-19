@@ -93,9 +93,9 @@ export function enqueueAnalyticsPush(month: string): void {
  * transactions plus which of them are AP-managed
  * (getMonthExpenseTransactionsWithApManaged — ONE extra engine call for the
  * whole month, not one per transaction), and every AP register row
- * (computeExpenseLedgerRollup itself scopes the AP rows to this month's
- * filed_date — see src/shared/rollup.ts's file header for why it isn't
- * pre-filtered here). `generatedAt` is stamped at push time here, not
+ * (computeExpenseLedgerRollup itself scopes the AP rows to this month by
+ * their วันที่ลงบิล / `bill_date` — see src/shared/rollup.ts's file header
+ * for why it isn't pre-filtered here). `generatedAt` is stamped at push time here, not
  * inside the pure rollup.ts function.
  *
  * `.map(reimbursementRowView).map(payrollRowView)` decorates each row with

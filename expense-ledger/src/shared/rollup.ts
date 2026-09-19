@@ -9,11 +9,12 @@
 // MONEY IS INTEGER SATANG ON THIS PAYLOAD, same as everywhere else in this
 // app (1 baht = 100 satang) — never floats.
 //
-// `month` is a Bangkok calendar "YYYY-MM" string. `entered` is scoped by a
-// transaction's own (Bangkok) date; `filed`/`filedByEntity` are scoped by
-// an AP row's `filedDate` (the Bangkok calendar day it was FILED into the
-// register — src/server/apStore.ts's `filed_date` column, exposed on
-// `ApRow.filedDate`), never its `dueDate`. Both `transactions` and
+// `month` is a Bangkok calendar "YYYY-MM" string — the งวด. `entered` is
+// scoped by a transaction's own (Bangkok) date; `filed`/`filedByEntity`/
+// `filedBySource` are scoped by an AP row's `billDate` (วันที่ลงบิล — the
+// date the accountant assigned the bill to, src/server/apStore.ts's
+// `bill_date` column, exposed on `ApRow.billDate`), never its `filedDate`
+// (วันที่ยื่นบิล, record metadata) and never its `dueDate`. Both `transactions` and
 // `apRows` may carry rows OUTSIDE `month` (the caller is not required to
 // pre-filter — see src/server/analytics-push.ts, which passes a whole
 // month's engine transactions and the AP register's entire row set) —
@@ -22,10 +23,16 @@
 // with no test-side date filtering.
 //
 // SOURCE OF TRUTH (owner decision, 2026-09-15): expense.thehfhotel.org is
-// the source of truth for every company bill. A bill counts once, when it
-// is FILED into the AP register (`filed`), regardless of when or whether
-// it's later paid (`filedOutstandingSatang` tracks what's still owed, but
-// does not gate whether the bill counts this month). `entered` is every
+// the source of truth for every company bill. A bill counts once, in the
+// งวด its วันที่ลงบิล falls in (`filed`), regardless of when it was entered
+// into the register and of when or whether it's later paid
+// (`filedOutstandingSatang` tracks what's still owed, but does not gate
+// whether the bill counts this month). RECOGNITION CHANGED 2026-09-19
+// (owner; docs/adr/0001-cost-recognised-in-its-period.md): these buckets
+// used to be keyed by `filedDate` (the month the bill was filed), which put
+// July's payroll in August and August's electricity in September. The
+// `basis` field below is how a reader tells the two meanings apart.
+// `entered` is every
 // OTHER expense transaction — one entered directly, never through the AP
 // register — identified by NOT carrying an `ap:<rowId>` tag (see
 // src/server/engine.ts's isApManagedTransaction). The two are disjoint by
@@ -46,13 +53,30 @@ import {
 export interface ExpenseLedgerRollup {
   month: string;
   generatedAt: string;
+  /** LOCKED CONTRACT EXTENSION (2026-09-19, additive): which meaning
+   * `month` and the `filed*` buckets carry — THREE states, never a guess:
+   *
+   * - `"bill-date"`: `month` is the งวด. `filed` = AP rows whose วันที่ลงบิล
+   *   falls in `month`; `entered` = engine transactions whose transaction
+   *   date falls in `month` (unchanged — that date already IS the document
+   *   date).
+   * - `"filed-month"`: the OLD meaning — AP rows keyed by `filedDate`, the
+   *   month the bill was entered into the register.
+   * - ABSENT: a payload from a pusher that predates this field. A reader
+   *   MUST treat an absent `basis` as `"filed-month"` and SAY SO rather
+   *   than silently presenting it as a งวด.
+   *
+   * Optional on the type only so hf-analytics' receiver tolerates that
+   * older pusher; computeExpenseLedgerRollup below ALWAYS sets
+   * `"bill-date"`. */
+  basis?: "filed-month" | "bill-date";
   /** Ledger transactions dated in `month` that are NOT AP-managed (no
    * `ap:` tag on the engine transaction) — expenses entered directly.
    * Keyed by ExpenseCategoryCode. */
   entered: Partial<Record<string, { count: number; amountSatang: number }>>;
-  /** AP register rows with filed_date in `month` — a bill counts ONCE,
-   * when it is FILED, whether or not it has been paid. Keyed by
-   * ExpenseCategoryCode, plus "uncategorized". */
+  /** AP register rows whose วันที่ลงบิล (`billDate`) falls in `month` — a
+   * bill counts ONCE, in its own งวด, whether or not it has been paid.
+   * Keyed by ExpenseCategoryCode, plus "uncategorized". */
   filed: Partial<Record<string, { count: number; grossSatang: number; outstandingSatang: number }>>;
   /** The same AP rows by normalised entity. */
   filedByEntity: Partial<Record<"hf" | "hfville" | "unknown", { count: number; grossSatang: number; outstandingSatang: number }>>;
@@ -104,9 +128,10 @@ export interface RollupApRowInput {
   id: string;
   entity: string;
   categoryCode: ExpenseCategoryCode | null;
-  /** Bangkok calendar "YYYY-MM-DD" — the row's `filed_date`, never its
-   * `dueDate`. */
-  filedDate: string;
+  /** Bangkok calendar "YYYY-MM-DD" — the row's `bill_date` (วันที่ลงบิล,
+   * `ApRow.billDate`), never its `filedDate` (วันที่ยื่นบิล) and never its
+   * `dueDate`. Its month is the งวด this row's cost is recognised in. */
+  billDate: string;
   grossSatang: number;
   outstandingSatang: number;
   /** Presence (not shape) is what matters here — see apRowSource(). Typed
@@ -152,9 +177,9 @@ export function normalizeApEntity(entity: string): NormalizedApEntity {
 }
 
 /**
- * Builds the rollup for one Bangkok calendar month. `transactions` and
- * `apRows` need not be pre-scoped to `month` (see the file header); this
- * scopes them itself by `date`/`filedDate`. `apManagedIds` is the set of
+ * Builds the rollup for one Bangkok calendar month (the งวด).
+ * `transactions` and `apRows` need not be pre-scoped to `month` (see the
+ * file header); this scopes them itself by `date`/`billDate`. `apManagedIds` is the set of
  * transaction ids (from among `transactions`) that carry an `ap:<rowId>`
  * tag — src/server/analytics-push.ts computes this from the engine's own
  * tag list ONCE per month rather than one isApManagedTransaction() call
@@ -188,7 +213,7 @@ export function computeExpenseLedgerRollup(
   let filedGrossSatang = 0;
   let filedOutstandingSatang = 0;
   for (const row of apRows) {
-    if (row.filedDate.slice(0, 7) !== month) continue;
+    if (row.billDate.slice(0, 7) !== month) continue;
     const outstanding = Math.max(0, row.outstandingSatang);
 
     const categoryKey = row.categoryCode ?? "uncategorized";
@@ -223,6 +248,9 @@ export function computeExpenseLedgerRollup(
   return {
     month,
     generatedAt,
+    // Always explicit: this function has only ever one meaning, and a
+    // reader must never have to infer it (see `basis` on the interface).
+    basis: "bill-date",
     entered,
     filed,
     filedByEntity,

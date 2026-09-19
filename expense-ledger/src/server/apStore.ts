@@ -24,7 +24,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ExpenseCategoryCode } from "../shared/categories.ts";
-import { todayBangkok } from "@shared/date.ts";
+import { isValidIso, isValidMonth, todayBangkok } from "@shared/date.ts";
 import {
   apPhotoExtForFilename,
   apPhotoUrl,
@@ -32,6 +32,7 @@ import {
   computeOutstanding,
   deriveSettledAt,
   deriveStatus,
+  lastDayOfMonth,
   normalizeApEntityForSave,
   type ApCreditorHint,
   type ApListFilter,
@@ -115,6 +116,125 @@ function migrateCategoryCodeNullable(db: Database): void {
   }
 }
 
+/** วันที่ลงบิล migration (owner decision, 2026-09-19 — ADR-0001): a volume
+ * created before the decision has no `bill_date` column at all, and its
+ * rows' costs were being recognised in whatever month the accountant
+ * happened to file them. This adds the column NOT NULL and backfills every
+ * existing row by the owner's own rules:
+ *
+ *   payroll-sourced row       -> the LAST DAY of the batch's `period`
+ *                                (`_payroll_runs.payload.period`, the only
+ *                                place the source document's own period
+ *                                lives) — July's batch becomes July ต้นทุน.
+ *   reimbursement-sourced row -> the receipt's purchase date
+ *                                (`_reimbursement_receipts.payload.date`).
+ *   every other row           -> its own `filed_date`, so NOTHING moves
+ *                                month until an accountant edits it.
+ *
+ * Same shape as migrateCategoryCodeNullable above — a PRAGMA table_info
+ * check makes it a no-op once migrated (and on every fresh database, whose
+ * CREATE TABLE already declares the column) — and the same table-rebuild
+ * dance, because sqlite cannot ADD a NOT NULL column without inventing a
+ * default for it, and a defaulted '' bill date is exactly the "nobody chose
+ * this งวด" state this decision exists to remove. The rebuild and the
+ * source-derived backfill run in ONE transaction, so a payroll row can
+ * never be left carrying the filing month the rules say it should not have.
+ *
+ * ORDERING: this runs AFTER migrateCategoryCodeNullable, whose own rebuild
+ * predates this column and would drop it — safe only because that migration
+ * returns early on every volume that could have bill_date (its guard trips
+ * only on a pre-2026-07 volume, which necessarily predates this one too).
+ * Never reorder these two calls. */
+function migrateBillDate(db: Database): void {
+  const columns = db.query("PRAGMA table_info(ap_row)").all() as { name: string }[];
+  if (columns.some((c) => c.name === "bill_date")) return;
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    const migrate = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE ap_row__migrating_bill_date (
+          id TEXT PRIMARY KEY,
+          creditor TEXT NOT NULL,
+          item TEXT NOT NULL,
+          amount_satang INTEGER NOT NULL,
+          vat_satang INTEGER,
+          wht_satang INTEGER,
+          discount_satang INTEGER NOT NULL DEFAULT 0,
+          due_date TEXT,
+          entity TEXT NOT NULL DEFAULT '',
+          category_code TEXT,
+          note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          created_by TEXT NOT NULL,
+          filed_date TEXT NOT NULL,
+          bill_date TEXT NOT NULL
+        );
+      `);
+      // The default for EVERY row first (nothing moves month), then the two
+      // source-derived overrides below.
+      db.exec(`
+        INSERT INTO ap_row__migrating_bill_date
+          (id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by, filed_date, bill_date)
+        SELECT id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by, filed_date, filed_date
+        FROM ap_row;
+      `);
+      db.exec("DROP TABLE ap_row;");
+      db.exec("ALTER TABLE ap_row__migrating_bill_date RENAME TO ap_row;");
+      backfillSourceBillDates(db);
+    });
+    migrate();
+  } finally {
+    // Same L3 discipline as migrateCategoryCodeNullable: always restore,
+    // whether the migration above succeeded or threw partway through.
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
+/** The payroll/reimbursement half of migrateBillDate's backfill, reading the
+ * sync journals' own stored source payloads (`_payroll_runs`,
+ * `_reimbursement_receipts` — written by src/server/payroll-sync.ts and
+ * src/server/reimbursement-sync.ts, which create those tables lazily, hence
+ * the sqlite_master existence check: a volume that has never run either sync
+ * simply has no rows to correct). A payload that is unparseable, or whose
+ * period/date is not a real calendar value, leaves that row on its
+ * filed_date default rather than guessing a งวด. */
+function backfillSourceBillDates(db: Database): void {
+  const hasTable = (name: string): boolean =>
+    db.query("SELECT 1 AS n FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== null;
+  const setBillDate = db.query("UPDATE ap_row SET bill_date = ? WHERE id = ?");
+
+  if (hasTable("_payroll_runs")) {
+    const links = db.query("SELECT row_id, payload FROM _payroll_runs").all() as { row_id: string; payload: string }[];
+    for (const link of links) {
+      const period = parseStringPayloadField(link.payload, "period");
+      if (period === null || !isValidMonth(period)) continue;
+      setBillDate.run(lastDayOfMonth(period), link.row_id);
+    }
+  }
+
+  if (hasTable("_reimbursement_receipts")) {
+    const links = db.query("SELECT row_id, payload FROM _reimbursement_receipts").all() as {
+      row_id: string;
+      payload: string;
+    }[];
+    for (const link of links) {
+      const purchaseDate = parseStringPayloadField(link.payload, "date");
+      if (purchaseDate === null || !isValidIso(purchaseDate)) continue;
+      setBillDate.run(purchaseDate, link.row_id);
+    }
+  }
+}
+
+function parseStringPayloadField(payload: string, field: string): string | null {
+  try {
+    const value = (JSON.parse(payload) as Record<string, unknown>)[field];
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function openDb(path: string): Database {
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -162,10 +282,26 @@ function openDb(path: string): Database {
         -- of the previous month, so createdAt.slice(0,7) named the wrong
         -- month). The register held zero rows when this was added, so this is
         -- a schema definition, not a migration.
-        filed_date TEXT NOT NULL
+        --
+        -- RENAMED IN THE UI (2026-09-19) to วันที่ยื่นบิล: this is RECORD
+        -- METADATA — when the bill was entered — never the date its cost is
+        -- recognised on. That is bill_date below (ADR-0001).
+        filed_date TEXT NOT NULL,
+        -- วันที่ลงบิล (owner decision, 2026-09-19 — see CONTEXT.md and
+        -- docs/adr/0001-cost-recognised-in-its-period.md): the Bangkok
+        -- calendar date the accountant assigns this bill to. ITS MONTH IS
+        -- THE งวด the cost is recognised in, which is what the analytics
+        -- rollup (src/shared/rollup.ts) sums on. Defaults to today at
+        -- create time and is editable from the drawer; the syncs set it
+        -- from the source document instead (payroll -> last day of the
+        -- batch's period, reimbursement -> the receipt's purchase date).
+        -- NOT NULL: a bill without a งวด is not a state this book allows;
+        -- migrateBillDate below adds it to a pre-decision volume.
+        bill_date TEXT NOT NULL
       );
     `);
     migrateCategoryCodeNullable(db);
+    migrateBillDate(db);
     db.exec(`
       CREATE TABLE IF NOT EXISTS ap_payment (
         id TEXT PRIMARY KEY,
@@ -292,6 +428,7 @@ interface RawRow {
   created_at: string;
   created_by: string;
   filed_date: string;
+  bill_date: string;
 }
 
 interface RawPayment {
@@ -355,6 +492,7 @@ function mapRow(db: Database, raw: RawRow): ApRow {
     note: raw.note,
     createdAt: raw.created_at,
     createdBy: raw.created_by,
+    billDate: raw.bill_date,
     filedDate: raw.filed_date,
     // H3 fix: pass filed_date so a row settled with ZERO payments (a
     // discount/WHT alone brought outstanding to <= 0) gets a real settledAt
@@ -376,11 +514,18 @@ export function createApRow(input: ApRowInput, createdBy: string, source?: { id:
   // of createdAt's UTC timestamp — see the CREATE TABLE comment above for
   // why these two must not be derived from each other.
   const filedDate = source?.filedDate ?? todayBangkok();
+  // วันที่ลงบิล comes from the CALLER — the drawer's own field via
+  // validateApRowInput (which defaults an omitted one to today), or a sync's
+  // source-derived date (payroll period / purchase date). The fallback here
+  // is the same today's-Bangkok-date default and exists so no write path can
+  // ever land a row without a งวด, never as a silent second opinion about
+  // which month a cost belongs to.
+  const billDate = input.billDate || todayBangkok();
   getDb()
     .query(
       `INSERT INTO ap_row
-        (id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by, filed_date)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by, filed_date, bill_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -401,6 +546,7 @@ export function createApRow(input: ApRowInput, createdBy: string, source?: { id:
       createdAt,
       createdBy,
       filedDate,
+      billDate,
     );
   return id;
 }
@@ -412,12 +558,17 @@ export function getApRow(id: string): ApRow | null {
   return mapRow(db, raw);
 }
 
+/** Overwrites every editable field, วันที่ลงบิล included — a row's งวด is
+ * an accountant's decision that can be corrected after filing. `filed_date`
+ * and `created_at`/`created_by` are deliberately NOT in the SET list: what
+ * the record says about when it was entered never changes. */
 export function updateApRow(id: string, input: ApRowInput): void {
   getDb()
     .query(
       `UPDATE ap_row SET
         creditor = ?, item = ?, amount_satang = ?, vat_satang = ?, wht_satang = ?,
-        discount_satang = ?, due_date = ?, entity = ?, category_code = ?, note = ?
+        discount_satang = ?, due_date = ?, entity = ?, category_code = ?, note = ?,
+        bill_date = ?
        WHERE id = ?`,
     )
     .run(
@@ -432,6 +583,11 @@ export function updateApRow(id: string, input: ApRowInput): void {
       normalizeApEntityForSave(input.entity),
       input.categoryCode,
       input.note,
+      // วันที่ลงบิล IS editable (unlike filed_date, which never changes after
+      // create) — moving a bill into the งวด its document names is the whole
+      // point of the field. src/server/server.ts's PATCH route enqueues BOTH
+      // the old and the new bill-date month for analytics when it moves.
+      input.billDate || todayBangkok(),
       id,
     );
 }
@@ -460,6 +616,16 @@ export function listApRows(filter: ApListFilter): ApRow[] {
   // of the prior month.
   const month = filter.month!;
   return raw.filter((r) => (r.due_date ?? r.filed_date).slice(0, 7) === month).map((r) => mapRow(db, r));
+}
+
+/** The earliest งวด the register holds anything in — the "YYYY-MM" of the
+ * oldest วันที่ลงบิล, or null on an empty register. scripts/analytics-backfill.ts
+ * starts its month range here, so a bill back-dated into a month older than
+ * the ledger's go-live still gets its own push rather than being silently
+ * skipped by a hard-coded first month. */
+export function earliestBillMonth(): string | null {
+  const row = getDb().query("SELECT MIN(bill_date) AS earliest FROM ap_row").get() as { earliest: string | null };
+  return row?.earliest ? row.earliest.slice(0, 7) : null;
 }
 
 /** Always over every currently-unsettled row regardless of the active

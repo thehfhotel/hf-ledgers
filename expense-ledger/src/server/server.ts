@@ -396,6 +396,23 @@ export function validateApRowInput(body: unknown): ValidatedApRowInput {
   }
   const note = typeof b.note === "string" ? b.note : "";
 
+  // วันที่ลงบิล (owner decision, 2026-09-19 — ADR-0001): its MONTH is the
+  // งวด this cost is recognised in, so it is a real, bounded calendar date,
+  // validated exactly like กำหนดชำระ above (same 2000-2100 typo guard, and
+  // deliberately unbounded within that range — back-dating a bill into the
+  // month it was incurred is the normal case, and PEA's own bills routinely
+  // arrive a month late). An ABSENT/blank value defaults to today's Bangkok
+  // date rather than 400ing: a pre-field client (or a curl script) must
+  // still be able to file a bill, and "today" is the same default the
+  // drawer pre-fills. */
+  let billDate = todayBangkok();
+  if (b.billDate !== undefined && b.billDate !== null && b.billDate !== "") {
+    if (typeof b.billDate !== "string" || !isValidIso(b.billDate)) return { ok: false, error: "invalid billDate" };
+    const billYear = Number(b.billDate.slice(0, 4));
+    if (billYear < 2000 || billYear > 2100) return { ok: false, error: "invalid billDate" };
+    billDate = b.billDate;
+  }
+
   return {
     ok: true,
     value: {
@@ -409,6 +426,7 @@ export function validateApRowInput(body: unknown): ValidatedApRowInput {
       entity,
       categoryCode,
       note,
+      billDate,
     },
   };
 }
@@ -666,9 +684,11 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     return withApWriteLock(() =>
       withApStore(() => {
         const id = apStore.createApRow(validated.value, identity.email);
-        // A new row always files into the CURRENT Bangkok month
-        // (apStore.createApRow stamps filed_date = todayBangkok()).
-        enqueueAnalyticsPush(currentMonthBangkok());
+        // The row's งวด is its วันที่ลงบิล's month — which is today's month
+        // for an ordinary filing, but NOT for a bill the accountant
+        // back-dated into the month it was incurred (ADR-0001). Enqueue the
+        // month this cost actually landed in, never the clock's.
+        enqueueAnalyticsPush(validated.value.billDate.slice(0, 7));
         return json(201, { id });
       }),
     );
@@ -711,9 +731,13 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             return json(400, { error: "negative outstanding" });
           }
           apStore.updateApRow(id, validated.value);
-          // filed_date never changes on an edit (apStore.updateApRow does
-          // not touch it) — enqueue the row's existing filed month.
-          enqueueAnalyticsPush(existing.filedDate.slice(0, 7));
+          // วันที่ลงบิล IS editable, so an edit can MOVE this cost from one
+          // งวด to another — both months must be re-pushed or the month it
+          // left keeps reporting a bill it no longer holds. Enqueue is
+          // idempotent (ON CONFLICT bumps queued_at), so the common case
+          // where the date did not change costs one enqueue, not two.
+          enqueueAnalyticsPush(existing.billDate.slice(0, 7));
+          enqueueAnalyticsPush(validated.value.billDate.slice(0, 7));
           return json(200, { id });
         }),
       );
@@ -730,7 +754,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             if (err instanceof apStore.ApRowHasPaymentsError) return json(409, { error: "has_payments" });
             throw err;
           }
-          enqueueAnalyticsPush(existing.filedDate.slice(0, 7));
+          enqueueAnalyticsPush(existing.billDate.slice(0, 7));
           // The DB's ap_photo rows are already gone (ON DELETE CASCADE via
           // ap_row's foreign key) — this only removes the FILES, recursively,
           // for whatever photos (zero or more) this row had.
@@ -829,8 +853,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             categoryCodeToPersist,
           );
           // A payment changes this row's paidSatang/outstandingSatang, so
-          // its (unchanging) filed month needs a fresh push.
-          enqueueAnalyticsPush(row.filedDate.slice(0, 7));
+          // its งวด needs a fresh push. ค้างจ่าย is a payment STATE, never a
+          // second cost — paying a bill never moves it to the month it was
+          // paid in, so this is the row's own วันที่ลงบิล month.
+          enqueueAnalyticsPush(row.billDate.slice(0, 7));
           // L1 fix: echo back the categoryCode this payment ACTUALLY posted
           // under — the client uses this directly for its confirmation
           // text instead of re-deriving it from possibly-stale local state.
@@ -914,11 +940,11 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
           console.error("[ap-store] payment delete failed AFTER its ledger transaction was already deleted/gone", err);
           return json(500, { error: "ap_store_error" });
         }
-        // The row's filed month never changes; fetch it fresh (the row
-        // itself is untouched by a payment delete, only its
+        // Undoing a payment never moves the row's งวด either; fetch the row
+        // fresh (it is untouched by a payment delete, only its
         // paid/outstanding derivation) rather than trusting any stale copy.
         const row = apStore.getApRow(rowId);
-        if (row) enqueueAnalyticsPush(row.filedDate.slice(0, 7));
+        if (row) enqueueAnalyticsPush(row.billDate.slice(0, 7));
         return new Response(null, { status: 204 });
       }),
     );
@@ -982,7 +1008,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         createdBy: identity.email,
         data: file,
       });
-      enqueueAnalyticsPush(row.filedDate.slice(0, 7));
+      enqueueAnalyticsPush(row.billDate.slice(0, 7));
       return json(201, { id: photo.id, url: apPhotoUrl(photo.id) });
     });
   }
@@ -1022,7 +1048,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       if (!record) return json(404, { error: "not found" });
       await apStore.deleteApPhotoFile(record);
       const row = apStore.getApRow(rowId);
-      if (row) enqueueAnalyticsPush(row.filedDate.slice(0, 7));
+      if (row) enqueueAnalyticsPush(row.billDate.slice(0, 7));
       return new Response(null, { status: 204 });
     });
   }

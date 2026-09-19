@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, describe, test, expect } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { makeTmpVolume } from './test-support/tmpVolume.ts';
 import * as ap from './apStore.ts';
 import { reconcilePayrollSnapshot, payrollRowView, payrollExpenseView, payrollSyncStatus, validatePayrollSnapshot,
   validatePayrollBackfillManifest, payrollRetrievalSince, type SourcePayrollRun } from './payroll-sync.ts';
@@ -54,11 +54,11 @@ function durableState() {
 
 describe('approved historical payroll backfill', () => {
   test('only approved paid batches settle once across replay and database reopen; manual salary remains separate', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'payroll-approved-backfill-'));
+    const directory = makeTmpVolume('payroll-approved-backfill-');
     ap._resetForTests(); process.env.AP_DB_PATH = join(directory, 'ap.db');
     try {
       const manualId = ap.createApRow({ creditor: 'เจ้าหนี้ตัวอย่าง', item: 'ค่าบริการตัวอย่าง', amountSatang: 95000,
-        vatSatang: null, whtSatang: null, discountSatang: 0, dueDate: null, entity: 'HF Ville', categoryCode: 'salary', note: '' },
+        vatSatang: null, whtSatang: null, discountSatang: 0, dueDate: null, entity: 'HF Ville', categoryCode: 'salary', note: '', billDate: '2025-07-12' },
       'sample@example.com', { id: 'sample-manual-salary', filedDate: '2025-07-12' });
       const manualBefore = ap.getApRow(manualId);
       const excluded: SourcePayrollRun[] = ['FAILED', 'REJECTED', 'SCHEDULED', 'PAID'].map((status, index) => ({
@@ -238,10 +238,17 @@ describe('payroll reconciliation', () => {
     const rows = ap.listApRows({ mode: 'all' });
     expect(rows).toHaveLength(1); expect(posts).toHaveLength(0);
     expect(rows[0]!.filedDate).toBe('2025-10-01'); // Bangkok submission day, not UTC or payroll period
+    // วันที่ลงบิล = the last day of the period the batch PAID (ADR-0001), so
+    // a September batch submitted on 1 October is งวด 2025-09 ต้นทุน.
+    expect(rows[0]!.billDate).toBe('2025-09-30');
     expect(rows[0]!.dueDate).toBe('2025-10-02');
     expect(rows[0]!.categoryCode).toBe('salary'); expect(rows[0]!.outstandingSatang).toBe(6000000);
     expect(rows[0]!.creditor).toBe('เงินเดือนพนักงาน'); expect(rows[0]!.entity).toBe('รวมทุกโรงแรม');
-    const rollup = computeExpenseLedgerRollup('2025-10', [], new Set(), rows, '2025-10-02T05:00:00.000Z');
+    // The งวด the analytics rollup counts it in is 2025-09 — never 2025-10,
+    // the month it was filed in.
+    expect(computeExpenseLedgerRollup('2025-10', [], new Set(), rows, '2025-10-02T05:00:00.000Z').filedGrossSatang).toBe(0);
+    expect(months).toContain('2025-09'); expect(months).not.toContain('2025-10');
+    const rollup = computeExpenseLedgerRollup('2025-09', [], new Set(), rows, '2025-10-02T05:00:00.000Z');
     expect(rollup.filedByEntity.unknown?.grossSatang).toBe(6000000);
     expect(rollup.filedByEntity.hf).toBeUndefined();
     expect(rollup.filedByEntity.hfville).toBeUndefined();
@@ -250,6 +257,20 @@ describe('payroll reconciliation', () => {
     await reconcilePayrollSnapshot(snapshot([run('sample', { status: 'SCHEDULED' })]), SINCE, deps);
     expect(months).toEqual([]); // unchanged polling does not fan out analytics work
   });
+  test('a corrected period MOVES the งวด and restates BOTH months, never only the new one', async () => {
+    await reconcilePayrollSnapshot(snapshot([run('sample')]), SINCE, deps);
+    expect(ap.getApRow('payroll-sample')!.billDate).toBe('2025-09-30');
+    expect(months).toEqual(['2025-09']);
+    months = [];
+    // The upstream batch is corrected to the August งวด before anything is
+    // paid. 2025-09 must be restated too — pushing only the new month leaves
+    // September still holding a batch it no longer has, and the largest single
+    // cost of the month is counted in two งวด.
+    await reconcilePayrollSnapshot(snapshot([run('sample', { period: '2025-08' })]), SINCE, deps);
+    expect(ap.getApRow('payroll-sample')!.billDate).toBe('2025-08-31');
+    expect(months).toContain('2025-09'); // the งวด it LEFT
+    expect(months).toContain('2025-08'); // the งวด it joined
+  });
   test('verified bank settlement pays the same row once using actual payment date', async () => {
     await reconcilePayrollSnapshot(snapshot([run()]), SINCE, deps);
     const paid = snapshot([run('batch-sample', { status: 'PAID', paidDate: '2025-11-01' })]);
@@ -257,8 +278,12 @@ describe('payroll reconciliation', () => {
     const row = ap.getApRow('payroll-batch-sample')!;
     expect(posts).toHaveLength(1); expect(row.payments).toHaveLength(1); expect(row.outstandingSatang).toBe(0);
     expect(row.filedDate).toBe('2025-10-01'); expect(row.settledAt).toBe('2025-11-01');
+    expect(row.billDate).toBe('2025-09-30'); // paying in November never moves the September งวด
     expect(posts[0]).toMatchObject({ amountSatang: 6000000, date: '2025-11-01', paymentMethod: 'bank', categoryCode: 'salary' });
-    expect(months).toContain('2025-10'); expect(months).toContain('2025-11');
+    // The row's own งวด (2025-09) plus the month the payment transaction
+    // itself lands in (2025-11) — never the filing month.
+    expect(months).toContain('2025-09'); expect(months).toContain('2025-11');
+    expect(months).not.toContain('2025-10');
     const view = payrollExpenseView({ id: row.payments[0]!.transactionId, date: '2025-11-01', amountSatang: 6000000,
       categoryCode: 'salary', paymentMethod: 'bank', comment: 'ตัวอย่าง', by: null, photos: [] });
     expect(view.payrollRowId).toBe(row.id); expect(view.reimbursementRowId).toBeUndefined();
@@ -337,7 +362,7 @@ describe('payroll reconciliation', () => {
       amountSatang: 10000, date: '2025-09-30', note: '', photoCount: 0 };
     await reconcileSnapshot({ ...snapshot([]), items: [receipt] }, SINCE, deps);
     const manualId = ap.createApRow({ creditor: 'เจ้าหนี้ตัวอย่าง', item: 'รายการตัวอย่าง', amountSatang: 10000,
-      vatSatang: null, whtSatang: null, discountSatang: 0, dueDate: null, entity: 'HF', categoryCode: 'other', note: '' }, 'sample@example.com');
+      vatSatang: null, whtSatang: null, discountSatang: 0, dueDate: null, entity: 'HF', categoryCode: 'other', note: '', billDate: '2025-09-30' }, 'sample@example.com');
     await reconcilePayrollSnapshot(snapshot([run('same')]), SINCE, deps);
     await reconcilePayrollSnapshot(snapshot([run('same', { status: 'REJECTED' })]), SINCE, deps);
     expect(ap.getApRow('payroll-same')).toBeNull(); expect(ap.getApRow('reimbursement-same')).not.toBeNull();

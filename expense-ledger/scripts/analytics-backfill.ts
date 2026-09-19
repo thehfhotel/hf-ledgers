@@ -1,7 +1,9 @@
-// One-time (repeatable) backfill: enqueues every Bangkok calendar month
-// from 2026-07 (the ledger's go-live backfill month — see
-// docs/overall-cost-sources.md in hf-data) through the current month into
-// the hf-analytics outbox (src/server/analytics-push.ts), so data already
+// One-time (repeatable) backfill: enqueues every Bangkok calendar month the
+// register holds a bill in — from the EARLIEST วันที่ลงบิล (never a
+// hard-coded first month: after the 2026-09-19 recognition change a bill can
+// be back-dated into a งวด older than the ledger's own go-live, and that
+// month still has to be pushed) through the current month, into the
+// hf-analytics outbox (src/server/analytics-push.ts), so data already
 // filed/entered before analytics push existed gets pushed once. Idempotent
 // / safe to re-run — enqueue upserts into the outbox (ON CONFLICT bumps
 // queued_at) and the receiving hf-analytics endpoint upserts on (month), so
@@ -23,11 +25,13 @@
 //   docker exec expense-ledger bun scripts/analytics-backfill.ts
 
 import { enqueueAnalyticsPush } from "../src/server/analytics-push.ts";
+import { earliestBillMonth } from "../src/server/apStore.ts";
 import { currentMonthBangkok, isValidMonth, shiftMonths } from "@shared/date.ts";
 
 // The ledger's go-live backfill month (63 transactions, all entered on
-// 2026-07-31 — see docs/overall-cost-sources.md). Nothing in the register
-// predates this.
+// 2026-07-31 — see docs/overall-cost-sources.md). Used only as the FLOOR
+// for an empty register (or one whose earliest bill is newer): the range
+// below starts at the earliest วันที่ลงบิล whenever that is older.
 const FIRST_MONTH = "2026-07";
 
 /** Every "YYYY-MM" from `fromMonth` through `toMonth`, inclusive — plain
@@ -55,7 +59,12 @@ if (!process.env.ANALYTICS_URL || !process.env.ANALYTICS_TOKEN) {
   process.exit(1);
 }
 
-const months = monthRange(FIRST_MONTH, currentMonthBangkok());
+// Opens the AP register (lazily, exactly like every other store call) to
+// ask what the oldest งวด actually is — a bill back-dated into 2026-05 makes
+// 2026-05 a month this backfill must enqueue.
+const earliest = earliestBillMonth();
+const fromMonth = earliest && earliest < FIRST_MONTH ? earliest : FIRST_MONTH;
+const months = monthRange(fromMonth, currentMonthBangkok());
 for (const month of months) {
   if (!isValidMonth(month)) throw new Error(`bad month computed: ${month}`);
   enqueueAnalyticsPush(month);

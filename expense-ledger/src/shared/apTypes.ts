@@ -63,14 +63,29 @@ export interface ApRow {
    * calendar date), which this interface never needs to expose. */
   createdAt: string;
   createdBy: string;
-  /** Bangkok calendar "YYYY-MM-DD" this row was FILED into the register
-   * (src/server/apStore.ts's `filed_date` column, todayBangkok() at create
-   * time — never changes after that). Distinct from `dueDate` (กำหนดชำระ,
-   * clerk-entered, can be edited) and from `createdAt` (a full UTC
-   * timestamp, wrong for month-grouping near a Bangkok midnight — see
-   * apStore.ts's filed_date column comment). This is the field the
-   * analytics rollup (src/shared/rollup.ts) scopes `filed`/`filedByEntity`
-   * by: "a bill counts once, when it is FILED", never by `dueDate`. */
+  /** วันที่ลงบิล — the date the accountant assigns this bill to, and THE
+   * date this cost is recognised on (owner decision, 2026-09-19; see
+   * CONTEXT.md's glossary and docs/adr/0001-cost-recognised-in-its-period.md).
+   * Bangkok calendar "YYYY-MM-DD"; its MONTH is the row's งวด, which is what
+   * the analytics rollup (src/shared/rollup.ts) scopes `filed` /
+   * `filedByEntity` / `filedBySource` by. Editable on a manual row (the
+   * drawer's own field), defaulted to today at create time; a bill whose
+   * span crosses a month boundary belongs to the month its span ENDS in
+   * (PEA's own convention). Set by the syncs rather than the clerk on an
+   * imported row: payroll → the last day of the batch's `period`,
+   * reimbursement → the receipt's purchase date. NEVER conflate with
+   * `filedDate` below, which is when the bill was ENTERED and is record
+   * metadata only. */
+  billDate: string;
+  /** วันที่ยื่นบิล — Bangkok calendar "YYYY-MM-DD" this row was FILED into
+   * the register (src/server/apStore.ts's `filed_date` column,
+   * todayBangkok() at create time — never changes after that). Distinct
+   * from `billDate` above (the cost's own date, editable), from `dueDate`
+   * (กำหนดชำระ, clerk-entered, can be edited) and from `createdAt` (a full
+   * UTC timestamp, wrong for month-grouping near a Bangkok midnight — see
+   * apStore.ts's filed_date column comment). RECORD METADATA, never the
+   * cost's date (ADR-0001): the rollup stopped scoping by this field on
+   * 2026-09-19 and now scopes by `billDate`. */
   filedDate: string;
   /** The newest payment's date once outstanding <= 0, else null — the
    * "จ่ายแล้ว {date}" label (spec §3, §6). Computed at read time from
@@ -134,6 +149,13 @@ export interface ApRowInput {
   entity: string;
   categoryCode: ExpenseCategoryCode | null;
   note: string;
+  /** วันที่ลงบิล — REQUIRED on every write path, so the งวด a cost lands in
+   * is always an explicit decision rather than a fallback nobody chose
+   * (ADR-0001). The HTTP layer fills it with today's Bangkok date when a
+   * body omits it (src/server/server.ts's validateApRowInput), the syncs
+   * derive it from the source document (payroll period / purchase date),
+   * and the drawer sends whatever the accountant picked. */
+  billDate: string;
 }
 
 export interface ApPaymentInput {
@@ -197,6 +219,24 @@ export const AP_ENTITY_PICKER_LABELS: Record<ApEntityChoice, string> = {
   hfville: "HF Ville",
   all: "รวมทุกโรงแรม",
 };
+
+// ── วันที่ลงบิล (bill date) helpers ──────────────────────────────────────
+
+/** The last calendar day of a "YYYY-MM" month, as an ISO "YYYY-MM-DD"
+ * string. This is the วันที่ลงบิล rule for a bill that names a PERIOD
+ * rather than a day — a payroll batch's `period`, and by extension any bill
+ * whose span ends in that month (owner, 2026-09-19: "a bill spanning months
+ * belongs to the month its span ENDS in"). Built on Date.UTC's own
+ * day-0-is-the-previous-month's-last-day rollover rather than a leap-year
+ * table, so February is right without a special case. */
+export function lastDayOfMonth(month: string): string {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const d = new Date(Date.UTC(year!, monthNumber!, 0));
+  const y = String(d.getUTCFullYear()).padStart(4, "0");
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 /** Picker button order (ApRowDrawer's 3-column grid). */
 export const AP_ENTITY_CHOICES: readonly ApEntityChoice[] = ["hf", "hfville", "all"];

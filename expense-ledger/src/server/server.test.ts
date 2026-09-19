@@ -693,6 +693,57 @@ describe("AP register: row validation and CRUD (no engine involved)", () => {
     expect(res.status).toBe(415);
   });
 
+  describe("วันที่ลงบิล (owner decision, 2026-09-19 — ADR-0001)", () => {
+    test("a supplied bill date is stored as the row's งวด and comes back on GET", async () => {
+      const res = await fetchHandler(post(baseApRowBody({ billDate: "2026-08-31" })));
+      expect(res.status).toBe(201);
+      const { id } = (await res.json()) as { id: string };
+      expect(apStore.getApRow(id)!.billDate).toBe("2026-08-31");
+
+      const listRes = await fetchHandler(devRequest("/api/ap/rows?f=all"));
+      const body = (await listRes.json()) as { rows: { id: string; billDate: string; filedDate: string }[] };
+      const row = body.rows.find((r) => r.id === id)!;
+      expect(row.billDate).toBe("2026-08-31");
+      // ...alongside, not instead of, the filing date: two different facts.
+      expect(row.filedDate).toBe(todayBangkok());
+    });
+
+    test("an omitted bill date defaults to today's Bangkok date rather than 400ing (a pre-field client can still file)", async () => {
+      const body = baseApRowBody();
+      delete (body as Record<string, unknown>).billDate;
+      const res = await fetchHandler(post(body));
+      expect(res.status).toBe(201);
+      const { id } = (await res.json()) as { id: string };
+      expect(apStore.getApRow(id)!.billDate).toBe(todayBangkok());
+    });
+
+    test("400s on a bill date that is not a real calendar date, or whose year is a picker typo", async () => {
+      for (const billDate of ["2026-02-30", "2026-13-01", "not-a-date", "1969-07-01", "2101-01-01", 20260831]) {
+        const res = await fetchHandler(post(baseApRowBody({ billDate })));
+        expect(res.status).toBe(400);
+        expect((await res.json()) as { error: string }).toEqual({ error: "invalid billDate" });
+      }
+    });
+
+    test("PATCH moves the row to another งวด and leaves its filing date alone", async () => {
+      const createRes = await fetchHandler(post(baseApRowBody({ billDate: "2026-09-18" })));
+      const { id } = (await createRes.json()) as { id: string };
+      const filedDate = apStore.getApRow(id)!.filedDate;
+
+      const patchRes = await fetchHandler(
+        devRequest(`/api/ap/rows/${id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(baseApRowBody({ billDate: "2026-08-31" })),
+        }),
+      );
+      expect(patchRes.status).toBe(200);
+      const row = apStore.getApRow(id)!;
+      expect(row.billDate).toBe("2026-08-31");
+      expect(row.filedDate).toBe(filedDate);
+    });
+  });
+
   test("a valid row creates, then round-trips through GET /api/ap/rows", async () => {
     const createRes = await fetchHandler(post(baseApRowBody()));
     expect(createRes.status).toBe(201);
@@ -1237,6 +1288,7 @@ describe("AP register: payment undo (mocked engine HTTP)", () => {
         entity: "HF",
         categoryCode: "commission-booking",
         note: "",
+        billDate: todayBangkok(),
       },
       "tester@thehfhotel.org",
     );
@@ -1294,6 +1346,7 @@ describe("AP register: payment undo (mocked engine HTTP)", () => {
         entity: "HF",
         categoryCode: "other",
         note: "",
+        billDate: todayBangkok(),
       },
       "tester@thehfhotel.org",
     );

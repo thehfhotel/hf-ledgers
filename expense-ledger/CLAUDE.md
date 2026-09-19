@@ -140,6 +140,19 @@ Its image builds from the MONOREPO ROOT context with
   not add a second database-of-its-own for anything else without amending
   this rule first. Backed up nightly alongside `expense_ap` — see
   README.md's "Backup" section.
+- **ต้นทุน is recognised in the งวด its วันที่ลงบิล falls in** (owner
+  decision, 2026-09-19 — CONTEXT.md's glossary and
+  `docs/adr/0001-cost-recognised-in-its-period.md`). One editable date per
+  bill (`ap_row.bill_date`, `ApRow.billDate`) whose MONTH is the งวด;
+  `filed_date` (วันที่ยื่นบิล) is record metadata and must never be used as a
+  cost's date again, and ค้างจ่าย stays a payment state, never a second
+  cost. `src/shared/rollup.ts` keys `filed`/`filedByEntity`/`filedBySource`
+  on วันที่ลงบิล and stamps `basis: "bill-date"` on every payload — that
+  field is LOCKED CONTRACT with hf-analytics: `"bill-date"` means งวด,
+  `"filed-month"` means the old filing-month meaning, and an ABSENT basis
+  must be read as `"filed-month"` and said so, never guessed. Any route that
+  changes a row enqueues the row's BILL-DATE month (an edit that moves the
+  date enqueues both the old and the new one), never the clock's month.
 - **UI language is Thai only**, matching the income ledger's convention for
   this estate's front-of-house tools. No `name_en` field, no English-first
   copy.

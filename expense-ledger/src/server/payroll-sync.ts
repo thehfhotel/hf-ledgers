@@ -1,5 +1,5 @@
 import { isValidIso, todayBangkok } from '@shared/date.ts';
-import type { ApRow, ApRowInput } from '../shared/apTypes.ts';
+import { lastDayOfMonth, type ApRow, type ApRowInput } from '../shared/apTypes.ts';
 import type { ExpenseTransaction } from '../shared/types.ts';
 import * as ap from './apStore.ts';
 import { createApPaymentTransaction, findSourceApPayment, type CreateApPaymentTransactionInput } from './engine.ts';
@@ -129,6 +129,11 @@ export function payrollToAp(run: SourcePayrollRun): ApRowInput {
     .format(new Date(`${run.period}-01T00:00:00.000Z`));
   return { creditor: 'เงินเดือนพนักงาน', item: `เงินเดือน ${period}`, amountSatang: run.amountSatang,
     vatSatang: null, whtSatang: null, discountSatang: 0, dueDate: run.effectiveDate,
+    // วันที่ลงบิล = the LAST DAY of the batch's own period (ADR-0001): a July
+    // batch is July ต้นทุน however late in August it was submitted, filed or
+    // settled. Never effectiveDate/paidDate (payment dates) and never the
+    // filing date.
+    billDate: lastDayOfMonth(run.period),
     entity: 'รวมทุกโรงแรม', categoryCode: 'salary',
     note: `ยอดโอนสุทธิเงินเดือน ${period}\nพนักงาน ${run.employeeCount} คน\nรอบเงินเดือน ${run.id}` };
 }
@@ -200,7 +205,7 @@ export async function reconcilePayrollSnapshot(value: unknown, since: string, de
             ap.deleteApRow(rowId);
             d.query('DELETE FROM _payroll_runs WHERE run_id=?').run(run.id);
           })();
-          if (before) deps.enqueue(before.filedDate.slice(0, 7));
+          if (before) deps.enqueue(before.billDate.slice(0, 7));
           continue;
         }
         const input = payrollToAp(run);
@@ -216,7 +221,7 @@ export async function reconcilePayrollSnapshot(value: unknown, since: string, de
           }
         })();
         const row = ap.getApRow(rowId)!;
-        deps.enqueue(row.filedDate.slice(0, 7));
+        deps.enqueue(row.billDate.slice(0, 7));
         if (run.status === 'FAILED') throw new Error('Payroll bank outcome needs review');
         if (run.status !== 'PAID' || row.payments.length) continue;
         const payment: CreateApPaymentTransactionInput = { apRowId: rowId, date: run.paidDate!,
@@ -232,7 +237,7 @@ export async function reconcilePayrollSnapshot(value: unknown, since: string, de
         }
         ap.addApPayment(rowId, { date: payment.date, amountSatang: payment.amountSatang, paymentMethod: 'bank',
           kind: 'full', installmentNumber: null, payerEmail: ACTOR, transactionId });
-        deps.enqueue(row.filedDate.slice(0, 7));
+        deps.enqueue(row.billDate.slice(0, 7));
         deps.enqueue(payment.date.slice(0, 7));
       } catch (error) {
         issues++;

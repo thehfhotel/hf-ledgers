@@ -281,30 +281,96 @@ describe("analytics outbox: mutating routes enqueue their month", () => {
     expect(_internal.isPending(currentMonthBangkok())).toBe(true);
   });
 
-  test("POST /ap/rows enqueues the current (filed) month", async () => {
-    const res = await fetchHandler(
+  /** The body POST /api/ap/rows takes, with whatever วันที่ลงบิล the test
+   * is about (omit `billDate` entirely to exercise the server's default). */
+  function apRowBody(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      creditor: "Booking.com",
+      item: "ค่าคอมมิชชั่น",
+      amountSatang: 10_000,
+      vatSatang: null,
+      whtSatang: null,
+      discountSatang: 0,
+      dueDate: null,
+      entity: "HF",
+      categoryCode: "commission-booking",
+      note: "",
+      ...overrides,
+    });
+  }
+
+  function postApRow(overrides: Record<string, unknown> = {}) {
+    return fetchHandler(
       devRequest("/api/ap/rows", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          creditor: "Booking.com",
-          item: "ค่าคอมมิชชั่น",
-          amountSatang: 10_000,
-          vatSatang: null,
-          whtSatang: null,
-          discountSatang: 0,
-          dueDate: null,
-          entity: "HF",
-          categoryCode: "commission-booking",
-          note: "",
-        }),
+        body: apRowBody(overrides),
       }),
     );
+  }
+
+  test("POST /ap/rows with no วันที่ลงบิล enqueues the current งวด (the server's own today default)", async () => {
+    const res = await postApRow();
     expect(res.status).toBe(201);
     expect(_internal.isPending(currentMonthBangkok())).toBe(true);
   });
 
-  test("POST /ap/rows/:id/payments enqueues the row's filed month", async () => {
+  test("POST /ap/rows back-dated into an earlier งวด enqueues THAT month, never the month it was filed in", async () => {
+    _internal.clearPending();
+    const res = await postApRow({ billDate: "2026-05-31" });
+    expect(res.status).toBe(201);
+    expect(_internal.isPending("2026-05")).toBe(true);
+    expect(_internal.isPending(currentMonthBangkok())).toBe(false);
+  });
+
+  test("PATCH that MOVES วันที่ลงบิล enqueues BOTH the old งวด and the new one", async () => {
+    const created = await postApRow({ billDate: "2026-05-31" });
+    const { id } = (await created.json()) as { id: string };
+    _internal.clearPending();
+
+    const patched = await fetchHandler(
+      devRequest(`/api/ap/rows/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: apRowBody({ billDate: "2026-06-30" }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+    // The month it LEFT must be re-pushed too, or it keeps reporting a bill
+    // it no longer holds.
+    expect(_internal.isPending("2026-05")).toBe(true);
+    expect(_internal.isPending("2026-06")).toBe(true);
+  });
+
+  test("PATCH that leaves วันที่ลงบิล alone enqueues just that one งวด", async () => {
+    const created = await postApRow({ billDate: "2026-05-31" });
+    const { id } = (await created.json()) as { id: string };
+    _internal.clearPending();
+
+    const patched = await fetchHandler(
+      devRequest(`/api/ap/rows/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: apRowBody({ billDate: "2026-05-31", note: "แก้ไขหมายเหตุ" }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+    expect(_internal.isPending("2026-05")).toBe(true);
+    expect(_internal.isPending(currentMonthBangkok())).toBe(false);
+  });
+
+  test("DELETE /ap/rows/:id enqueues the row's งวด, not the month it is deleted in", async () => {
+    const created = await postApRow({ billDate: "2026-05-31" });
+    const { id } = (await created.json()) as { id: string };
+    _internal.clearPending();
+
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${id}`, { method: "DELETE" }));
+    expect(res.status).toBe(204);
+    expect(_internal.isPending("2026-05")).toBe(true);
+    expect(_internal.isPending(currentMonthBangkok())).toBe(false);
+  });
+
+  test("POST /ap/rows/:id/payments enqueues the row's งวด — paying a bill is never a second cost in the payment's month", async () => {
     const rowId = apStore.createApRow(
       {
         creditor: "Booking.com",
@@ -317,7 +383,8 @@ describe("analytics outbox: mutating routes enqueue their month", () => {
         entity: "HF",
         categoryCode: "commission-booking",
         note: "",
-      } as never,
+        billDate: "2026-05-31",
+      },
       "tester@thehfhotel.org",
     );
     _internal.clearPending();
@@ -330,7 +397,23 @@ describe("analytics outbox: mutating routes enqueue their month", () => {
       }),
     );
     expect(res.status).toBe(201);
-    expect(_internal.isPending(currentMonthBangkok())).toBe(true);
+    // The payment itself posts a ledger transaction in TODAY's month, but the
+    // ต้นทุน it settles stays in งวด 2026-05.
+    expect(_internal.isPending("2026-05")).toBe(true);
+    expect(_internal.isPending(currentMonthBangkok())).toBe(false);
+  });
+
+  test("POST /ap/rows/:id/photos enqueues the row's งวด", async () => {
+    const created = await postApRow({ billDate: "2026-05-31" });
+    const { id } = (await created.json()) as { id: string };
+    _internal.clearPending();
+
+    const form = new FormData();
+    form.set("picture", new File([new Uint8Array([1, 2, 3])], "bill.jpg", { type: "image/jpeg" }));
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${id}/photos`, { method: "POST", body: form }));
+    expect(res.status).toBe(201);
+    expect(_internal.isPending("2026-05")).toBe(true);
+    expect(_internal.isPending(currentMonthBangkok())).toBe(false);
   });
 });
 

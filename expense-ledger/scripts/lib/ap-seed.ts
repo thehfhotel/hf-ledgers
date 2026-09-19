@@ -35,6 +35,7 @@
 // special-cased per row.
 
 import type { ExpenseCategoryCode } from "../../src/shared/categories.ts";
+import { todayBangkok } from "@shared/date.ts";
 import type { ApRowInput } from "../../src/shared/apTypes.ts";
 import { amountToMinorUnits } from "./currency.ts";
 import { excelSerialToCeDate } from "./dates.ts";
@@ -357,5 +358,12 @@ export function toApRowInput(row: SeedRow): ApRowInput {
     entity: row.entity,
     categoryCode: row.categoryCode,
     note: row.note,
+    // วันที่ลงบิล (ADR-0001): the paper workbook this seeder reads has no
+    // per-bill period column — nothing in it says which งวด a line belongs
+    // to — so a seeded row lands in the month it is seeded into, which is
+    // exactly what it did before the field existed (its filed_date is the
+    // same day). A bill that actually belongs in an earlier งวด is moved by
+    // an accountant in the drawer afterwards, one document at a time.
+    billDate: todayBangkok(),
   };
 }

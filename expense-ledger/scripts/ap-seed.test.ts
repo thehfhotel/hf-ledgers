@@ -5,6 +5,7 @@
 // header comment).
 
 import { describe, expect, test } from "bun:test";
+import { todayBangkok } from "@shared/date.ts";
 import {
   checkRowIntegrity,
   classifyNote,
@@ -265,6 +266,10 @@ describe("toApRowInput", () => {
       entity: "HF",
       categoryCode: "commission-booking",
       note: "",
+      // The workbook carries no per-bill งวด, so a seeded row's วันที่ลงบิล
+      // is the day it is seeded — the same month its filed_date gets (see
+      // toApRowInput's comment).
+      billDate: todayBangkok(),
     });
   });
 });

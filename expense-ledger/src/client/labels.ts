@@ -182,6 +182,16 @@ export const AP_FIELDS = {
   discount: "ส่วนลด",
   outstanding: "ยอดค้างชำระ",
   dueDate: "กำหนดชำระ",
+  /** วันที่ลงบิล — the editable date whose MONTH is the row's งวดต้นทุน
+   * (owner decision, 2026-09-19; CONTEXT.md's glossary + ADR-0001). */
+  billDate: "วันที่ลงบิล",
+  /** The one-line rule under the วันที่ลงบิล field: what the month means,
+   * and what to do with a bill that covers two months. */
+  billDateHint: "เดือนของวันที่ลงบิลคืองวดต้นทุนของบิลนี้ บิลที่คร่อมสองเดือนให้ลงเดือนที่รอบบิลสิ้นสุด",
+  /** วันที่ยื่นบิล — when the bill was entered into the register (the
+   * record's own metadata, never the cost's date). Was labelled
+   * "วันที่ลงรายการ" until 2026-09-19, which read like the งวด and was not. */
+  filedDate: "วันที่ยื่นบิล",
   entity: "ในนาม",
   status: "สถานะ",
   note: "หมายเหตุ",

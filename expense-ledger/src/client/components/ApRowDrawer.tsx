@@ -10,7 +10,7 @@ import {
   uploadApPhoto,
 } from "../api.ts";
 import { categoryByCode, type ExpenseCategoryCode } from "../../shared/categories.ts";
-import { isoToBuddhist, isoToThaiLong } from "@shared/date.ts";
+import { isoToBuddhist, isoToThaiLong, todayBangkok } from "@shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "@shared/money.ts";
 import {
   AP_ENTITY_CANONICAL,
@@ -79,6 +79,15 @@ interface FieldErrors {
 const DUE_DATE_MIN = "2000-01-01";
 const DUE_DATE_MAX = "2100-12-31";
 
+/** วันที่ลงบิล's own range — the SAME 2000-2100 typo guard as กำหนดชำระ
+ * above, and deliberately as generous: a bill is routinely filed a month or
+ * more after the งวด it belongs to (PEA's August bill arrives in
+ * September), and a correction can reach back further still. The server
+ * enforces this range authoritatively (src/server/server.ts's
+ * validateApRowInput). */
+const BILL_DATE_MIN = "2000-01-01";
+const BILL_DATE_MAX = "2100-12-31";
+
 /** BLOCKER 2 fix: mirrors the server's authoritative apStore.AP_PHOTO_MAX_BYTES
  * (src/server/apStore.ts) — a cheap client-side pre-check at staging time so
  * an oversized file surfaces immediately instead of only after Save. The
@@ -107,6 +116,12 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
   const [whtText, setWhtText] = useState(row?.whtSatang != null ? (row.whtSatang / 100).toFixed(2) : "");
   const [discountText, setDiscountText] = useState(row && row.discountSatang > 0 ? (row.discountSatang / 100).toFixed(2) : "");
   const [dueDate, setDueDate] = useState(row?.dueDate ?? "");
+  // วันที่ลงบิล (owner decision, 2026-09-19 — ADR-0001): its MONTH is this
+  // bill's งวดต้นทุน. An existing row shows its own; a new one defaults to
+  // today's Bangkok date (the same default the server applies to a body
+  // that omits the field), which the accountant overrides whenever the
+  // document says otherwise.
+  const [billDate, setBillDate] = useState(row?.billDate ?? todayBangkok());
   // CL-6: the fixed 3-way picker's SELECTED CHOICE, derived from whatever
   // free text `entity` already carries (row's own, or — ADD mode only — the
   // matched creditor's most recent row) via the SAME classification rule
@@ -172,6 +187,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
   const creditorInputRef = useRef<HTMLInputElement>(null);
   const amountInputRef = useRef<HTMLInputElement>(null);
   const dueDateInputRef = useRef<HTMLInputElement>(null);
+  const billDateInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const el = dueDateInputRef.current;
@@ -182,6 +198,20 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     el.addEventListener("change", commit);
     return () => el.removeEventListener("change", commit);
   }, [dueDate]);
+
+  // Same native-date-input handling as กำหนดชำระ above: the browser's own
+  // picker fires `change` (not React's synthetic onChange on every
+  // keystroke), so the committed value is read off the element rather than
+  // re-rendered per digit — a half-typed year never lands in state.
+  useEffect(() => {
+    const el = billDateInputRef.current;
+    if (!el) return;
+    const commit = () => {
+      if (el.value !== billDate) setBillDate(el.value);
+    };
+    el.addEventListener("change", commit);
+    return () => el.removeEventListener("change", commit);
+  }, [billDate]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -294,6 +324,10 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
       whtSatang: whtSatangLive,
       discountSatang: discountSatangLive,
       dueDate: dueDate.trim() === "" ? null : dueDate,
+      // Never sent blank: a bill always lands in a งวด, and an emptied date
+      // input falls back to the same today's-date default the field was
+      // pre-filled with (and that the server would apply anyway).
+      billDate: billDate.trim() === "" ? todayBangkok() : billDate,
       // entityChoice is guaranteed non-null here — validate() above already
       // rejected a null choice and returned before this point runs.
       entity: entityChoice ? AP_ENTITY_CANONICAL[entityChoice] : "",
@@ -672,6 +706,29 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                 <p className="mt-2 text-xs text-ink-muted">{AP_VALIDATION.entityRequired}</p>
               ) : null}
               <p className="mt-2 text-xs text-ink-muted">{row ? 'ตามข้อมูลที่บันทึกไว้ เปลี่ยนได้' : creditors.length ? 'เลือกจากบิลล่าสุดให้แล้ว เปลี่ยนได้ตามบิลนี้' : 'เลือกโรงแรมที่ใช้บิลนี้'}</p>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-ink-muted" htmlFor="ap-bill-date">
+                {AP_FIELDS.billDate}
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={billDateInputRef}
+                  id="ap-bill-date"
+                  key={billDate}
+                  type="date"
+                  defaultValue={billDate}
+                  min={BILL_DATE_MIN}
+                  max={BILL_DATE_MAX}
+                  aria-describedby="ap-bill-date-hint"
+                  className="rounded-md border border-line-strong px-2 py-1.5 text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                />
+                {billDate && <span className="text-sm font-semibold text-ink">{isoToThaiLong(billDate)}</span>}
+              </div>
+              <p id="ap-bill-date-hint" className="mt-2 text-xs text-ink-muted">
+                {AP_FIELDS.billDateHint}
+              </p>
             </div>
 
             <div>

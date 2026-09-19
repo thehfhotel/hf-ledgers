@@ -80,6 +80,10 @@ export function reimbursementSyncStatus() {
 export function receiptToAp(r: SourceReceipt): ApRowInput {
   return { creditor: r.claimant.slice(0, 200), item: r.merchant.slice(0, 200), amountSatang: r.amountSatang,
     vatSatang: null, whtSatang: null, discountSatang: 0, dueDate: null,
+    // วันที่ลงบิล = the receipt's own purchase date (ADR-0001) — the day the
+    // thing was bought is the day the cost was incurred, whatever day the
+    // claim was submitted, synced or reimbursed on.
+    billDate: r.date,
     entity: r.property === 'hf-hotel' ? 'HF' : 'HF Ville', categoryCode: Object.hasOwn(CATEGORY_MAP, r.category) ? CATEGORY_MAP[r.category]! : null,
     note: `เบิกจ่าย ${r.bundleId}\nใบเสร็จ ${r.id}\nวันที่ซื้อ ${r.date}\nหมวดเดิม ${r.category}\n${r.note}`.slice(0, 4000) };
 }
@@ -126,7 +130,7 @@ export async function reconcileSnapshot(value: unknown, since: string, deps: Syn
           }
         })();
         const row = ap.getApRow(rowId)!;
-        deps.enqueue(row.filedDate.slice(0, 7));
+        deps.enqueue(row.billDate.slice(0, 7));
         if (r.status !== 'PAID' || row.payments.length) continue;
         if (!r.paymentMatchesReceipts) throw new Error('Paid request total differs from receipt total');
         if (!input.categoryCode) throw new Error('Receipt category needs an explicit mapping');
@@ -145,7 +149,7 @@ export async function reconcileSnapshot(value: unknown, since: string, deps: Syn
         }
         ap.addApPayment(rowId, { date: payment.date, amountSatang: payment.amountSatang, paymentMethod: 'bank',
           kind: 'full', installmentNumber: null, payerEmail: ACTOR, transactionId });
-        deps.enqueue(row.filedDate.slice(0, 7));
+        deps.enqueue(row.billDate.slice(0, 7));
         deps.enqueue(payment.date.slice(0, 7));
       } catch (error) {
         issues++;
@@ -167,7 +171,7 @@ export async function reconcileSnapshot(value: unknown, since: string, deps: Syn
         ap.deleteApRow(link.row_id);
         d.query('DELETE FROM _reimbursement_receipts WHERE receipt_id=?').run(link.receipt_id);
       })();
-      if (row) deps.enqueue(row.filedDate.slice(0, 7));
+      if (row) deps.enqueue(row.billDate.slice(0, 7));
     }
     meta('lastSuccess', new Date().toISOString());
     meta('error', issues ? `${issues} receipt(s) need review` : '');

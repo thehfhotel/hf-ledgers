@@ -11,6 +11,7 @@
     "entity": "HF",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -25,6 +26,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -39,6 +41,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-expedia",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -53,6 +56,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-expedia",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -67,6 +71,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -81,6 +86,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -95,6 +101,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -109,6 +116,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -123,6 +131,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -137,6 +146,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "housekeeping",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 1115000
   },
   {
@@ -151,6 +161,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "housekeeping",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -165,6 +176,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "housekeeping",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -179,6 +191,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -193,6 +206,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "supplies",
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 338000
   },
   {
@@ -207,6 +221,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": null,
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -221,6 +236,7 @@
     "entity": "HF",
     "categoryCode": null,
     "filedDate": "2026-07-31",
+    "billDate": "2026-07-31",
     "paidSatang": 0
   },
   {
@@ -235,6 +251,7 @@
     "entity": "รวมทุกโรงแรม",
     "categoryCode": "salary",
     "filedDate": "2026-08-04",
+    "billDate": "2026-07-31",
     "paidSatang": 17506274,
     "payroll": {
       "runId": "20260804061357-1tu5fp",
@@ -257,6 +274,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "other",
     "filedDate": "2026-08-18",
+    "billDate": "2026-08-18",
     "paidSatang": 3054700
   },
   {
@@ -271,6 +289,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-expedia",
     "filedDate": "2026-08-18",
+    "billDate": "2026-08-18",
     "paidSatang": 0
   },
   {
@@ -285,6 +304,7 @@
     "entity": "HF",
     "categoryCode": "commission-booking",
     "filedDate": "2026-08-18",
+    "billDate": "2026-08-18",
     "paidSatang": 0
   },
   {
@@ -299,6 +319,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-08-18",
+    "billDate": "2026-08-18",
     "paidSatang": 0
   },
   {
@@ -313,6 +334,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "housekeeping",
     "filedDate": "2026-08-18",
+    "billDate": "2026-08-18",
     "paidSatang": 0
   },
   {
@@ -327,6 +349,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "housekeeping",
     "filedDate": "2026-08-18",
+    "billDate": "2026-08-18",
     "paidSatang": 0
   },
   {
@@ -341,6 +364,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "housekeeping",
     "filedDate": "2026-08-18",
+    "billDate": "2026-08-18",
     "paidSatang": 0
   },
   {
@@ -355,6 +379,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-08-19",
+    "billDate": "2026-08-19",
     "paidSatang": 54320
   },
   {
@@ -369,6 +394,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-08-19",
+    "billDate": "2026-08-19",
     "paidSatang": 10200
   },
   {
@@ -383,6 +409,7 @@
     "entity": "บริษัท เอส ซี เอ็ม ทรานสปอร์ต จำกัด",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-08-19",
+    "billDate": "2026-08-19",
     "paidSatang": 40560
   },
   {
@@ -397,6 +424,7 @@
     "entity": "บริษัท เอส ซี เอ็ม ทรานสปอร์ต จำกัด",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-08-19",
+    "billDate": "2026-08-19",
     "paidSatang": 30056
   },
   {
@@ -411,6 +439,7 @@
     "entity": "",
     "categoryCode": "electricity-hopinn47",
     "filedDate": "2026-08-24",
+    "billDate": "2026-08-24",
     "paidSatang": 555217
   },
   {
@@ -425,6 +454,7 @@
     "entity": "",
     "categoryCode": "laundry",
     "filedDate": "2026-08-26",
+    "billDate": "2026-08-26",
     "paidSatang": 0
   },
   {
@@ -439,6 +469,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "housekeeping",
     "filedDate": "2026-08-29",
+    "billDate": "2026-08-29",
     "paidSatang": 0
   },
   {
@@ -453,6 +484,7 @@
     "entity": "บจก.สายชล เฮอริเทจ  HF",
     "categoryCode": "other",
     "filedDate": "2026-09-02",
+    "billDate": "2026-09-02",
     "paidSatang": 41650
   },
   {
@@ -467,6 +499,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "water-utility-saichon",
     "filedDate": "2026-09-02",
+    "billDate": "2026-09-02",
     "paidSatang": 801751
   },
   {
@@ -481,6 +514,7 @@
     "entity": "รวมทุกโรงแรม",
     "categoryCode": "salary",
     "filedDate": "2026-09-04",
+    "billDate": "2026-08-31",
     "paidSatang": 18159136,
     "payroll": {
       "runId": "20260904081017-banhb5",
@@ -503,6 +537,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "water-utility-saichon",
     "filedDate": "2026-09-05",
+    "billDate": "2026-09-05",
     "paidSatang": 76398
   },
   {
@@ -517,6 +552,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "water-utility-saichon",
     "filedDate": "2026-09-05",
+    "billDate": "2026-09-05",
     "paidSatang": 757560
   },
   {
@@ -531,6 +567,7 @@
     "entity": "HF Ville",
     "categoryCode": null,
     "filedDate": "2026-09-05",
+    "billDate": "2026-09-05",
     "paidSatang": 0
   },
   {
@@ -545,6 +582,7 @@
     "entity": "บจก.สายชล เฮอริเทจ  HF-VILLE",
     "categoryCode": "other",
     "filedDate": "2026-09-05",
+    "billDate": "2026-09-05",
     "paidSatang": 42420
   },
   {
@@ -559,6 +597,7 @@
     "entity": "HF",
     "categoryCode": "electricity-hopinn47",
     "filedDate": "2026-09-05",
+    "billDate": "2026-09-05",
     "paidSatang": 7414788
   },
   {
@@ -573,6 +612,7 @@
     "entity": "HF Ville",
     "categoryCode": "electricity-ville",
     "filedDate": "2026-09-05",
+    "billDate": "2026-09-05",
     "paidSatang": 0
   },
   {
@@ -587,6 +627,7 @@
     "entity": "HF Ville",
     "categoryCode": "commission-booking",
     "filedDate": "2026-09-07",
+    "billDate": "2026-09-07",
     "paidSatang": 0
   },
   {
@@ -601,6 +642,7 @@
     "entity": "HF",
     "categoryCode": "commission-booking",
     "filedDate": "2026-09-07",
+    "billDate": "2026-09-07",
     "paidSatang": 1613273
   },
   {
@@ -615,6 +657,7 @@
     "entity": "",
     "categoryCode": "social-security",
     "filedDate": "2026-09-07",
+    "billDate": "2026-09-07",
     "paidSatang": 1497600
   },
   {
@@ -629,6 +672,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "repair-appliance",
     "filedDate": "2026-09-09",
+    "billDate": "2026-09-09",
     "paidSatang": 0
   },
   {
@@ -643,6 +687,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "other",
     "filedDate": "2026-09-14",
+    "billDate": "2026-09-14",
     "paidSatang": 0
   },
   {
@@ -657,6 +702,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "other",
     "filedDate": "2026-09-16",
+    "billDate": "2026-09-16",
     "paidSatang": 4770
   },
   {
@@ -671,6 +717,7 @@
     "entity": "บจก.สายชล เฮอริเทจ",
     "categoryCode": "other",
     "filedDate": "2026-09-16",
+    "billDate": "2026-09-16",
     "paidSatang": 18000
   },
   {
@@ -685,6 +732,7 @@
     "entity": "HF Ville",
     "categoryCode": "salary",
     "filedDate": "2026-09-16",
+    "billDate": "2026-09-16",
     "paidSatang": 750000
   },
   {
@@ -699,6 +747,7 @@
     "entity": "HF",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-09-16",
+    "billDate": "2026-09-16",
     "paidSatang": 0
   },
   {
@@ -713,6 +762,7 @@
     "entity": "HF",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-09-16",
+    "billDate": "2026-09-16",
     "paidSatang": 0
   },
   {
@@ -727,6 +777,7 @@
     "entity": "HF",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-09-16",
+    "billDate": "2026-09-16",
     "paidSatang": 0
   },
   {
@@ -741,6 +792,7 @@
     "entity": "HF",
     "categoryCode": "phone-saichon",
     "filedDate": "2026-09-16",
+    "billDate": "2026-09-16",
     "paidSatang": 0
   }
 ]
